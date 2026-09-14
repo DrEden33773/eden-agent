@@ -161,8 +161,20 @@ async fn shell_reports_nonzero_exit_and_cwd_and_missing_shell() {
     assert_eq!(missing.error.unwrap().code, "ShellUnavailable");
 }
 
-// The shell and its background child inherit the socket; EOF is the cleanup
-// barrier and proves no living member retains it after cancellation or root exit.
+fn assert_closed(result: std::io::Result<usize>) {
+    match result {
+        Ok(0) => {}
+        // TerminateJobObject abruptly stops the peer: Winsock reports the
+        // observed WSAECONNRESET (10054), not necessarily graceful TCP EOF.
+        // Data, timeout, and every unrelated socket error still fail.
+        #[cfg(windows)]
+        Err(error) if error.raw_os_error() == Some(10054) => {}
+        other => panic!("owned connection did not close: {other:?}"),
+    }
+}
+
+// The shell and its background child inherit the socket; closure proves resource
+// release. Process settlement is enforced by the group/job exit barriers.
 #[tokio::test]
 async fn cancellation_stops_shell_descendants_before_completion() {
     let project = Project::new();
@@ -193,12 +205,10 @@ async fn cancellation_stops_shell_descendants_before_completion() {
         .unwrap();
     assert_eq!(result.error.unwrap().code, "Cancelled");
     let mut byte = [0u8; 1];
-    assert_eq!(
+    assert_closed(
         tokio::time::timeout(Duration::from_secs(5), socket.read(&mut byte))
             .await
-            .unwrap()
             .unwrap(),
-        0
     );
 }
 
@@ -239,12 +249,10 @@ async fn dropping_root_future_keeps_process_cleanup_owned_by_scope() {
     running.abort();
     assert!(running.await.unwrap_err().is_cancelled());
     cancellation.cancel();
-    assert_eq!(
+    assert_closed(
         tokio::time::timeout(Duration::from_secs(5), socket.read(&mut byte))
             .await
-            .unwrap()
             .unwrap(),
-        0
     );
 }
 

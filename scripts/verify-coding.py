@@ -242,7 +242,7 @@ class ArithmeticTests(unittest.TestCase):
         finally:
             partial.close()
 
-        for mode in ["queue", "cancel"]:
+        for mode in ["queue", "steering_only", "cancel"]:
             server = Server(lambda *_: answer("probe response"), gated=True)
             try:
                 config = configure(destination, composition, server, mode)
@@ -252,6 +252,10 @@ class ArithmeticTests(unittest.TestCase):
                     assert len(server.requests) == 3
                     text = json.dumps(server.requests[-1]["input"])
                     assert all(label in text for label in ["steer-one", "steer-two", "follow-one", "follow-two"])
+                elif mode == "steering_only":
+                    assert len(server.requests) == 3
+                    text = json.dumps(server.requests[-1]["input"])
+                    assert all(label in text for label in ["steer-one", "steer-two"])
                 else:
                     assert len(server.requests) == 1
             finally:

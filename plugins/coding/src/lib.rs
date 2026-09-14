@@ -216,7 +216,13 @@ async fn run(input: RunInput, cx: CallContext) -> Result<String, Fault> {
                 )
                 .await?;
             if entries.is_empty() {
-                return Ok(answer);
+                let queued: Vec<QueueEntry> = cx.call(QUEUE, &QueueRequest::Inspect).await?;
+                // An answer is also a turn boundary. Steering received during
+                // its provider request must not require an unrelated follow-up
+                // to keep the loop alive. Take it at the next loop boundary.
+                if !queued.iter().any(|entry| entry.kind == "steering") {
+                    return Ok(answer);
+                }
             }
         }
     }

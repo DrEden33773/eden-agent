@@ -49,6 +49,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("follow_up", "follow-one"),
         ("follow_up", "follow-two"),
     ] {
+        if args[4] == "steering_only" && kind == "follow_up" {
+            continue;
+        }
         accepted.push(
             session
                 .enqueue(kind, vec![Block::Text { text: text.into() }])
@@ -86,11 +89,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .filter(|r| r.kind == "queue_delivered")
             .map(|r| r.payload["id"].as_u64().unwrap())
             .collect();
-        assert_eq!(delivered.len(), 4);
-        for pair in [
-            (&accepted[0..2], "steering"),
-            (&accepted[2..4], "follow_up"),
-        ] {
+        assert_eq!(delivered.len(), accepted.len());
+        for pair in [(&accepted[0..2], "steering"), (&accepted[2..], "follow_up")] {
             assert_eq!(
                 records
                     .iter()

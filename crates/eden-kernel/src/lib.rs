@@ -1,4 +1,5 @@
 //! Native loading, explicit role selection and host-owned lifecycle.
+pub mod history;
 mod native;
 use cordis_core::{Context, Fork, Plugin, PreparedPlugin, Service};
 use eden_plugin_sdk::{
@@ -52,7 +53,19 @@ pub fn preflight(composition: &Composition) -> Result<(), Fault> {
             ));
         }
     }
-    for role in [p::AGENT_LOOP, p::CONTEXT, p::PROVIDER, p::TOOL] {
+    let required: &[&str] = if composition.roles.contains_key(p::coding::LOOP) {
+        &[
+            p::coding::LOOP,
+            p::coding::CONTEXT,
+            p::coding::PROVIDER,
+            p::coding::TOOL,
+            p::coding::STORE,
+            p::coding::QUEUE,
+        ]
+    } else {
+        &[p::AGENT_LOOP, p::CONTEXT, p::PROVIDER, p::TOOL]
+    };
+    for role in required.iter().copied() {
         if !composition.roles.contains_key(role) {
             return Err(Fault::new("MissingDependency", "composition", role));
         }
@@ -270,6 +283,7 @@ pub struct Kernel {
     token: usize,
     fork: Fork,
     instances: Vec<Arc<NativeInstance>>,
+    composition: Composition,
 }
 impl Kernel {
     pub async fn load(path: &Path, session_id: u64, events: Arc<Events>) -> Result<Self, Fault> {
@@ -356,6 +370,7 @@ impl Kernel {
         let instances: Vec<_> = packages.values().cloned().collect();
         let roles = composition
             .roles
+            .clone()
             .into_iter()
             .filter_map(|(role, name)| packages.get(&name).map(|instance| (role, instance.clone())))
             .collect();
@@ -383,7 +398,11 @@ impl Kernel {
             token,
             fork,
             instances,
+            composition,
         })
+    }
+    pub fn composition(&self) -> &Composition {
+        &self.composition
     }
     pub async fn invoke(&self, request: Request, cancel: Cancellation) -> Terminal {
         self.router.invoke(request, cancel).await

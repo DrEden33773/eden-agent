@@ -28,7 +28,7 @@ def package(name, roles, path, triple, config=None):
     return {"descriptor": {"package": name, "version": "0.1.0", "provides": roles}, "host": CONTRACT, "sdk": CONTRACT, "target": triple, "library": path, "config": config}
 
 
-def install(destination, profile="debug"):
+def install(destination, profile="debug", controlled=False):
     destination = pathlib.Path(destination).resolve()
     (destination / "bin").mkdir(parents=True, exist_ok=True)
     plugin_dir = destination / "plugins" / "standard" / "0.1.0"
@@ -36,10 +36,21 @@ def install(destination, profile="debug"):
     suffix = ".exe" if sys.platform == "win32" else ""
     shutil.copy2(ROOT / "target" / profile / ("eden" + suffix), destination / "bin" / ("eden" + suffix))
     name = library("eden_standard")
-    shutil.copy2(ROOT / "target" / profile / name, plugin_dir / name)
+    if controlled:
+        shutil.copy2(ROOT / "target" / profile / name, plugin_dir / name)
     for doc in ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"]:
         shutil.copy2(ROOT / doc, destination / doc)
     composition = {"packages": [package("standard", ROLES, f"plugins/standard/0.1.0/{name}", target())], "roles": {role: "standard" for role in ROLES}}
+    if not controlled:
+        defaults = [("coding", ["eden.coding-loop.v1", "eden.coding-context.v1", "eden.submission-queue.v1"]), ("coding-tools", ["eden.coding-tool.v1"]), ("model-access", ["eden.coding-provider.v1"]), ("local-history", ["eden.session-store.v1"])]
+        composition = {"packages": [], "roles": {}}
+        for pkg, roles in defaults:
+            lib = library("eden_" + pkg.replace("-", "_"))
+            relative = f"plugins/{pkg}/0.1.0/{lib}"
+            (destination / relative).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / "target" / profile / lib, destination / relative)
+            composition["packages"].append(package(pkg, roles, relative, target()))
+            composition["roles"].update({role: pkg for role in roles})
     (destination / "composition.json").write_text(json.dumps(composition, indent=2) + "\n", encoding="utf-8")
     bundle(ROOT, destination, target())
     return destination

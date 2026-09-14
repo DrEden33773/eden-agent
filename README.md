@@ -2,7 +2,7 @@
 
 A Rust coding agent built from replaceable native plugins.
 
-This development release runs a controlled in-memory agent loop through native context, provider and tool roles. External Rust authors can independently replace the loop and context without rebuilding the host. The included provider and echo tool are deterministic; they do not call a model service or modify your files.
+This development release executes coding tasks through native loop, context, provider, tool and history roles. The default combination uses OpenAI Responses, read/write/edit/bash and local JSONL history. Explicit model configuration and credentials are required; native roles are independently replaceable without rebuilding the host.
 
 ## Build and run
 
@@ -11,11 +11,11 @@ Install Rust via rustup and Python 3. The repository selects Rust 1.98.1; Python
 ```sh
 cargo build --workspace --locked
 python3 scripts/install.py artifacts/install
-artifacts/install/bin/eden --print hello
-artifacts/install/bin/eden --json hello
+artifacts/install/bin/eden --cwd /path/to/project --session /path/to/task.jsonl --print 'Inspect the project and run its tests.'
+artifacts/install/bin/eden --history /path/to/task.jsonl
 ```
 
-On Windows use `python` and `artifacts/install/bin/eden.exe`. The expected print result is `standard:hello => echo[standard:hello]`. You can invoke the installed executable from another working directory: its default composition resolves relative to the executable. Use `--composition PATH` to explicitly select another local composition.
+On Windows use `python` and `artifacts/install/bin/eden.exe`. Set an exact model in `OPENAI_MODEL` and a bearer credential in `OPENAI_API_KEY`; see [coding sessions](docs/coding.md) for configuration, attachments, resume, queues and tool behavior. You can invoke the installed executable from another working directory: its default composition resolves relative to the executable. Use `--composition PATH` to explicitly select another local composition.
 
 The installed directory contains `bin/eden`, `composition.json`, versioned native packages under `plugins/`, and license notices. Move or archive that directory as a unit. There is no global installation step or implicit download at startup.
 
@@ -39,9 +39,10 @@ pnpm rust:check
 pnpm clippy:check
 cargo test --workspace --locked
 python3 scripts/verify.py
+python3 scripts/verify-coding.py
 ```
 
-The native CI matrix runs these checks on Linux x86_64, Windows x86_64 and the actual macOS runner architecture. Its artifacts contain an installation archive and machine-readable verification results with the tested target and commit. These checks cover native loading and lifecycle, not interactive terminal behavior.
+The native CI matrix runs these checks on Linux x86_64, Windows x86_64 and the actual macOS runner architecture. Its artifacts contain an installation archive and machine-readable coding/native verification results with the tested target and commit. These checks cover native loading and lifecycle, not interactive terminal behavior.
 
 ## Contributions and license
 

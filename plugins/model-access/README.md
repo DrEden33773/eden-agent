@@ -1,0 +1,13 @@
+# Model access
+
+`model-access` supplies `eden.coding-provider.v1` through the ordinary native SDK. Its Cargo package is `eden-model-access`; build it with `cargo build -p eden-model-access --locked`.
+
+Configuration accepts `model`, `endpoint`, and `api_key_env`. `model` is an exact model identifier; if absent, `OPENAI_MODEL` is required. No model is chosen automatically. `endpoint` is a complete Responses URL. If absent, `OPENAI_BASE_URL` is an API base URL (for example, `https://api.openai.com/v1`), with `/responses` appended after stripping trailing slashes. The default base is `https://api.openai.com/v1`. `api_key_env` names an environment variable containing the bearer credential and defaults to `OPENAI_API_KEY`. Credentials are read only when a request starts and are never included in failure messages. Missing model or credentials produces `ProviderFailure`; package initialization does not require credentials.
+
+Each request sends `stream: true`, `store: false`, function definitions, message blocks, correlated tool results, and prior Responses reasoning state. Text, image data URLs, and file data URLs are projected from protocol blocks. Function definitions explicitly use `strict: false` to preserve their declared optional parameters. Models must support the supplied input modalities and function calling. The plugin preserves opaque reasoning output and requests `reasoning.encrypted_content` for subsequent stateless calls.
+
+`model_text_delta` and `model_tool_delta` are transient events whose payload includes the Responses event type, delta and any item/index identity supplied by the endpoint. Complete messages and calls are returned only after `response.completed` with complete output. A partial body, unsuccessful HTTP status, malformed stream, incomplete response, unsupported output, or invalid tool arguments returns `ProviderFailure`. HTTP and provider error bodies are not echoed. Requests do not follow redirects or perform application retries. Cancellation drops the call future and its response stream; no provider worker or connection pool survives the call.
+
+Run `cargo test -p eden-model-access --locked` for controlled loopback HTTP and byte-fragmentation tests. These establish request projection, streaming parsing, error handling and cancellation behavior; they do not establish credentialed model availability or real model task success.
+
+Protocol references: [Responses streaming](https://developers.openai.com/api/docs/guides/streaming-responses), [function calling](https://developers.openai.com/api/docs/guides/function-calling), [Responses request parameters](https://developers.openai.com/api/reference/resources/responses/methods/create), and [reqwest 0.13.5](https://docs.rs/crate/reqwest/0.13.5).

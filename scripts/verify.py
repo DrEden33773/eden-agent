@@ -29,7 +29,7 @@ def main():
     run(["cargo", "build", "-p", "eden-agent", "--examples", "--locked"], ROOT)
     artifacts = ROOT / "artifacts"
     artifacts.mkdir(exist_ok=True)
-    destination = install(artifacts / "install")
+    destination = install(artifacts / "install", controlled=True)
     suffix = ".exe" if sys.platform == "win32" else ""
     for example in ["embedded", "contract_probe", "initialization_probe"]:
         shutil.copy2(ROOT / "target/debug/examples" / (example + suffix), destination / "bin" / (example + suffix))
@@ -46,7 +46,7 @@ def main():
         for crate in ["eden-protocol", "eden-plugin-sdk"]:
             shutil.copytree(ROOT / "crates" / crate, sdk / "crates" / crate)
         manifest = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
-        manifest = manifest.replace('members = ["crates/*", "plugins/standard"]', 'members = ["crates/*"]')
+        manifest = manifest.replace('members = ["crates/*", "plugins/*"]', 'members = ["crates/*"]')
         manifest = "\n".join(line for line in manifest.splitlines() if not line.startswith("exclude =") and not line.startswith("eden-kernel =") and not line.startswith("eden-agent =")) + "\n"
         (sdk / "Cargo.toml").write_text(manifest, encoding="utf-8")
         shutil.copy2(ROOT / "rust-toolchain.toml", scratch / "rust-toolchain.toml")

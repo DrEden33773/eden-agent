@@ -26,4 +26,4 @@ The ordinary host shutdown path awaits run settlement, withdraws services and de
 
 ## Release scope
 
-This version provides an in-memory controlled run, native role selection and author validation. The controlled provider and tool make model input and tool-result flow reproducible without credentials or file modifications. Persistent history, actual providers, coding tools and terminal UI are subsequent product work.
+The default installation provides coding runs with OpenAI Responses, read/write/edit/bash, JSONL history, basic resume and queues through native roles. Model and credentials are explicitly configured. The controlled skeleton remains an isolated lifecycle regression composition. See [coding sessions](coding.md) for current behavior; complete session trees, broader Provider authentication and terminal UI are subsequent product work.

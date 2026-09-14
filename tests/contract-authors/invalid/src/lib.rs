@@ -33,10 +33,9 @@ mod valid_table {
         }
     }
     fn descriptor() -> Descriptor {
-        assert!(
-            !cfg!(feature = "metadata-panic"),
-            "deliberate metadata panic"
-        );
+        if cfg!(feature = "metadata-panic") {
+            panic!("deliberate metadata panic");
+        }
         Descriptor {
             package: "invalid".into(),
             version: "0.1.0".into(),
@@ -44,10 +43,9 @@ mod valid_table {
         }
     }
     fn create(_: Value) -> Result<Package, Fault> {
-        assert!(
-            !cfg!(feature = "init-panic"),
-            "deliberate initialization panic"
-        );
+        if cfg!(feature = "init-panic") {
+            panic!("deliberate initialization panic");
+        }
         Ok(Package::new("invalid").agent_loop(Invalid))
     }
     eden_plugin_sdk::export_plugin!(descriptor, create);

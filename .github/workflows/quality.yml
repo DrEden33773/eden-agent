@@ -20,7 +20,17 @@ jobs:
         with:
           python-version: '3.12'
       - name: Fixed Rust toolchain
-        run: rustup toolchain install 1.89.0 --profile minimal --component rustfmt --component clippy --no-self-update
+        shell: python
+        run: |
+          import pathlib
+          import subprocess
+          import tomllib
+
+          config = tomllib.loads(pathlib.Path("rust-toolchain.toml").read_text())["toolchain"]
+          command = ["rustup", "toolchain", "install", config["channel"], "--profile", config["profile"], "--no-self-update"]
+          for component in config["components"]:
+              command.extend(["--component", component])
+          subprocess.run(command, check=True)
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'

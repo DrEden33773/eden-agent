@@ -1,6 +1,6 @@
 # Contributing to eden-agent
 
-Use Rust 1.89.0 from rust-toolchain.toml. Product code and the SDK are Apache-2.0; preserve third-party notices when redistributing dependencies.
+Use Rust 1.98.1 from rust-toolchain.toml. Product code and the SDK are Apache-2.0; preserve third-party notices when redistributing dependencies.
 
 - Build with `cargo build --workspace --locked`.
 - Set up development tools with Node.js 22+, `pnpm install --frozen-lockfile`, and `pnpm hooks:install` after cloning. This installs hooks only for this repository; see [development checks](docs/development-checks.md).

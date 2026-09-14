@@ -4,29 +4,6 @@ The product is Apache-2.0. Dependencies retain their own licenses. Cargo.lock re
 
 ## Cordis
 
-Cordis core is distributed under MIT at revision `0a59b29d503c24a205242d3b67fec4c6ed69c240`.
+Cordis core is distributed under MIT. Cargo.lock selects crates.io package `cordis-core 0.1.3`, published from revision `fba0506191bfbc678d3646f338e42a94e0f6057b`.
 
-```text
-MIT License
-
-Copyright (c) 2026 dshbox contributors
-Copyright (c) 2024 Shigma
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
+The crates.io archive for 0.1.3 omits its license file. An unmodified copy is kept in `third-party/cordis-core-0.1.3-LICENSE` and packaged under `third-party-licenses/cordis-core-0.1.3/`, sourced from the [published revision's upstream LICENSE](https://github.com/dshbox/cordis-rs/blob/fba0506191bfbc678d3646f338e42a94e0f6057b/LICENSE). The packaging fallback applies only to this package version.

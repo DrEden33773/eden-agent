@@ -6,7 +6,7 @@ This development release runs a controlled in-memory agent loop through native c
 
 ## Build and run
 
-Install Rust via rustup and Python 3. The repository selects Rust 1.89.0; Python is only used for installation assembly and verification.
+Install Rust via rustup and Python 3. The repository selects Rust 1.98.1; Python is only used for installation assembly and verification.
 
 ```sh
 cargo build --workspace --locked

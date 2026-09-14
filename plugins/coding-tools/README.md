@@ -1,0 +1,20 @@
+# Coding tools
+
+The `coding-tools` native package provides `eden.coding-tool.v1`. Each request carries an existing absolute `cwd`, a `call_id`, a tool `name`, and an `arguments` object. Relative file paths resolve against that request's cwd. Absolute file paths remain absolute. File tools read and write UTF-8 text.
+
+| Tool | Arguments | Behavior |
+| --- | --- | --- |
+| `read` | `path`, optional `offset` and `limit` | Reads text starting at the one-based line offset, returning at most the requested number of lines. Offset and limit must be positive integers; an offset beyond the file is an error. |
+| `write` | `path`, `content` | Creates parent directories and writes the supplied text, replacing an existing file. |
+| `edit` | `path`, `old_text`, `new_text` | Replaces exactly one occurrence. Empty, absent, or ambiguous old text produces an error and leaves the file unchanged. Overlapping occurrences are also ambiguous. |
+| `bash` | `command` | Runs `bash --noprofile --norc -c` in the explicit cwd with closed stdin. Returns stdout, then a labeled stderr section, plus the shell exit code. |
+
+Tool failures are structured in `ToolResult.error`; a nonzero shell exit is `ShellExit` and retains its exit code and output. Returned text is limited to 65,536 UTF-8 bytes with `truncated: true` when shortened. Shell pipes continue draining after the limit so a verbose child cannot block completion. Stdout and stderr are captured separately; their original interleaving is not preserved.
+
+The package configuration accepts `{"bash":"/absolute/path/to/bash"}`. The default executable name is `bash`, resolved through the launch environment. Native Windows requires an installed Bash, such as Git for Windows; its path can be supplied through the same configuration. An unavailable executable returns `ShellUnavailable` with a concrete diagnosis.
+
+An SDK scope child owns the operation through cancellation and root-future destruction. The shell starts in a new POSIX process group, or starts suspended on Windows and joins a kill-on-close Job Object before its main thread resumes. Cancellation stops that process group or job; foreground shell completion also stops remaining background members before the tool finishes. Windows cleanup waits for remaining member process handles and confirms empty job membership. POSIX cleanup registers process-exit observers before group termination, reaps the direct shell, and waits for every observed live member to exit, including descendants with closed standard streams. Linux uses [pidfds](https://man7.org/linux/man-pages/man2/pidfd_open.2.html) and requires Linux 5.3 or newer; macOS uses [kqueue process-exit notifications](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/kevent.2.html). A final group enumeration covers descendants created during the initial snapshot; exit-observer failures are explicit cleanup failures. Deliberately detached POSIX sessions are outside this process-group ownership; these tools are not a sandbox.
+
+The Windows implementation uses documented [job membership](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-assignprocesstojobobject), [job termination](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-terminatejobobject), and [thread resume](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-resumethread) APIs. It does not rely on guaranteed delivery of job completion-port notifications, which [Microsoft explicitly does not guarantee](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_associate_completion_port).
+
+Run `cargo test -p eden-coding-tools` for file behavior, bounded output, shell failures, real descendant cancellation, and root-future destruction checks. Process tests require Bash and loopback networking. Cross-compilation checks Windows source compatibility; the same tests must run on a native Windows runner for execution evidence.

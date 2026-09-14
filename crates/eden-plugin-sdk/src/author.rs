@@ -187,6 +187,26 @@ impl Package {
         self.handlers.insert(role.into(), handler);
         self
     }
+    /// Register an explicitly versioned role with typed, serialized payloads.
+    pub fn service<I, O, F, Fut>(self, contract: &str, handler: F) -> Self
+    where
+        I: DeserializeOwned + Send + 'static,
+        O: Serialize + Send + 'static,
+        F: Fn(I, CallContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<O, Fault>> + Send + 'static,
+    {
+        let handler = Arc::new(handler);
+        self.add(
+            contract,
+            Arc::new(move |input, context| {
+                let handler = handler.clone();
+                Box::pin(async move {
+                    let input = serde_json::from_value(input).map_err(serialization)?;
+                    serde_json::to_value(handler(input, context).await?).map_err(serialization)
+                })
+            }),
+        )
+    }
     pub fn agent_loop(self, role: impl AgentLoop) -> Self {
         let role = Arc::new(role);
         self.add(

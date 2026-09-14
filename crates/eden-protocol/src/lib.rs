@@ -129,3 +129,6 @@ pub enum ModelReply {
     ToolCall(String),
     Answer(String),
 }
+
+/// Public coding and persistence protocols.
+pub mod coding;

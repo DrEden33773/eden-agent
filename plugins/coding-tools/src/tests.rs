@@ -1,0 +1,347 @@
+use super::*;
+use eden_plugin_sdk::serde_json::{Value, json};
+use std::{
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
+
+struct Project(PathBuf);
+impl Project {
+    fn new() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "eden-tools-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+    fn request(&self, name: &str, arguments: Value) -> ToolRequest {
+        ToolRequest {
+            cwd: self.0.to_str().unwrap().into(),
+            call_id: "test".into(),
+            name: name.into(),
+            arguments,
+        }
+    }
+    async fn run(&self, name: &str, arguments: Value) -> ToolResult {
+        execute(
+            self.request(name, arguments),
+            Scope::default(),
+            "bash".into(),
+        )
+        .await
+        .unwrap()
+    }
+}
+impl Drop for Project {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[tokio::test]
+async fn write_edit_and_read_use_explicit_cwd_and_utf8_line_ranges() {
+    let project = Project::new();
+    assert!(
+        project
+            .run(
+                "write",
+                json!({"path":"nested/example.txt", "content":"一\nsecond\n三\n"})
+            )
+            .await
+            .error
+            .is_none()
+    );
+    assert!(
+        project
+            .run(
+                "edit",
+                json!({"path":"nested/example.txt", "old_text":"second", "new_text":"二"})
+            )
+            .await
+            .error
+            .is_none()
+    );
+    let result = project
+        .run(
+            "read",
+            json!({"path":"nested/example.txt", "offset":2,"limit":1}),
+        )
+        .await;
+    assert_eq!(result.text, "二\n");
+    assert!(!result.truncated);
+    assert_eq!(
+        std::fs::read_to_string(project.0.join("nested/example.txt")).unwrap(),
+        "一\n二\n三\n"
+    );
+}
+
+#[tokio::test]
+async fn exact_edit_rejects_zero_multiple_and_empty_matches_without_writing() {
+    let project = Project::new();
+    std::fs::write(project.0.join("file"), "aba aba").unwrap();
+    for old in ["missing", "aba", ""] {
+        let result = project
+            .run(
+                "edit",
+                json!({"path":"file", "old_text":old, "new_text":"lost"}),
+            )
+            .await;
+        assert!(result.error.is_some(), "old={old}");
+        assert_eq!(
+            std::fs::read_to_string(project.0.join("file")).unwrap(),
+            "aba aba"
+        );
+    }
+}
+
+#[tokio::test]
+async fn invalid_encoding_and_ranges_are_explicit_errors() {
+    let project = Project::new();
+    std::fs::write(project.0.join("binary"), [0xff, 0xfe]).unwrap();
+    assert!(
+        project
+            .run("read", json!({"path":"binary"}))
+            .await
+            .error
+            .is_some()
+    );
+    std::fs::write(project.0.join("text"), "one\ntwo").unwrap();
+    for range in [
+        json!({"offset":0}),
+        json!({"offset":8}),
+        json!({"limit":0}),
+        json!({"offset":-1}),
+    ] {
+        let mut args = range;
+        args["path"] = json!("text");
+        assert!(project.run("read", args).await.error.is_some());
+    }
+}
+
+#[tokio::test]
+async fn long_read_and_shell_output_are_bounded_with_explicit_truncation() {
+    let project = Project::new();
+    std::fs::write(project.0.join("long"), "界".repeat(50_000)).unwrap();
+    let read = project.run("read", json!({"path":"long"})).await;
+    assert!(read.truncated);
+    assert!(read.text.len() <= 65_536);
+    let shell = project
+        .run("bash", json!({"command":"printf '%100000s' x"}))
+        .await;
+    assert!(shell.truncated, "{shell:?}");
+    assert!(shell.text.len() <= 65_536);
+    assert_eq!(shell.exit_code, Some(0));
+}
+
+#[tokio::test]
+async fn shell_reports_nonzero_exit_and_cwd_and_missing_shell() {
+    let project = Project::new();
+    std::fs::write(project.0.join("marker"), "cwd-right").unwrap();
+    let result = project
+        .run(
+            "bash",
+            json!({"command":"cat marker; printf error >&2; exit 7"}),
+        )
+        .await;
+    assert_eq!(result.exit_code, Some(7));
+    assert!(result.text.contains("cwd-right"));
+    assert!(result.text.contains("error"));
+    assert!(result.error.is_some());
+    let missing = execute(
+        project.request("bash", json!({"command":"echo bad"})),
+        Scope::default(),
+        project.0.join("absent-shell").to_str().unwrap().into(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(missing.error.unwrap().code, "ShellUnavailable");
+}
+
+// The shell and its background child inherit the socket; EOF is the cleanup
+// barrier and proves no living member retains it after cancellation or root exit.
+#[tokio::test]
+async fn cancellation_stops_shell_descendants_before_completion() {
+    let project = Project::new();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let command = format!("exec 3<>/dev/tcp/127.0.0.1/{port}; sleep 300 & printf R >&3; wait");
+    let scope = Scope::default();
+    let cancel = scope.cancellation();
+    let request = project.request("bash", json!({"command":command}));
+    let running = tokio::spawn(execute(request, scope, "bash".into()));
+    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    // Readiness emitted after the descendant starts, not merely after parent spawn.
+    use tokio::io::AsyncReadExt;
+    let mut ready = [0u8; 1];
+    tokio::time::timeout(Duration::from_secs(5), socket.read_exact(&mut ready))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ready, *b"R");
+    cancel.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(10), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.error.unwrap().code, "Cancelled");
+    let mut byte = [0u8; 1];
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), socket.read(&mut byte))
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn normal_shell_exit_also_cleans_background_descendants() {
+    let project = Project::new();
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        project.run("bash", json!({"command":"sleep 300 & echo ready; exit 0"})),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.exit_code, Some(0));
+    assert!(result.text.contains("ready"));
+}
+
+#[tokio::test]
+async fn dropping_root_future_keeps_process_cleanup_owned_by_scope() {
+    let project = Project::new();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let command = format!("exec 3<>/dev/tcp/127.0.0.1/{port}; sleep 300 & printf R >&3; wait");
+    let scope = Scope::default();
+    let cancellation = scope.cancellation();
+    let request = project.request("bash", json!({"command":command}));
+    let running = tokio::spawn(execute(request, scope, "bash".into()));
+    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    use tokio::io::AsyncReadExt;
+    let mut byte = [0u8; 1];
+    tokio::time::timeout(Duration::from_secs(5), socket.read_exact(&mut byte))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(byte, *b"R");
+    running.abort();
+    assert!(running.await.unwrap_err().is_cancelled());
+    cancellation.cancel();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), socket.read(&mut byte))
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn invalid_cwd_is_rejected_before_file_side_effects() {
+    let project = Project::new();
+    let mut request = project.request(
+        "write",
+        json!({"path":project.0.join("absent"),"content":"wrong"}),
+    );
+    request.cwd = ".".into();
+    assert_eq!(
+        execute(request, Scope::default(), "bash".into())
+            .await
+            .unwrap()
+            .error
+            .unwrap()
+            .code,
+        "InvalidInput"
+    );
+    assert!(!project.0.join("absent").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelled_descendant_with_closed_stdio_has_exited_before_result() {
+    let project = Project::new();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let command = format!(
+        "(exec 1>&- 2>&-; exec 3<>/dev/tcp/127.0.0.1/{port}; printf R >&3; exec sleep 300) & wait"
+    );
+    let scope = Scope::default();
+    let cancellation = scope.cancellation();
+    let task = tokio::spawn(execute(
+        project.request("bash", json!({"command":command})),
+        scope,
+        "bash".into(),
+    ));
+    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    use tokio::io::AsyncReadExt;
+    let mut byte = [0; 1];
+    tokio::time::timeout(Duration::from_secs(5), socket.read_exact(&mut byte))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(byte, *b"R");
+    cancellation.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.error.unwrap().code, "Cancelled");
+    // Use the socket's nonblocking OS read directly: waiting here would let a
+    // premature tool result hide behind a later descendant exit.
+    let socket = socket.into_std().unwrap();
+    use std::io::Read;
+    assert_eq!((&socket).read(&mut byte).unwrap(), 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn foreground_exit_waits_for_descendant_that_closed_stdio() {
+    let project = Project::new();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let command = format!(
+        "mkfifo ready; (exec 1>&- 2>&-; exec 3<>/dev/tcp/127.0.0.1/{port}; printf R >&3; echo ready >ready; exec sleep 300) & read line <ready; exit 0"
+    );
+    let task = tokio::spawn(execute(
+        project.request("bash", json!({"command":command})),
+        Scope::default(),
+        "bash".into(),
+    ));
+    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    use tokio::io::AsyncReadExt;
+    let mut byte = [0; 1];
+    tokio::time::timeout(Duration::from_secs(5), socket.read_exact(&mut byte))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(byte, *b"R");
+    let result = tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.exit_code, Some(0));
+    assert!(result.error.is_none(), "{result:?}");
+    let socket = socket.into_std().unwrap();
+    use std::io::Read;
+    assert_eq!((&socket).read(&mut byte).unwrap(), 0);
+}

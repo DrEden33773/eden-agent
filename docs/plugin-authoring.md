@@ -11,9 +11,17 @@ cargo build --manifest-path tests/contract-authors/loop-a/Cargo.toml --locked
 cargo build --manifest-path tests/contract-authors/context-b/Cargo.toml --locked
 ```
 
-Each sample declares its own Cargo workspace and lockfile. A new author project declares a `cdylib` library and a path dependency on the matching SDK. Implement `AgentLoop`, `ContextStrategy`, `ModelProvider` or `Tool` with ordinary Rust async methods; register implementations with `Package`. Use `export_plugin!(descriptor, create)` to generate the C ABI adapter. The descriptor's role list must match the package's registered roles and order.
+Each sample declares its own Cargo workspace and lockfile. A new author project declares a `cdylib` library and a path dependency on the matching SDK. For the default coding combination, register typed async handlers with `Package::service` using the constants and payloads in `eden_protocol::coding`, and call selected roles through `cx.call`. The original `AgentLoop`, `ContextStrategy`, `ModelProvider` and `Tool` traits describe the controlled skeleton used by the native regression tests. Use `export_plugin!(descriptor, create)` to generate the C ABI adapter. The descriptor's role list must match the package's registered roles and order.
 
 For example, the loop calls `cx.context(&input).await`, `cx.model(&model_input).await`, and `cx.tool(argument).await` through host-selected services. It chooses their order. A context implementation returns `ModelInput`; its text reaches the provider unchanged by the kernel. Multiple roles in one package remain independently selectable.
+
+## Coding role contracts
+
+The default roles are `eden.coding-loop.v1`, `eden.coding-context.v1`, `eden.coding-provider.v1`, `eden.coding-tool.v1`, `eden.session-store.v1` and `eden.submission-queue.v1`. `RunInput` carries cwd and owned multimodal blocks; the context maps `ContextInput` to `ModelInput`; a provider maps that input to complete `ModelReply` items while optionally emitting transient deltas. The tool receives `ToolRequest` and returns structured `ToolResult`. Storage accepts `StoreRequest` and returns `StoreReply` only after local public commit. See [coding sessions](coding.md) for ordering, recovery and queue semantics.
+
+`Package::service` infers serialized input/output types from a handler, for example `Package::new("my-context").service(eden_plugin_sdk::protocol::coding::CONTEXT, project)`, where `project(input: ContextInput, cx: CallContext)` returns `Result<ModelInput, Fault>` asynchronously. Native memory ownership and scope cleanup are identical to the original role facades. Only one selected implementation supplies each role; adding an implementation does not alter the host.
+
+The [coding replacement author](../tests/contract-authors/coding-replacements) independently replaces provider, context, tool and storage. Build it with its own manifest and lockfile. The installed coding verifier checks downstream requests, real tool results and independent readability of the replacement store's local history after unloading that composition.
 
 ## Install and select
 

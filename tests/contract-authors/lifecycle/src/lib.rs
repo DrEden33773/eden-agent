@@ -10,7 +10,12 @@ impl AgentLoop for Lifecycle {
         root.write_all(b"root\n").await.map_err(io)?;
         let address = self.address.clone();
         let cleanup_error = self.mode == "cleanup_error";
+        let child_finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cleanup_observation = child_finished.clone();
         cx.scope.cleanup(async move {
+            if !cleanup_observation.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(Fault::new("CleanupFailure", "child-barrier", "cleanup started before child completion"));
+            }
             let mut stream = TcpStream::connect(address).await.map_err(io)?;
             stream.write_all(b"cleanup\n").await.map_err(io)?;
             let mut release = [0]; stream.read_exact(&mut release).await.map_err(io)?;
@@ -28,6 +33,8 @@ impl AgentLoop for Lifecycle {
             child.write_all(b"child-stopping\n").await.map_err(io)?;
             child.read_exact(&mut [0]).await.map_err(io)?;
             child.write_all(b"child-stopped\n").await.map_err(io)?;
+            drop(child);
+            child_finished.store(true, std::sync::atomic::Ordering::Release);
             Ok(())
         })?;
         started_rx.await.map_err(|_| Fault::new("Unavailable", "child", "child did not start"))?;

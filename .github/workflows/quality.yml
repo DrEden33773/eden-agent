@@ -1,0 +1,53 @@
+name: Native quality
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  native:
+    name: Native (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Fixed Rust toolchain
+        run: rustup toolchain install 1.89.0 --profile minimal --component rustfmt --component clippy --no-self-update
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Core tests
+        run: cargo test --workspace --locked
+      - name: Installed native contracts and independent authors
+        run: python scripts/verify.py
+      - name: Assemble distribution
+        run: python scripts/install.py artifacts/distribution
+      - name: Package installed layout
+        shell: bash
+        run: tar -czf artifacts/eden-${{ runner.os }}-${{ runner.arch }}.tar.gz -C artifacts/distribution .
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            artifacts/verification.json
+            artifacts/eden-*.tar.gz
+          if-no-files-found: error
+  quality:
+    name: Quality
+    if: always()
+    needs: native
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require all native platforms
+        env:
+          NATIVE_RESULT: ${{ needs.native.result }}
+        run: test "$NATIVE_RESULT" = success

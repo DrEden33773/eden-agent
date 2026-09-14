@@ -137,6 +137,7 @@ async fn streams_unicode_and_complete_multiple_calls_and_projects_all_input() {
         "explicit-model",
         "test-secret",
         &input,
+        &RequestOptions::default(),
         |kind, payload| {
             deltas.push((kind.to_owned(), payload));
             Ok(())
@@ -206,6 +207,7 @@ async fn partial_and_failed_streams_never_become_success_or_leak_server_secrets(
             "explicit-model",
             "test-secret",
             &input(),
+            &RequestOptions::default(),
             |_, _| Ok(()),
         )
         .await
@@ -224,6 +226,7 @@ async fn http_failure_is_structured_without_echoing_response_body() {
         "explicit-model",
         "test-secret",
         &input(),
+        &RequestOptions::default(),
         |_, _| Ok(()),
     )
     .await
@@ -264,6 +267,7 @@ async fn cancelling_inflight_request_closes_its_socket() {
             "explicit-model",
             "test-secret",
             &input(),
+            &RequestOptions::default(),
             move |kind, _| {
                 if kind == "model_text_delta"
                     && let Some(sender) = ready_tx.take()
@@ -311,8 +315,14 @@ fn sse_rejects_invalid_utf8_and_output_rejects_duplicate_or_partial_calls() {
         "ProviderFailure"
     );
     let call = json!({"type":"function_call","call_id":"c","name":"read","arguments":"{}"});
-    assert!(wire::completed(&json!({"status":"completed","output":[call,call]})).is_err());
-    assert!(wire::completed(&json!({"status":"completed","output":[{"type":"function_call","status":"in_progress","call_id":"c","name":"read","arguments":"{}"}]})).is_err());
+    assert!(
+        wire::completed(
+            &json!({"status":"completed","output":[call,call]}),
+            Profile::Openai
+        )
+        .is_err()
+    );
+    assert!(wire::completed(&json!({"status":"completed","output":[{"type":"function_call","status":"in_progress","call_id":"c","name":"read","arguments":"{}"}]}), Profile::Openai).is_err());
 }
 
 #[tokio::test]
@@ -327,10 +337,246 @@ async fn output_item_done_is_not_response_completion() {
             "explicit-model",
             "test-secret",
             &input(),
+            &RequestOptions::default(),
             |_, _| Ok(())
         )
         .await
         .is_err()
     );
     server.await.unwrap();
+}
+
+fn configured(value: Value, env: &[(&str, &str)]) -> Result<Settings, Fault> {
+    let config: Config = serde_json::from_value(value).unwrap();
+    config.settings_with(|key| {
+        env.iter()
+            .find(|(name, _)| *name == key)
+            .map(|(_, value)| (*value).to_owned())
+    })
+}
+
+#[test]
+fn profiles_resolve_explicit_config_before_environment_without_implicit_model() {
+    let env = [
+        ("EDEN_RESPONSES_PROFILE", "deepseek"),
+        ("OPENAI_MODEL", "deepseek-flash"),
+        ("OPENAI_BASE_URL", "https://api.deepseek.com/"),
+        ("EDEN_API_KEY_ENV", "DEEPSEEK_API_KEY"),
+        ("DEEPSEEK_API_KEY", "controlled-key"),
+    ];
+    let settings = configured(json!({}), &env).unwrap();
+    assert_eq!(settings.model, "deepseek-flash");
+    assert_eq!(settings.endpoint, "https://api.deepseek.com/responses");
+    assert_eq!(settings.key, "controlled-key");
+    let body = wire::project(&input(), &settings.model, &settings.options).unwrap();
+    assert_eq!(body["max_output_tokens"], 393216);
+    assert_eq!(body["reasoning"]["effort"], "high");
+    assert!(body.get("include").is_none());
+    assert!(body.get("store").is_none());
+    assert!(body.get("max_tool_calls").is_none());
+    let settings = configured(json!({"profile":"openai","model":"explicit","endpoint":"http://localhost/responses","api_key_env":"LOCAL_KEY","max_output_tokens":12345,"reasoning_effort":"low"}), &[
+        ("EDEN_RESPONSES_PROFILE", "invalid"), ("EDEN_API_KEY_ENV", "absent"),
+        ("OPENAI_MAX_OUTPUT_TOKENS", "invalid"), ("OPENAI_REASONING_EFFORT", "high"),
+        ("LOCAL_KEY", "local-key"),
+    ]).unwrap();
+    assert_eq!(settings.model, "explicit");
+    assert_eq!(settings.endpoint, "http://localhost/responses");
+    assert_eq!(settings.key, "local-key");
+    let body = wire::project(&input(), &settings.model, &settings.options).unwrap();
+    assert_eq!(body["max_output_tokens"], 12345);
+    assert_eq!(body["reasoning"]["effort"], "low");
+    assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+    assert_eq!(body["store"], false);
+    assert!(configured(json!({"profile":"deepseek"}), &[("OPENAI_API_KEY", "key")]).is_err());
+}
+
+#[test]
+fn legacy_defaults_and_invalid_settings_remain_explicit() {
+    let base = [("OPENAI_MODEL", "legacy"), ("OPENAI_API_KEY", "key")];
+    let settings = configured(json!({}), &base).unwrap();
+    assert_eq!(settings.endpoint, "https://api.openai.com/v1/responses");
+    let body = wire::project(&input(), &settings.model, &settings.options).unwrap();
+    assert!(body.get("max_output_tokens").is_none());
+    assert!(body.get("reasoning").is_none());
+    for extra in [
+        ("EDEN_RESPONSES_PROFILE", "unknown"),
+        ("OPENAI_MAX_OUTPUT_TOKENS", "oops"),
+        ("OPENAI_MAX_OUTPUT_TOKENS", "0"),
+        ("OPENAI_REASONING_EFFORT", ""),
+    ] {
+        let mut env = base.to_vec();
+        env.push(extra);
+        assert!(configured(json!({}), &env).is_err());
+    }
+    let settings = configured(
+        json!({"profile":"deepseek"}),
+        &[
+            ("OPENAI_MODEL", "deepseek-flash"),
+            ("OPENAI_API_KEY", "key"),
+            ("OPENAI_MAX_OUTPUT_TOKENS", "393216"),
+            ("OPENAI_REASONING_EFFORT", "none"),
+        ],
+    )
+    .unwrap();
+    let body = wire::project(&input(), &settings.model, &settings.options).unwrap();
+    assert_eq!(body["max_output_tokens"], 393216);
+    assert_eq!(body["reasoning"]["effort"], "none");
+}
+
+#[tokio::test]
+async fn deepseek_reasoning_and_tool_result_roundtrip_preserves_images_and_full_output_budget() {
+    let reasoning = json!({"type":"reasoning","id":"rs_deepseek","summary":[],"content":[{"type":"reasoning_text","text":"inspect the source"}]});
+    let body = event(
+        json!({"type":"response.reasoning_text.delta","delta":"inspect","item_id":"rs_deepseek","output_index":0}),
+    ) + &complete(json!([
+        reasoning, {"type":"function_call","call_id":"read_1","name":"read","arguments":"{\"path\":\"main.rs\"}"}
+    ]));
+    let (endpoint, first_server) = server("200 OK", body).await;
+    let settings = configured(
+        json!({"profile":"deepseek","model":"deepseek-flash","endpoint":endpoint}),
+        &[("OPENAI_API_KEY", "deepseek-key")],
+    )
+    .unwrap();
+    let mut conversation = ModelInput {
+        items: vec![Item::Message {
+            role: "user".into(),
+            content: vec![Block::Image {
+                media_type: "image/png".into(),
+                data: "YWJj".into(),
+            }],
+        }],
+        tools: vec![ToolDefinition {
+            name: "read".into(),
+            description: "read source".into(),
+            parameters: json!({"type":"object","properties":{"path":{"type":"string"}}}),
+        }],
+    };
+    let mut emitted = Vec::new();
+    let reply = request(
+        &settings.endpoint,
+        &settings.model,
+        &settings.key,
+        &conversation,
+        &settings.options,
+        |kind, payload| {
+            emitted.push((kind.to_owned(), payload));
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(emitted[0].0, "model_reasoning_delta");
+    assert_eq!(emitted[0].1["item_id"], "rs_deepseek");
+    assert_eq!(
+        reply.items[0],
+        Item::ProviderState {
+            provider: "deepseek-responses".into(),
+            value: reasoning.clone()
+        }
+    );
+    let (headers, first_body) = first_server.await.unwrap();
+    assert!(
+        headers
+            .to_lowercase()
+            .contains("authorization: bearer deepseek-key")
+    );
+    assert_eq!(first_body["max_output_tokens"], 393216);
+    assert_eq!(
+        first_body["input"][0]["content"][0]["image_url"],
+        "data:image/png;base64,YWJj"
+    );
+    // The next provider call receives the exact durable protocol items and correlated tool result.
+    conversation.items.extend(reply.items);
+    conversation.items.push(Item::ToolResult {
+        call_id: "read_1".into(),
+        result: ToolResult {
+            text: "fn main() {}".into(),
+            exit_code: Some(0),
+            truncated: false,
+            error: None,
+        },
+    });
+    let (endpoint, second_server) = server("200 OK",complete(json!([{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}]))).await;
+    let reply = request(
+        &endpoint,
+        &settings.model,
+        &settings.key,
+        &conversation,
+        &settings.options,
+        |_, _| Ok(()),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(&reply.items[0], Item::Message { .. }));
+    let (_, second_body) = second_server.await.unwrap();
+    assert_eq!(second_body["input"][1], reasoning);
+    assert_eq!(second_body["input"][2]["call_id"], "read_1");
+    assert_eq!(second_body["input"][3]["call_id"], "read_1");
+    assert_eq!(second_body["input"][3]["type"], "function_call_output");
+    assert_eq!(second_body["max_output_tokens"], 393216);
+    assert!(wire::project(&conversation, "openai", &RequestOptions::default()).is_err());
+    let mut legacy = input();
+    legacy.items.push(Item::ProviderState {
+        provider: "openai-responses".into(),
+        value: json!({"type":"reasoning","encrypted_content":"opaque"}),
+    });
+    assert!(wire::project(&legacy, "deepseek-flash", &settings.options).is_err());
+}
+
+#[tokio::test]
+async fn deepseek_file_input_is_rejected_before_endpoint_or_network_access() {
+    let settings = configured(
+        json!({"profile":"deepseek","model":"deepseek-flash","endpoint":"invalid URL"}),
+        &[("OPENAI_API_KEY", "key")],
+    )
+    .unwrap();
+    let mut input = input();
+    input.items.push(Item::Message {
+        role: "user".into(),
+        content: vec![Block::File {
+            name: "task.pdf".into(),
+            media_type: "application/pdf".into(),
+            data: "YWJj".into(),
+        }],
+    });
+    let fault = request(
+        &settings.endpoint,
+        &settings.model,
+        &settings.key,
+        &input,
+        &settings.options,
+        |_, _| Ok(()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        fault.message,
+        "DeepSeek Responses does not support file input; use text or images"
+    );
+}
+
+#[tokio::test]
+async fn deepseek_http_error_returns_first_failure_without_retrying() {
+    let (endpoint, server) = server("429 Too Many Requests", "private error detail".into()).await;
+    let settings = configured(
+        json!({"profile":"deepseek","model":"deepseek-flash","endpoint":endpoint}),
+        &[("OPENAI_API_KEY", "key")],
+    )
+    .unwrap();
+    let fault = request(
+        &settings.endpoint,
+        &settings.model,
+        &settings.key,
+        &input(),
+        &settings.options,
+        |_, _| Ok(()),
+    )
+    .await
+    .unwrap_err();
+    // This server closes its listener after the first request. A retry would replace
+    // this exact HTTP failure with a transport error, or leave the request pending.
+    assert_eq!(fault.message, "Responses HTTP status 429");
+    let (_, body) = server.await.unwrap();
+    assert_eq!(body["max_output_tokens"], 393216);
+    assert!(body.get("max_tool_calls").is_none());
 }

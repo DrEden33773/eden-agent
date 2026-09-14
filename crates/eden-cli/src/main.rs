@@ -3,9 +3,8 @@ use eden_agent::{Outcome, Session, SessionOptions};
 use eden_protocol::coding::{Block, LOOP};
 use std::path::PathBuf;
 
-#[tokio::main]
-async fn main() {
-    match run().await {
+fn main() {
+    match startup() {
         Ok(code) => std::process::exit(code),
         Err(error) => {
             eprintln!("{error}");
@@ -13,7 +12,24 @@ async fn main() {
         }
     }
 }
-async fn run() -> Result<i32, Box<dyn std::error::Error>> {
+fn startup() -> Result<i32, Box<dyn std::error::Error>> {
+    let prepared = eden_cli::environment::prepare(std::env::args().skip(1).collect(), |key| {
+        std::env::var_os(key)
+    })?;
+    for (key, value) in prepared.environment {
+        // SAFETY: This synchronous process entry runs before constructing Tokio
+        // or loading native plugins; no application threads have been started.
+        // The parser validates NUL/equal restrictions before any mutation.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(run(prepared.args))
+}
+async fn run(args: Vec<String>) -> Result<i32, Box<dyn std::error::Error>> {
     let mut composition = None;
     let mut json = false;
     let mut prompt = None;
@@ -22,7 +38,7 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
     let mut memory = false;
     let mut attachments = vec![];
     let mut inspect = None;
-    let mut args = std::env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--composition" => {
@@ -51,7 +67,7 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
             }
             "--help" => {
                 println!(
-                    "eden [--composition PATH] [--cwd DIR] [--session PATH|--no-session] [--print|--json] [--attach TEXT|--image IMAGE|--file PDF] PROMPT\neden --history PATH\nExplicit model and credentials are required by the default Responses provider."
+                    "eden [--env-file PATH] [--composition PATH] [--cwd DIR] [--session PATH|--no-session] [--print|--json] [--attach TEXT|--image IMAGE|--file PDF] PROMPT\neden --history PATH\nExplicit model and credentials are required by the default Responses provider."
                 );
                 return Ok(0);
             }

@@ -4,3 +4,8 @@
 __pycache__/
 
 /node_modules/
+
+# Local configuration and credentials; commit examples only.
+.env
+.env.*
+!.env.example

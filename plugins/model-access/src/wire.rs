@@ -1,3 +1,4 @@
+use super::{Profile, RequestOptions};
 use eden_protocol::{
     Fault,
     coding::{Block, Item, ModelInput, ModelReply},
@@ -8,7 +9,11 @@ pub(crate) const STATE: &str = "openai-responses";
 pub(crate) fn failure(message: impl Into<String>) -> Fault {
     Fault::new("ProviderFailure", "model-access", message)
 }
-pub(crate) fn project(input: &ModelInput, model: &str) -> Result<Value, Fault> {
+pub(crate) fn project(
+    input: &ModelInput,
+    model: &str,
+    options: &RequestOptions,
+) -> Result<Value, Fault> {
     let items = input.items.iter().map(|item| match item {
         Item::Message {role, content} => {
             if !["system","developer","user","assistant"].contains(&role.as_str()) {
@@ -19,6 +24,7 @@ pub(crate) fn project(input: &ModelInput, model: &str) -> Result<Value, Fault> {
                     json!({"type":"output_text","text":text,"annotations":[]})
                 } else { json!({"type":"input_text","text":text}) }),
                 Block::Image {media_type,data} if role == "user" => Ok(json!({"type":"input_image","image_url":format!("data:{media_type};base64,{data}")})),
+                Block::File {..} if options.profile == Profile::Deepseek => Err(failure("DeepSeek Responses does not support file input; use text or images")),
                 Block::File {name,media_type,data} if role == "user" => Ok(json!({"type":"input_file","filename":name,"file_data":format!("data:{media_type};base64,{data}")})),
                 _ => Err(failure("attachments require a user message")),
             }).collect::<Result<Vec<_>,_>>()?;
@@ -26,13 +32,22 @@ pub(crate) fn project(input: &ModelInput, model: &str) -> Result<Value, Fault> {
         }
         Item::ToolCall {call_id,name,arguments} => Ok(json!({"type":"function_call","call_id":call_id,"name":name,"arguments":arguments})),
         Item::ToolResult {call_id,result} => Ok(json!({"type":"function_call_output","call_id":call_id,"output":serde_json::to_string(result).map_err(|_| failure("tool output serialization failed"))?})),
-        Item::ProviderState {provider,value} if provider == STATE && value["type"] == "reasoning" => Ok(value.clone()),
+        Item::ProviderState {provider,value} if provider == options.profile.state() && value["type"] == "reasoning" => Ok(value.clone()),
         Item::ProviderState {..} => Err(failure("incompatible provider state")),
     }).collect::<Result<Vec<_>,_>>()?;
     let tools: Vec<_> = input.tools.iter().map(|tool| json!({"type":"function","name":tool.name,"description":tool.description,"parameters":tool.parameters,"strict":false})).collect();
-    Ok(
-        json!({"model":model,"input":items,"tools":tools,"stream":true,"store":false,"include":["reasoning.encrypted_content"]}),
-    )
+    let mut body = json!({"model":model,"input":items,"tools":tools,"stream":true});
+    if options.profile == Profile::Openai {
+        body["store"] = json!(false);
+        body["include"] = json!(["reasoning.encrypted_content"]);
+    }
+    if let Some(tokens) = options.max_output_tokens {
+        body["max_output_tokens"] = json!(tokens);
+    }
+    if let Some(effort) = &options.reasoning_effort {
+        body["reasoning"] = json!({"effort":effort});
+    }
+    Ok(body)
 }
 fn field<'a>(value: &'a Value, key: &str) -> Result<&'a str, Fault> {
     value
@@ -40,7 +55,7 @@ fn field<'a>(value: &'a Value, key: &str) -> Result<&'a str, Fault> {
         .and_then(Value::as_str)
         .ok_or_else(|| failure(format!("response missing string {key}")))
 }
-pub(crate) fn completed(response: &Value) -> Result<ModelReply, Fault> {
+pub(crate) fn completed(response: &Value, profile: Profile) -> Result<ModelReply, Fault> {
     if response["status"] != "completed" {
         return Err(failure("response did not complete"));
     }
@@ -100,7 +115,7 @@ pub(crate) fn completed(response: &Value) -> Result<ModelReply, Fault> {
                 });
             }
             "reasoning" => items.push(Item::ProviderState {
-                provider: STATE.into(),
+                provider: profile.state().into(),
                 value: item.clone(),
             }),
             _ => return Err(failure("unsupported response output")),

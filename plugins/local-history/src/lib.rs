@@ -13,6 +13,7 @@ use std::{
 struct Store {
     opened: bool,
     file: Option<File>,
+    writer_lock: Option<File>,
     records: Vec<Record>,
     id: u64,
     failed: bool,
@@ -31,9 +32,22 @@ impl Store {
                         .truncate(false)
                         .read(true)
                         .write(true)
-                        .open(path)
+                        .open(&path)
                         .map_err(io)?;
-                    file.try_lock().map_err(|e| {
+                    let mut lock_path = std::fs::canonicalize(&path).map_err(io)?.into_os_string();
+                    lock_path.push(".lock");
+                    // Windows byte locks also prohibit readers. Keep writer
+                    // arbitration separate from the public readable data file.
+                    // Never unlink this file: later owners must lock the same
+                    // filesystem object, including after a process exits.
+                    let writer_lock = OpenOptions::new()
+                        .create(true)
+                        .truncate(false)
+                        .read(true)
+                        .write(true)
+                        .open(lock_path)
+                        .map_err(io)?;
+                    writer_lock.try_lock().map_err(|e| {
                         fault(format!("history already owned or lock unavailable: {e}"))
                     })?;
                     let mut bytes = vec![];
@@ -42,6 +56,7 @@ impl Store {
                     if records.first().is_some_and(|r| r.session_id != session_id) {
                         return Err(fault("session identity mismatch"));
                     }
+                    self.writer_lock = Some(writer_lock);
                     Some(file)
                 } else {
                     None
@@ -89,6 +104,7 @@ impl Store {
             }
             StoreRequest::Close => {
                 self.file.take();
+                self.writer_lock.take();
                 self.opened = false;
             }
         }
@@ -188,6 +204,9 @@ mod tests {
             Store::default().handle(open()).unwrap_err().code,
             "PersistenceFailure"
         );
+        let mut lock_path = path.as_os_str().to_owned();
+        lock_path.push(".lock");
         std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(lock_path).unwrap();
     }
 }

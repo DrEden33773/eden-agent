@@ -76,6 +76,7 @@ async fn tool(input: ToolRequest, _: CallContext) -> Result<ToolResult, Fault> {
 #[derive(Default)]
 struct Storage {
     file: Option<File>,
+    writer_lock: Option<File>,
     records: Vec<Record>,
     id: u64,
     open: bool,
@@ -96,12 +97,24 @@ impl Storage {
                         .truncate(false)
                         .read(true)
                         .append(true)
-                        .open(path)
+                        .open(&path)
                         .map_err(fault)?;
-                    file.try_lock().map_err(fault)?;
+                    let mut lock_path = std::fs::canonicalize(&path)
+                        .map_err(fault)?
+                        .into_os_string();
+                    lock_path.push(".lock");
+                    let writer_lock = File::options()
+                        .create(true)
+                        .truncate(false)
+                        .read(true)
+                        .write(true)
+                        .open(lock_path)
+                        .map_err(fault)?;
+                    writer_lock.try_lock().map_err(fault)?;
                     let mut bytes = vec![];
                     file.read_to_end(&mut bytes).map_err(fault)?;
                     self.records = decode_records(&bytes)?;
+                    self.writer_lock = Some(writer_lock);
                     self.file = Some(file);
                 }
                 self.open = true;
@@ -139,6 +152,7 @@ impl Storage {
             StoreRequest::Read => {}
             StoreRequest::Close => {
                 self.file.take();
+                self.writer_lock.take();
                 self.open = false;
             }
         }
@@ -191,7 +205,7 @@ fn create(config: Value) -> Result<Package, Fault> {
                         stream.read_exact(&mut release).await.map_err(fault)?;
                     } else if closing {
                         let mut stream = TcpStream::connect(&address).await.map_err(fault)?;
-                        // Close has already dropped the locked file.
+                        // Close has already dropped the separate writer lock.
                         stream.write_all(b"store-closed\n").await.map_err(fault)?;
                     }
                 }

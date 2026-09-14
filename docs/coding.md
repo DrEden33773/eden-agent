@@ -28,7 +28,7 @@ The loop commits model output and all tool intentions before beginning a tool ro
 
 ## Persistence and queues
 
-The selected SessionStore is the only history writer. A JSONL line is one public record and one commit boundary. The default store serializes appends, writes a newline and calls `sync_all` before issuing a receipt. It holds an exclusive OS file lock until close; another writer is rejected. `eden_kernel::history::read` validates public schema, identity and contiguous sequence without loading a storage plugin. Interrupted or malformed tails are diagnosed and preserved. Filesystem and hardware durability still follow the operating system's `sync_all` guarantees.
+The selected SessionStore is the only history writer. A JSONL line is one public record and one commit boundary. The default store serializes appends, writes a newline and calls `sync_all` before issuing a receipt. It holds an exclusive OS lock on a sibling `<history>.lock` file until close; another writer is rejected while the data file remains independently readable on Windows and POSIX. The lock file is retained after close so all writers continue to arbitrate on the same filesystem object. `eden_kernel::history::read` validates public schema, identity and contiguous sequence without loading a storage plugin. Interrupted or malformed tails are diagnosed and preserved. Filesystem and hardware durability still follow the operating system's `sync_all` guarantees.
 
 Resume projects committed messages and correlated tool results. A historical intention without a result becomes an explicit unknown-outcome note; it is never automatically executed. Original records remain available. Full branch operations, migration and compression are future additions.
 

@@ -147,10 +147,12 @@ async fn open_abandon(
     stream.read_line(&mut line).await?;
     assert_eq!(line, "open-ready\n");
     // Lock acquisition, not a sleep or the mere start of initialization, owns this gate.
+    let mut lock_path = std::fs::canonicalize(options.history.as_ref().unwrap())?.into_os_string();
+    lock_path.push(".lock");
     let competing = std::fs::File::options()
         .read(true)
         .write(true)
-        .open(options.history.as_ref().unwrap())?;
+        .open(lock_path)?;
     assert!(competing.try_lock().is_err());
     drop(competing);
     opening.abort();

@@ -1,6 +1,6 @@
 # Native plugin contract
 
-The current development release pairs host and SDK exactly as `eden-native-0.1.0`, ABI version 1, on the same target triple. Authors use Rust 1.89.0. The host and each library own their Rust dependencies and runtimes. Libraries are trusted native code running with the host's permissions.
+The current development release pairs host and SDK exactly as `eden-native-0.1.0`, ABI version 1, on the same target triple. Authors use Rust 1.98.1. The host and each library own their Rust dependencies and runtimes. Libraries are trusted native code running with the host's permissions.
 
 ## Installation and selection
 

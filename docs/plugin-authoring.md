@@ -1,6 +1,6 @@
 # Author a native plugin
 
-Use the SDK source from the same eden-agent release and Rust 1.89.0. Host and plugin must match `eden-native-0.1.0`, ABI version 1 and the target triple. There is no cross-release ABI compatibility promise.
+Use the SDK source from the same eden-agent release and Rust 1.98.1. Host and plugin must match `eden-native-0.1.0`, ABI version 1 and the target triple. There is no cross-release ABI compatibility promise.
 
 ## Independent build
 

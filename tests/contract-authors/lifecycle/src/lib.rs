@@ -25,6 +25,8 @@ impl AgentLoop for Lifecycle {
             child.write_all(b"child\n").await.map_err(io)?;
             let _ = started.send(());
             cancellation.cancelled().await;
+            child.write_all(b"child-stopping\n").await.map_err(io)?;
+            child.read_exact(&mut [0]).await.map_err(io)?;
             child.write_all(b"child-stopped\n").await.map_err(io)?;
             Ok(())
         })?;

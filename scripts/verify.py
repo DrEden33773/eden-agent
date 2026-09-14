@@ -130,6 +130,14 @@ def main():
             os.close(writer)
         assert result.returncode != 0 and marker.read_text() == "destroyed"
         results["broken_stdout"] = "error returned after native instance destruction"
+        rollback_marker = scratch / "rollback-marker"
+        initialized["packages"][-1]["config"] = {"marker": str(rollback_marker)}
+        initialized["packages"].append(package("invalid", [ROLES[0]], invalid_paths["init-panic"], triple))
+        write(path, initialized)
+        result = run([host, "--composition", path, "hello"], caller, check=False)
+        assert result.returncode != 0 and "PluginFailure" in result.stderr
+        assert rollback_marker.read_text() == "destroyed"
+        results["partial_initialization_rollback"] = "previous native instance destroyed"
         for mode in ["complete", "cancel", "dropped_receiver", "cleanup_error", "failed_then_cancel", "panic", "drop_panic"]:
             selected = copy.deepcopy(composition)
             selected["packages"] = [p for p in selected["packages"] if p["descriptor"]["package"] != "init-probe"]

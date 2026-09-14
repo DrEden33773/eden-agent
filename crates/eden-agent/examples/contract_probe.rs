@@ -77,11 +77,30 @@ async fn probe(path: &Path, mode: &str) -> Result<(), Error> {
     } else {
         session.cancel(run)?;
     }
-    let mut cleanup = connection(&listener, "cleanup").await?;
+    let mut stopping = String::new();
+    child.read_line(&mut stopping).await?;
+    assert_eq!(stopping.trim(), "child-stopping");
+    assert!(
+        session.inspect(run).is_none(),
+        "settled while child completion gate held"
+    );
+    assert!(
+        !session
+            .events()
+            .iter()
+            .any(|e| e.kind == "settled" && e.run_id == run)
+    );
+    child.write_all(b"G").await?;
     let mut stopped = String::new();
     child.read_line(&mut stopped).await?;
     assert_eq!(stopped.trim(), "child-stopped");
     let mut byte = [0];
+    assert_eq!(
+        child.read(&mut byte).await?,
+        0,
+        "child resource remained live after completion"
+    );
+    let mut cleanup = connection(&listener, "cleanup").await?;
     assert_eq!(root.read(&mut byte).await?, 0, "root socket was not closed");
     assert!(
         session.inspect(run).is_none(),

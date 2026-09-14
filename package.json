@@ -1,0 +1,17 @@
+{
+  "name": "eden-agent-dev-tools",
+  "private": true,
+  "packageManager": "pnpm@10.32.1",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "hooks:install": "node scripts/install-hooks.mjs",
+    "hooks:test": "node --test tests/development-hooks.test.mjs",
+    "markdown:check": "node scripts/checks.mjs markdown",
+    "markdown:fix": "node scripts/checks.mjs markdown-fix",
+    "rust:check": "node scripts/checks.mjs fmt",
+    "rust:fmt": "node scripts/checks.mjs format",
+    "clippy:check": "node scripts/checks.mjs clippy",
+    "clippy:fix": "node scripts/checks.mjs clippy-fix"
+  },
+  "devDependencies": { "markdownlint-cli2": "0.23.2" }
+}

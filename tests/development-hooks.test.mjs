@@ -226,3 +226,22 @@ test("multi-ref push checks both an existing remote update and a second branch",
   assert.equal(git(remote, "rev-parse", "refs/heads/main").trim(), good);
   assert.equal(git(remote, "rev-parse", "refs/heads/topic").trim(), other);
 });
+
+test("pre-commit omits intent-to-add placeholders for paths already present in HEAD", (t) => {
+  const root = fixture(t);
+  const relative = "tests/contract-authors/existing/Cargo.toml";
+  const author = dirname(join(root, relative));
+  mkdirSync(join(author, "src"), { recursive: true });
+  const manifest = '[package]\nname = "existing"\nversion = "0.1.0"\nedition = "2024"\n[workspace]\n';
+  writeFileSync(join(root, relative), manifest);
+  writeFileSync(join(author, "src/lib.rs"), "pub fn value() -> u32 {\n    1\n}\n");
+  git(root, "add", "tests");
+  git(root, "commit", "-m", "existing independent author");
+  git(root, "rm", "--cached", relative);
+  git(root, "add", "-N", relative);
+  const staged = git(root, "ls-files", "--stage", "-z");
+  const result = command(root, process.execPath, ["scripts/hooks.mjs", "pre-commit"]);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(git(root, "ls-files", "--stage", "-z"), staged);
+  assert.equal(readFileSync(join(root, relative), "utf8"), manifest);
+});

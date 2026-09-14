@@ -41,8 +41,10 @@ function preCommit() {
   // ls-files includes git add -N placeholders, while the commit tree does not.
   const additions = (visibility) => paths(git("diff", "--cached", visibility, "--no-renames", "--name-only", "--diff-filter=A", "-z"));
   const committed = new Set(additions("--ita-invisible-in-index"));
-  const intentOnly = new Set(additions("--ita-visible-in-index").filter((path) => !committed.has(path)));
-  const directory = snapshot(git("ls-files", "--stage", "-z"), false, intentOnly);
+  const omitted = new Set(additions("--ita-visible-in-index").filter((path) => !committed.has(path)));
+  // Re-adding a removed HEAD path with -N is a deletion in the actual commit tree.
+  for (const path of paths(git("diff", "--cached", "--ita-invisible-in-index", "--no-renames", "--name-only", "--diff-filter=D", "-z"))) omitted.add(path);
+  const directory = snapshot(git("ls-files", "--stage", "-z"), false, omitted);
   try {
     console.log("Checking the staged snapshot (no source or index writes).");
     for (const kind of kinds) check(kind, { root: directory, toolRoot: root, env: environment() });

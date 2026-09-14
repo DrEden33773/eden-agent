@@ -1,0 +1,214 @@
+//! Owns native handles; all calls pass the admission gate.
+use eden_plugin_sdk::{
+    Cancellation,
+    abi::{Api, Bytes, Header, HostApi, Reply, validate_header},
+};
+use eden_protocol::{Descriptor, Fault, PackageManifest, Request, Terminal};
+use std::sync::{Arc, Mutex};
+use tokio::sync::{Notify, oneshot};
+
+struct Gate {
+    handle: Option<usize>,
+    open: bool,
+    active: usize,
+    operations: std::collections::BTreeSet<u64>,
+}
+/// A generation-bound native role proxy. Old proxies reject work after shutdown.
+pub struct NativeInstance {
+    api: &'static Api,
+    gate: Mutex<Gate>,
+    drained: Notify,
+    stop_lock: tokio::sync::Mutex<()>,
+}
+fn failure(message: impl Into<String>) -> Fault {
+    Fault::new("Unavailable", "loader", message)
+}
+unsafe extern "C" fn capture(context: usize, bytes: Bytes) {
+    // SAFETY: The synchronous caller owns this Vec for the duration of the callback.
+    let output = unsafe { &mut *(context as *mut Vec<u8>) };
+    // SAFETY: The exporting library keeps bytes live until this callback returns.
+    let decoded = if bytes.len == 0 {
+        &[]
+    } else {
+        // SAFETY: The exporting library borrows this span until capture returns.
+        unsafe { std::slice::from_raw_parts(bytes.ptr, bytes.len) }
+    };
+    output.extend_from_slice(decoded);
+}
+fn sink(output: &mut Vec<u8>) -> Reply {
+    Reply {
+        context: output as *mut Vec<u8> as usize,
+        call: capture,
+    }
+}
+unsafe extern "C" fn complete(context: usize, bytes: Bytes) {
+    // SAFETY: start received this uniquely allocated sender and completes once.
+    let sender = unsafe { Box::from_raw(context as *mut oneshot::Sender<Terminal>) };
+    // SAFETY: Completion data is borrowed only for this callback.
+    let result = unsafe { bytes.decode() }.unwrap_or_else(Terminal::failed);
+    let _ = sender.send(result);
+}
+impl NativeInstance {
+    pub(crate) fn load(
+        path: &std::path::Path,
+        manifest: &PackageManifest,
+        host: HostApi,
+    ) -> Result<Arc<Self>, Fault> {
+        // SAFETY: Only explicitly enabled trusted local code is loaded; manifests were preflighted.
+        let library =
+            unsafe { libloading::Library::new(path) }.map_err(|e| failure(e.to_string()))?;
+        // Code stays resident even on failed handshake: loading may have initialized native state.
+        let library = Box::leak(Box::new(library));
+        // SAFETY: The entry symbol is the versioned prefix-only ABI contract.
+        let entry =
+            unsafe { library.get::<unsafe extern "C" fn() -> *const Header>(b"eden_plugin_v1\0") }
+                .map_err(|e| failure(e.to_string()))?;
+        // SAFETY: A conforming trusted entry returns a readable Header or null.
+        let pointer = unsafe { entry() };
+        if pointer.is_null() {
+            return Err(failure("null ABI header"));
+        }
+        // SAFETY: Only the fixed prefix is read before checking table size and version.
+        validate_header(unsafe { &*pointer }, std::mem::size_of::<Api>())?;
+        // SAFETY: Header matching proves the exact agreed table layout; library is process-resident.
+        let api = unsafe { &*(pointer as *const Api) };
+        let mut metadata = vec![];
+        // SAFETY: describe is synchronous and borrows the live local capture receiver.
+        unsafe {
+            (api.describe)(sink(&mut metadata));
+        }
+        let descriptor: Result<Descriptor, Fault> =
+            serde_json::from_slice(&metadata).map_err(|e| failure(e.to_string()))?;
+        if descriptor? != manifest.descriptor {
+            return Err(Fault::new(
+                "IncompatibleContract",
+                "loader",
+                "library descriptor differs from manifest",
+            ));
+        }
+        let config = serde_json::to_vec(&manifest.config).map_err(|e| failure(e.to_string()))?;
+        let mut diagnostic = vec![];
+        // SAFETY: Host callbacks outlive this instance, and create consumes config synchronously.
+        let handle = unsafe { (api.create)(host, Bytes::new(&config), sink(&mut diagnostic)) };
+        if handle == 0 {
+            return Err(serde_json::from_slice(&diagnostic)
+                .unwrap_or_else(|_| failure("initialization failed without a diagnostic")));
+        }
+        Ok(Arc::new(Self {
+            api,
+            gate: Mutex::new(Gate {
+                handle: Some(handle),
+                open: true,
+                active: 0,
+                operations: Default::default(),
+            }),
+            drained: Notify::new(),
+            stop_lock: tokio::sync::Mutex::new(()),
+        }))
+    }
+    /// Stop admitting immediately; actual resource shutdown is awaited separately.
+    pub fn close(&self) {
+        let mut gate = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+        gate.open = false;
+        if let Some(handle) = gate.handle {
+            for id in &gate.operations {
+                // SAFETY: Gate holds the live instance; cancel only signals each retained operation.
+                unsafe {
+                    (self.api.cancel)(handle, *id);
+                }
+            }
+        }
+    }
+    /// Calls retain their own worker even when the caller drops its receiver.
+    pub async fn call(self: &Arc<Self>, request: Request, cancel: Cancellation) -> Terminal {
+        let instance = self.clone();
+        match tokio::spawn(async move { instance.invoke(request, cancel).await }).await {
+            Ok(terminal) => terminal,
+            Err(error) => Terminal::failed(failure(error.to_string())),
+        }
+    }
+    async fn invoke(self: Arc<Self>, request: Request, cancel: Cancellation) -> Terminal {
+        let bytes = match serde_json::to_vec(&request) {
+            Ok(bytes) => bytes,
+            Err(e) => return Terminal::failed(failure(e.to_string())),
+        };
+        let (sender, receiver) = oneshot::channel();
+        let (handle, operation) = {
+            let mut gate = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(handle) = gate.handle.filter(|_| gate.open) else {
+                return Terminal::failed(Fault::new(
+                    "Unavailable",
+                    "instance",
+                    "instance admission closed",
+                ));
+            };
+            gate.active += 1;
+            let reply = Reply {
+                context: Box::into_raw(Box::new(sender)) as usize,
+                call: complete,
+            };
+            // SAFETY: The admission gate excludes destroy; the callback owns the allocated sender.
+            let operation = unsafe { (self.api.start)(handle, Bytes::new(&bytes), reply) };
+            gate.operations.insert(operation);
+            (handle, operation)
+        };
+        let mut receiver = receiver;
+        let terminal = tokio::select! {
+            biased;
+            result = &mut receiver => result,
+            _ = cancel.cancelled() => {
+                // SAFETY: This call is counted active until release finishes.
+                unsafe { (self.api.cancel)(handle, operation); }
+                receiver.await
+            }
+        }
+        .unwrap_or_else(|_| Terminal::failed(failure("native completion lost")));
+        let api = self.api;
+        let release = tokio::task::spawn_blocking(move || {
+            // SAFETY: Callback completed, handle remains counted active; no other release uses this id.
+            unsafe {
+                (api.release)(handle, operation);
+            }
+        })
+        .await;
+        {
+            let mut gate = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+            gate.active -= 1;
+            gate.operations.remove(&operation);
+        }
+        self.drained.notify_waiters();
+        match release {
+            Ok(()) => terminal,
+            Err(e) => Terminal::failed(failure(e.to_string())),
+        }
+    }
+    pub(crate) async fn stop(&self) {
+        self.close();
+        let _owner = self.stop_lock.lock().await;
+        loop {
+            let notified = self.drained.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.gate.lock().unwrap_or_else(|e| e.into_inner()).active == 0 {
+                break;
+            }
+            notified.await;
+        }
+        let handle = self
+            .gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .handle
+            .take();
+        if let Some(handle) = handle {
+            let api = self.api;
+            let _ = tokio::task::spawn_blocking(move || {
+                // SAFETY: Admission is closed, all operations released, and this is the sole destroy owner.
+                unsafe {
+                    (api.destroy)(handle);
+                }
+            })
+            .await;
+        }
+    }
+}

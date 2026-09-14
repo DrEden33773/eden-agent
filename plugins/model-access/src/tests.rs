@@ -243,17 +243,35 @@ async fn cancelling_inflight_request_closes_its_socket() {
         let (mut socket, _) = listener.accept().await.unwrap();
         read_request(&mut socket).await;
         socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
-        ready_tx.send(()).unwrap();
+        let event = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ready\"}\n\n";
+        socket
+            .write_all(format!("{:x}\r\n{}\r\n", event.len(), event).as_bytes())
+            .await
+            .unwrap();
         let mut buf = [0];
-        assert_eq!(socket.read(&mut buf).await.unwrap(), 0);
+        match socket.read(&mut buf).await {
+            Ok(0) => {}
+            // Cancelling HTTP does not promise a graceful TCP FIN. macOS
+            // can report ECONNRESET; both establish the connection is closed.
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+            other => panic!("cancelled provider connection remained open: {other:?}"),
+        }
     });
     let request = tokio::spawn(async move {
+        let mut ready_tx = Some(ready_tx);
         request(
             &endpoint,
             "explicit-model",
             "test-secret",
             &input(),
-            |_, _| Ok(()),
+            move |kind, _| {
+                if kind == "model_text_delta"
+                    && let Some(sender) = ready_tx.take()
+                {
+                    sender.send(()).unwrap();
+                }
+                Ok(())
+            },
         )
         .await
     });

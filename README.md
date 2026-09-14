@@ -15,7 +15,7 @@ artifacts/install/bin/eden --cwd /path/to/project --session /path/to/task.jsonl 
 artifacts/install/bin/eden --history /path/to/task.jsonl
 ```
 
-On Windows use `python` and `artifacts/install/bin/eden.exe`. Set an exact model in `OPENAI_MODEL` and a bearer credential in `OPENAI_API_KEY`; see [coding sessions](docs/coding.md) for configuration, attachments, resume, queues and tool behavior. You can invoke the installed executable from another working directory: its default composition resolves relative to the executable. Use `--composition PATH` to explicitly select another local composition.
+On Windows use `python` and `artifacts/install/bin/eden.exe`. Set an exact model in `OPENAI_MODEL` and a bearer credential in `OPENAI_API_KEY`, or copy [`.env.example`](.env.example) for DeepSeek and load it explicitly with `--env-file PATH`; see [coding sessions](docs/coding.md) for configuration, attachments, resume, queues and tool behavior. You can invoke the installed executable from another working directory: its default composition resolves relative to the executable. Use `--composition PATH` to explicitly select another local composition.
 
 The installed directory contains `bin/eden`, `composition.json`, versioned native packages under `plugins/`, and license notices. Move or archive that directory as a unit. There is no global installation step or implicit download at startup.
 

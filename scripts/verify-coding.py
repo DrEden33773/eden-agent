@@ -22,8 +22,8 @@ TOOL = "eden.coding-tool.v1"
 STORE = "eden.session-store.v1"
 
 
-def run(args, cwd, check=True):
-    result = subprocess.run([str(a) for a in args], cwd=cwd, capture_output=True, text=True, encoding="utf-8", timeout=240)
+def run(args, cwd, check=True, env=None):
+    result = subprocess.run([str(a) for a in args], cwd=cwd, capture_output=True, text=True, encoding="utf-8", timeout=240, env=env)
     if check and result.returncode:
         raise AssertionError(f"{args}: {result.returncode}\n{result.stdout}\n{result.stderr}")
     return result
@@ -241,6 +241,39 @@ class ArithmeticTests(unittest.TestCase):
             results["partial_stream"] = failed[-1]["payload"]
         finally:
             partial.close()
+
+        # Explicit env-file is a CLI startup input; no implicit project/parent discovery.
+        env_server = Server(lambda *_: answer("explicit env-file request"))
+        try:
+            env_project = scratch / "env parent"
+            env_caller = env_project / "child"
+            env_caller.mkdir(parents=True)
+            env_file = env_project / ".env"
+            env_file.write_text(f'OPENAI_MODEL="file-model"\nOPENAI_BASE_URL=http://{env_server.address}/v1\nOPENAI_API_KEY=wrong-file-key\n', encoding="utf-8")
+            env_config = destination / "env-only.json"
+            write(env_config, composition)
+            isolated = dict(os.environ)
+            for key in ["OPENAI_MODEL", "OPENAI_BASE_URL", "OPENAI_API_KEY", "EDEN_RESPONSES_PROFILE", "EDEN_API_KEY_ENV", "OPENAI_MAX_OUTPUT_TOKENS", "OPENAI_REASONING_EFFORT"]:
+                isolated.pop(key, None)
+            missing = run([host, "--composition", env_config, "--cwd", env_caller, "--no-session", "--json", "no implicit env"], env_caller, check=False, env=isolated)
+            assert missing.returncode != 0 and not env_server.requests
+            inherited = dict(isolated, OPENAI_MODEL="controlled-model", OPENAI_API_KEY="controlled-verifier-key")
+            explicit = run([host, "--env-file", "../.env", "--composition", env_config, "--cwd", project, "--no-session", "--json", "explicit env"], env_caller, env=inherited)
+            events(explicit)
+            assert len(env_server.requests) == 1
+            # Case aliases must retain source order on case-insensitive Windows environments.
+            case_file = env_project / "case.env"
+            case_file.write_text(f'openai_model=wrong-case-model\nOPENAI_MODEL=controlled-model\nOPENAI_BASE_URL=http://{env_server.address}/v1\nOPENAI_API_KEY=controlled-verifier-key\n', encoding="utf-8")
+            events(run([host, "--env-file", "../case.env", "--composition", env_config, "--cwd", project, "--no-session", "--json", "case precedence"], env_caller, env=isolated))
+            assert len(env_server.requests) == 2
+            # Original explicit package settings also remain stronger than environment values.
+            preferred = configure(destination, composition, env_server, "package-precedence")
+            overridden = dict(inherited, OPENAI_MODEL="wrong-process-model", OPENAI_BASE_URL="http://127.0.0.1:1")
+            events(run([host, "--env-file", "../.env", "--composition", preferred, "--cwd", project, "--no-session", "--json", "package wins"], env_caller, env=overridden))
+            assert len(env_server.requests) == 3
+            results["explicit_env_file"] = {"parent_discovery": False, "relative_to_caller": True, "environment_over_file": True, "package_over_environment": True, "case_alias_assignment_order": True}
+        finally:
+            env_server.close()
 
         for mode in ["queue", "steering_only", "cancel"]:
             server = Server(lambda *_: answer("probe response"), gated=True)

@@ -18,6 +18,18 @@ The CLI creates a new JSONL file under the selected cwd's `.eden/sessions` direc
 
 `--json` emits ordered live events to stdout. `accepted` identifies the admitted run; `committed` identifies confirmed records; model delta events are transient. `settled` includes the fixed outcome and any cleanup/persistence errors. A successfully accepted or partially streamed run can still fail. Failed operations exit nonzero; cancelled runs exit 130; stdout failures trigger session shutdown. Ctrl-C requests cancellation and waits for cleanup.
 
+## Explicit environment files and DeepSeek
+
+The CLI accepts `--env-file PATH`. Relative paths are resolved against the invoking process cwd, independently of `--cwd`. Only that file is parsed; neither the project nor parent directories are searched. Parsing treats the file as dotenv data and never executes shell commands. The entire file is validated before variables are installed, and this happens before the async runtime or plugins start. Parse diagnostics omit file contents.
+
+Copy [`.env.example`](../.env.example) to a local `.env`, fill in `DEEPSEEK_API_KEY`, and select it explicitly. `.env` and `.env.*` are ignored by Git; the example remains tracked. Existing process variables win over the file, including explicitly empty variables; explicit model-access package settings retain priority over environment settings. Repeated assignments within the file use the last value.
+
+```sh
+eden --env-file /absolute/path/to/.env --cwd /path/to/project --session /path/to/task.jsonl --print 'Inspect and fix the failing tests.'
+```
+
+The example selects the DeepSeek Responses profile and `deepseek-flash`. Its output allowance is the documented maximum, 384K (393216 tokens), and effort is `high`. This is an output allowance, not an instruction to generate that many tokens. The coding loop has no request-count or monetary cap. DeepSeek-specific reasoning and image behavior, supported parameters and file limitations are described in [model access](../plugins/model-access/README.md).
+
 ## Tools and side effects
 
 The context publishes the schemas for `read`, `write`, `edit` and `bash`. File paths resolve against the session cwd; absolute paths are accepted. These trusted native tools run with the caller's filesystem and process authority. `read` supports a 1-based line offset and line limit. `edit` requires exactly one occurrence of `old_text` and preserves the original file when there are zero or multiple matches. `write` creates parent directories. File text is UTF-8.

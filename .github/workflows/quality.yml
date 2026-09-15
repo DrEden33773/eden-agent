@@ -261,6 +261,8 @@ jobs:
       - name: Package installed layout
         shell: bash
         run: node scripts/ci-run.mjs package tar -czf artifacts/eden-${{ runner.os }}-${{ runner.arch }}.tar.gz -C artifacts/distribution .
+      - name: Verify and execute the native packaged archive
+        run: node scripts/ci-run.mjs archive python scripts/verify-archive.py artifacts/eden-${{ runner.os }}-${{ runner.arch }}.tar.gz
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.toolchain-cache.outputs.cache-hit != 'true' }}
         with:

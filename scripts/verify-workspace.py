@@ -228,15 +228,23 @@ def main() -> None:
     os.environ["EDEN_CONTEXT_KEY"] = "context-verifier-key"
     resolve_openssl()
     prepare()
-    destination = prepared_install(ROOT / "artifacts/workspace-install")
-    suffix = ".exe" if sys.platform == "win32" else ""
-    host = destination / "bin" / ("eden" + suffix)
-    probe = destination / "bin" / ("workspace_probe" + suffix)
-    fixed_host = hashlib.sha256(host.read_bytes()).hexdigest()
-    base: Composition = json.loads((destination / "composition.json").read_text(encoding="utf-8"))
     results: dict[str, Any] = {}
     with tempfile.TemporaryDirectory(prefix="eden-workspace-") as temp:
         scratch = pathlib.Path(temp)
+        # A download receipt beside an extracted distribution is ordinary user
+        # data. Every installed scenario must work without adopting it as a package.
+        (scratch / "receipt.json").write_text('{"download_digest":"unrelated"}', encoding="utf-8")
+        destination = prepared_install(scratch / "installation")
+        suffix = ".exe" if sys.platform == "win32" else ""
+        host = destination / "bin" / ("eden" + suffix)
+        probe = destination / "bin" / ("workspace_probe" + suffix)
+        fixed_host = hashlib.sha256(host.read_bytes()).hexdigest()
+        base: Composition = json.loads(
+            (destination / "composition.json").read_text(encoding="utf-8")
+        )
+        results["unrelated_ancestor_receipt"] = (
+            "All installed scenarios run beneath an unrelated download receipt"
+        )
         project = scratch / "project 中文"
         project.mkdir()
         global_dir = project / "global"
@@ -612,6 +620,57 @@ def main() -> None:
             )
         finally:
             server.close()
+        # Both ordinary startup and the isolated Store used for copies must keep
+        # the declared managed location until its receipt has been verified.
+        guarded = copy.deepcopy(base)
+        guard_root = scratch / "guard-store/packages/workspace-resources/0.1.0" / target()
+        guard_lib = guard_root / "lib"
+        guard_lib.mkdir(parents=True)
+        outside = None
+        for item in guarded["packages"]:
+            actual = destination / item["library"]
+            item["library"] = str(actual)
+            if item["descriptor"]["package"] == "workspace-resources":
+                outside = actual.parent
+                shutil.copy2(actual, guard_lib / actual.name)
+                item["library"] = str(guard_lib / actual.name)
+        assert outside is not None
+        (guard_root / "receipt.json").write_text("invalid receipt", encoding="utf-8")
+        guard_config = scratch / "guard-composition.json"
+        write(guard_config, guarded)
+        for state in ("regular", "redirect"):
+            if state == "redirect":
+                shutil.rmtree(guard_lib)
+                if sys.platform == "win32":
+                    run(["cmd", "/C", "mklink", "/J", guard_lib, outside], scratch)
+                else:
+                    guard_lib.symlink_to(outside, target_is_directory=True)
+            for operation in ("resources", "copy"):
+                rejected_copy = scratch / f"guard-{state}-copy.jsonl"
+                denied = (
+                    command("resources", "list", config=guard_config, check=False)
+                    if operation == "resources"
+                    else command(
+                        "session",
+                        "fork",
+                        source_history,
+                        rejected_copy,
+                        "--apply",
+                        config=guard_config,
+                        check=False,
+                    )
+                )
+                assert denied.returncode != 0 and "PackageIntegrity" in denied.stderr
+                assert not rejected_copy.exists()
+        if sys.platform == "win32":
+            guard_lib.rmdir()
+        else:
+            guard_lib.unlink()
+        results["managed_redirect_integrity"] = {
+            "ordinary_startup_and_isolated_copy_reject": True,
+            "regular_and_redirected_library_checked": True,
+            "directory_link": "junction" if sys.platform == "win32" else "symlink",
+        }
         copied = scratch / "managed-fork.jsonl"
         recovered = scratch / "managed-recovery.jsonl"
         command("session", "fork", source_history, copied, "--apply")

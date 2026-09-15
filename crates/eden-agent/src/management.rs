@@ -475,19 +475,9 @@ async fn isolated_service<I: Serialize, O: serde::de::DeserializeOwned + Send + 
                 });
             }
         }
-        for package in &mut selected.packages {
-            package.library = std::fs::canonicalize(
-                composition
-                    .parent()
-                    .unwrap_or(Path::new("."))
-                    .join(&package.library),
-            )
-            .map_err(|e| invalid(e.to_string()))?
-            .to_string_lossy()
-            .into_owned();
-        }
-        eden_workspace::packages::validate(
-            &selected,
+        eden_workspace::packages::resolve_paths(
+            &mut selected,
+            composition.parent().unwrap_or(Path::new(".")),
             &WorkspaceOptions::default().global_dir.join("distribution"),
         )?;
         let created = if role == c::STORE && payload["operation"] == "create" {

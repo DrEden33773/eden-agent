@@ -85,24 +85,11 @@ pub(crate) fn prepare(
         }
     }
     eden_kernel::preflight(&selected)?;
-    for package in &mut selected.packages {
-        package.library = std::fs::canonicalize(
-            composition
-                .parent()
-                .unwrap_or(Path::new("."))
-                .join(&package.library),
-        )
-        .map_err(|e| {
-            Fault::new(
-                "MissingDependency",
-                &package.descriptor.package,
-                e.to_string(),
-            )
-        })?
-        .to_string_lossy()
-        .into_owned();
-    }
-    eden_workspace::packages::validate(&selected, &workspace.global_dir.join("distribution"))?;
+    eden_workspace::packages::resolve_paths(
+        &mut selected,
+        composition.parent().unwrap_or(Path::new(".")),
+        &workspace.global_dir.join("distribution"),
+    )?;
     Ok(selected)
 }
 

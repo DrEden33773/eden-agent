@@ -173,7 +173,15 @@ async fn open_abandon(
     // Reopen uses the same persisted role identity without the one-shot test gate.
     std::fs::write(composition_path, original)?;
     let reopened = Session::open_with(composition_path, options).await?;
-    assert_eq!(reopened.history().await?.len(), 1);
+    assert_eq!(
+        reopened
+            .history()
+            .await?
+            .iter()
+            .map(|r| r.kind.as_str())
+            .collect::<Vec<_>>(),
+        ["session", "composition_lock"]
+    );
     reopened.shutdown().await?;
     println!(
         "{}",

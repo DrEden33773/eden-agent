@@ -251,10 +251,27 @@ impl Session {
             );
         }
         let composition = std::fs::canonicalize(composition).map_err(|e| invalid(e.to_string()))?;
-        let selected: eden_protocol::Composition = serde_json::from_slice(
+        let mut selected: eden_protocol::Composition = serde_json::from_slice(
             &std::fs::read(&composition).map_err(|e| invalid(e.to_string()))?,
         )
         .map_err(|e| invalid(e.to_string()))?;
+        for package in &mut selected.packages {
+            package.library = composition
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join(&package.library)
+                .to_string_lossy()
+                .into_owned();
+        }
+        for record in &mut records {
+            if record.kind == "composition_lock" {
+                if matches!(options.kind, CopyKind::Migrate | CopyKind::Upgrade) {
+                    record.payload = crate::composition::binding(&selected, &cwd)?;
+                } else {
+                    record.payload["cwd"] = json!(cwd);
+                }
+            }
+        }
         let mut migration = None;
         if matches!(options.kind, CopyKind::Migrate) && !options.public_only {
             let states: Vec<c::ExtensionState> = records
@@ -427,7 +444,79 @@ async fn isolated_service<I: Serialize, O: serde::de::DeserializeOwned + Send + 
     let role = role.to_owned();
     let payload = serde_json::to_value(input).map_err(|e| invalid(e.to_string()))?;
     tokio::spawn(async move {
-        let kernel = Kernel::load(&composition, id, Events::new(id)).await?;
+        let mut selected: eden_protocol::Composition = serde_json::from_slice(
+            &std::fs::read(&composition).map_err(|e| invalid(e.to_string()))?,
+        )
+        .map_err(|e| invalid(e.to_string()))?;
+
+        // Copy and migration do not consume prompt resources. Explicitly disable
+        // discovery instead of loading project configuration as a side effect.
+        for package in &mut selected.packages {
+            if package.descriptor.package == "distribution" {
+                package.config = json!({
+                "root":WorkspaceOptions::default().global_dir.join("distribution")
+                });
+            }
+            if package
+                .descriptor
+                .provides
+                .iter()
+                .any(|role| role == eden_protocol::resources::SOURCE)
+            {
+                package.config = json!({
+                "cwd":std::env::current_dir().map_err(|e| invalid(e.to_string()))?,
+                "global_dir":WorkspaceOptions::default().global_dir,
+                "trusted":false,
+                "settings":{
+                "discover_context":false,
+                "discover_skills":false,
+                "discover_templates":false
+                }
+                });
+            }
+        }
+        for package in &mut selected.packages {
+            package.library = std::fs::canonicalize(
+                composition
+                    .parent()
+                    .unwrap_or(Path::new("."))
+                    .join(&package.library),
+            )
+            .map_err(|e| invalid(e.to_string()))?
+            .to_string_lossy()
+            .into_owned();
+        }
+        eden_workspace::packages::validate(
+            &selected,
+            &WorkspaceOptions::default().global_dir.join("distribution"),
+        )?;
+        let created = if role == c::STORE && payload["operation"] == "create" {
+            payload["path"].as_str().map(PathBuf::from)
+        } else {
+            None
+        };
+        let copied_libraries: Option<Vec<String>> = payload["records"]
+            .as_array()
+            .and_then(|records| {
+                records
+                    .iter()
+                    .rev()
+                    .find(|r| r["kind"] == "composition_lock")
+            })
+            .and_then(|record| record["payload"]["library_locations"].as_array())
+            .map(|paths| {
+                paths
+                    .iter()
+                    .filter_map(|p| p.as_str().map(str::to_owned))
+                    .collect()
+            });
+        let kernel = Kernel::load_resolved(
+            selected,
+            composition.parent().unwrap_or(Path::new(".")),
+            id,
+            Events::new(id),
+        )
+        .await?;
         let result = kernel
             .invoke(
                 Request {
@@ -440,6 +529,20 @@ async fn isolated_service<I: Serialize, O: serde::de::DeserializeOwned + Send + 
             )
             .await
             .into_result();
+        let result = result.and_then(|value| {
+            if let Some(path) = created {
+                // The creator's Store composition need not match the copied binding.
+                if let Some(libraries) = copied_libraries {
+                    eden_workspace::packages::register_libraries(
+                        &WorkspaceOptions::default().global_dir.join("distribution"),
+                        &path,
+                        libraries,
+                        false,
+                    )?;
+                }
+            }
+            Ok(value)
+        });
         let stopped = kernel.shutdown().await;
         let value = match (result, stopped) {
             (Ok(value), Ok(())) => value,
@@ -525,6 +628,8 @@ impl Session {
                                     run_id,
                                     contract: c::CONTEXT.into(),
                                     payload: json!(c::ContextInput {
+                                        resources: session.context_resources().await?,
+                                        tools: session.context_tools().await?,
                                         action: "branch_summary".into(),
                                         records: departed,
                                         instructions: String::new(),
@@ -578,6 +683,14 @@ impl Session {
                 Ok(records) => records,
                 Err(error) => return Terminal::failed(error),
             };
+            let resources = match session.context_resources().await {
+                Ok(value) => value,
+                Err(error) => return Terminal::failed(error),
+            };
+            let tools = match session.context_tools().await {
+                Ok(value) => value,
+                Err(error) => return Terminal::failed(error),
+            };
             session
                 .0
                 .kernel
@@ -587,6 +700,8 @@ impl Session {
                         run_id,
                         contract: c::CONTEXT.into(),
                         payload: json!(c::ContextInput {
+                            resources,
+                            tools,
                             action: "compact".into(),
                             records,
                             instructions,
@@ -599,6 +714,87 @@ impl Session {
                 )
                 .await
         })
+    }
+    /// Atomically reload text resources while the session is idle.
+    pub fn reload_resources(&self) -> Result<u64, Fault> {
+        self.start(true, move |session, run_id, _| async move {
+            as_terminal(
+                session
+                    .service::<_, eden_protocol::resources::ResourceReply>(
+                        run_id,
+                        eden_protocol::resources::SOURCE,
+                        &eden_protocol::resources::ResourceRequest::Reload,
+                    )
+                    .await
+                    .and_then(|reply| {
+                        serde_json::to_value(reply)
+                            .map_err(|e| Fault::new("InvalidInput", "resources", e.to_string()))
+                    }),
+            )
+        })
+    }
+    async fn context_resources(&self) -> Result<Option<eden_protocol::resources::Snapshot>, Fault> {
+        if self.role(eden_protocol::resources::SOURCE).is_err() {
+            return Ok(None);
+        }
+        self.resources().await.map(Some)
+    }
+    async fn context_tools(&self) -> Result<Option<Vec<c::ToolDefinition>>, Fault> {
+        use eden_protocol::resources as r;
+        if self.role(r::TOOL_CATALOG).is_err() {
+            return Ok(None);
+        }
+        let catalog: r::Catalog = self
+            .service(
+                0,
+                r::TOOL_CATALOG,
+                &r::CatalogRequest {
+                    cwd: self.cwd().into(),
+                },
+            )
+            .await?;
+        Ok(Some(catalog.tools))
+    }
+    pub async fn commands(&self) -> Result<eden_protocol::resources::CommandCatalog, Fault> {
+        self.service(
+            0,
+            "eden.command-catalog.v1",
+            &eden_protocol::resources::CatalogRequest {
+                cwd: self.cwd().into(),
+            },
+        )
+        .await
+    }
+    pub fn command(&self, name: String, arguments: Value) -> Result<u64, Fault> {
+        self.start(true, move |session, run_id, cancel| async move {
+            session
+                .0
+                .kernel
+                .invoke(
+                    Request {
+                        session_id: session.id(),
+                        run_id,
+                        contract: eden_protocol::resources::COMMAND.into(),
+                        payload: json!(eden_protocol::resources::CommandRequest {
+                            cwd: session.cwd().into(),
+                            name,
+                            arguments
+                        }),
+                    },
+                    cancel,
+                )
+                .await
+        })
+    }
+    pub async fn resources(&self) -> Result<eden_protocol::resources::Snapshot, Fault> {
+        let reply: eden_protocol::resources::ResourceReply = self
+            .service(
+                0,
+                eden_protocol::resources::SOURCE,
+                &eden_protocol::resources::ResourceRequest::Snapshot,
+            )
+            .await?;
+        Ok(reply.snapshot)
     }
     pub fn set_metadata(&self, name: String, tags: Vec<String>) -> Result<u64, Fault> {
         self.start(true, move |session, run_id, _| async move {
@@ -676,7 +872,7 @@ impl Session {
         })
     }
 }
-fn as_terminal(result: Result<Value, Fault>) -> Terminal {
+pub(crate) fn as_terminal(result: Result<Value, Fault>) -> Terminal {
     Terminal {
         outcome: match result {
             Ok(value) => Outcome::Completed(value),

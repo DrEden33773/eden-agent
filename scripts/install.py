@@ -7,7 +7,7 @@ import pathlib
 import shutil
 import subprocess
 import sys
-from typing import Any, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 from license_bundle import bundle
 
@@ -20,6 +20,7 @@ class Descriptor(TypedDict):
 
 
 class Package(TypedDict):
+    requires: NotRequired[list[str]]
     descriptor: Descriptor
     host: str
     sdk: str
@@ -97,9 +98,29 @@ def install(
                     "eden.submission-queue.v2",
                 ],
             ),
-            ("coding-tools", ["eden.coding-tool.v1"]),
+            ("coding-tools", ["eden.tool-catalog.v1", "eden.coding-tool.v1"]),
             ("model-access", ["eden.model-info.v1", "eden.coding-provider.v1"]),
             ("local-history", ["eden.session-store.v2"]),
+            ("workspace-resources", ["eden.resource-source.v1"]),
+            ("distribution", ["eden.distribution-commands.v1", "eden.distribution.v1"]),
+            (
+                "contributions",
+                [
+                    "eden.command-catalog.v1",
+                    "eden.command.v1",
+                    "eden.before-input.v1",
+                    "eden.before-tool.v1",
+                ],
+            ),
+            (
+                "search",
+                [
+                    "eden.search-catalog.v1",
+                    "eden.search-tool.v1",
+                    "eden.search-access.v1",
+                    "eden.instance-stop.v1",
+                ],
+            ),
         ]
         composition = {"packages": [], "roles": {}}
         for pkg, roles in defaults:
@@ -107,8 +128,37 @@ def install(
             relative = f"plugins/{pkg}/0.1.0/{lib}"
             (destination / relative).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / "target" / profile / lib, destination / relative)
-            composition["packages"].append(package(pkg, roles, relative, target()))
-            composition["roles"].update({role: pkg for role in roles})
+            config = None
+            if pkg == "coding-tools":
+                config = {
+                    "read_observer": "eden.search-access.v1",
+                    "tools": ["read", "write", "edit", "bash", "skill"],
+                    "contributions": [
+                        {
+                            "catalog": "eden.search-catalog.v1",
+                            "execute": "eden.search-tool.v1",
+                            "read_only": True,
+                        }
+                    ],
+                }
+            if pkg == "contributions":
+                config = {
+                    "commands": [
+                        {
+                            "catalog": "eden.distribution-commands.v1",
+                            "execute": "eden.distribution.v1",
+                        }
+                    ]
+                }
+            composition["packages"].append(package(pkg, roles, relative, target(), config))
+            composition["roles"].update(
+                {role: pkg for role in roles if role != "eden.instance-stop.v1"}
+            )
+    if not controlled:
+        shutil.copy2(
+            ROOT / "target" / profile / ("eden-search-worker" + suffix),
+            destination / "bin" / ("eden-search-worker" + suffix),
+        )
     (destination / "composition.json").write_text(
         json.dumps(composition, indent=2) + "\n", encoding="utf-8"
     )

@@ -10,19 +10,27 @@ use eden_plugin_sdk::{
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-mod process_tree;
-#[cfg(unix)]
-mod unix_exit;
+mod catalog;
+
+mod registry;
+
 const OUTPUT_LIMIT: usize = 65_536;
 
 fn descriptor() -> Descriptor {
     Descriptor {
         package: "coding-tools".into(),
         version: "0.1.0".into(),
-        provides: vec![TOOL.into()],
+        provides: vec![
+            eden_plugin_sdk::protocol::resources::TOOL_CATALOG.into(),
+            TOOL.into(),
+        ],
     }
 }
 fn create(config: Value) -> Result<Package, Fault> {
+    use eden_plugin_sdk::protocol::resources as r;
+    let registry = registry::Registry::new(&config)?;
+    let listing = registry.clone();
+    let read_observer = config["read_observer"].as_str().map(String::from);
     let shell = match config.get("bash") {
         None => "bash".into(),
         Some(Value::String(path)) if !path.is_empty() => path.clone(),
@@ -33,11 +41,94 @@ fn create(config: Value) -> Result<Package, Fault> {
             ));
         }
     };
-    Ok(
-        Package::new("coding-tools").service(TOOL, move |request, cx| {
-            execute(request, cx.scope, shell.clone())
-        }),
-    )
+    let powershell = match config.get("powershell") {
+        None => "pwsh".into(),
+        Some(Value::String(path)) if !path.is_empty() => path.clone(),
+        Some(_) => {
+            return Err(fault(
+                "InvalidInput",
+                "powershell configuration must be a nonempty executable path",
+            ));
+        }
+    };
+    Ok(Package::new("coding-tools")
+        .service(r::TOOL_CATALOG, move |request: r::CatalogRequest, cx| {
+            let registry = listing.clone();
+            async move {
+                Ok(r::Catalog {
+                    tools: registry
+                        .catalog(&cx, &request.cwd)
+                        .await?
+                        .into_values()
+                        .map(|(tool, _)| tool)
+                        .collect(),
+                })
+            }
+        })
+        .service(TOOL, move |request: ToolRequest, cx| {
+            let registry = registry.clone();
+            let shell = if request.name == "powershell" {
+                powershell.clone()
+            } else {
+                shell.clone()
+            };
+            let read_observer = read_observer.clone();
+            async move {
+                let selected = registry.catalog(&cx, &request.cwd).await?;
+                let (_, route) = selected.get(&request.name).ok_or_else(|| {
+                    fault(
+                        "UnknownTool",
+                        format!("tool is not enabled: {}", request.name),
+                    )
+                })?;
+                if let Some(route) = route {
+                    return cx.call(route, &request).await;
+                }
+                if request.name == "skill" {
+                    let name = string(&request.arguments, "name")?;
+                    let state: r::ResourceReply =
+                        cx.call(r::SOURCE, &r::ResourceRequest::Snapshot).await?;
+                    if !state
+                        .snapshot
+                        .skills
+                        .iter()
+                        .any(|skill| skill.name == name && skill.model_invocable)
+                    {
+                        return Err(fault(
+                            "InvalidInput",
+                            "skill is unavailable for model invocation",
+                        ));
+                    }
+                    let reply: r::ResourceReply = cx
+                        .call(
+                            r::SOURCE,
+                            &r::ResourceRequest::Skill {
+                                name: name.into(),
+                                arguments: request
+                                    .arguments
+                                    .get("arguments")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .into(),
+                            },
+                        )
+                        .await?;
+                    return Ok(output(reply.text.unwrap_or_default(), None, false));
+                }
+                let observed = if request.name == "read" {
+                    Some(request.clone())
+                } else {
+                    None
+                };
+                let result = execute(request, cx.scope.clone(), shell).await?;
+                if result.error.is_none()
+                    && let (Some(route), Some(request)) = (read_observer, observed)
+                {
+                    let _: () = cx.call(&route, &request).await?;
+                }
+                Ok(result)
+            }
+        }))
 }
 eden_plugin_sdk::export_plugin!(descriptor, create);
 
@@ -91,6 +182,27 @@ async fn run(
         ));
     }
     match request.name.as_str() {
+        "ls" => {
+            let path = cwd.join(
+                request
+                    .arguments
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .unwrap_or("."),
+            );
+            let mut reader = tokio::fs::read_dir(&path).await.map_err(file_error)?;
+            let mut entries = vec![];
+            while let Some(entry) = reader.next_entry().await.map_err(file_error)? {
+                let suffix = if entry.file_type().await.map_err(file_error)?.is_dir() {
+                    "/"
+                } else {
+                    ""
+                };
+                entries.push(format!("{}{suffix}", entry.file_name().to_string_lossy()));
+            }
+            entries.sort();
+            Ok(output(entries.join("\n"), None, false))
+        }
         "read" => {
             let path = file_path(cwd, &request.arguments)?;
             let offset = integer(&request.arguments, "offset", 1)?;
@@ -166,11 +278,12 @@ async fn run(
                 .map_err(file_error)?;
             Ok(output("Replaced one exact match".into(), None, false))
         }
-        "bash" => {
-            bash(
+        "bash" | "powershell" => {
+            shell_command(
                 cwd,
                 string(&request.arguments, "command")?,
                 &shell,
+                request.name == "powershell",
                 cancellation,
             )
             .await
@@ -246,13 +359,25 @@ async fn capture(mut pipe: impl AsyncRead + Unpin) -> std::io::Result<(Vec<u8>, 
     }
 }
 
-async fn bash(
+async fn shell_command(
     cwd: &Path,
     command: &str,
     shell: &str,
+    powershell: bool,
     cancellation: eden_plugin_sdk::Cancellation,
 ) -> Result<ToolResult, Fault> {
-    let (mut child, tree) = process_tree::spawn(shell, command, cwd).await?;
+    let args: &[&str] = if powershell {
+        &[
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            command,
+        ]
+    } else {
+        &["--noprofile", "--norc", "-c", command]
+    };
+    let (mut child, tree) = eden_process::spawn(shell, args, cwd).await?;
     let stdout = child
         .stdout
         .take()

@@ -25,6 +25,25 @@ struct Store {
 impl Store {
     fn handle(&mut self, request: StoreRequest) -> Result<StoreReply, Fault> {
         match request {
+            StoreRequest::RestoreMemory {
+                session_id,
+                records,
+            } => {
+                if self.opened {
+                    return Err(fault("already open"));
+                }
+                validate_records(&records)?;
+                if records
+                    .iter()
+                    .any(|record| record.schema_version != 2 || record.session_id != session_id)
+                {
+                    return Err(fault("restored memory history must retain its v2 identity"));
+                }
+                self.records = records;
+                self.id = session_id;
+                self.opened = true;
+                self.failed = false;
+            }
             StoreRequest::Open { path, session_id } => {
                 if self.opened {
                     return Err(fault("already open"));

@@ -1,4 +1,5 @@
 //! Default sequential coding loop, context projection and durable input queue.
+use eden_plugin_sdk::protocol::resources as r;
 use eden_plugin_sdk::{
     CallContext, Package,
     protocol::{Descriptor, Fault, coding::*},
@@ -142,14 +143,9 @@ async fn model_limits(cx: &CallContext) -> Result<ModelLimits, Fault> {
     match cx.call(MODEL_INFO, &Value::Null).await {
         Ok(limits) => Ok(limits),
         Err(error)
-            if matches!(
-                error.code.as_str(),
-                "MissingDependency"
-                    | "MissingProvider"
-                    | "MissingService"
-                    | "NoRoute"
-                    | "UnresolvedRole"
-            ) =>
+            if error.code == "MissingDependency"
+                && error.source == "router"
+                && error.message == MODEL_INFO =>
         {
             Ok(ModelLimits::default())
         }
@@ -191,7 +187,73 @@ async fn provider_retry(
     }
     unreachable!("bounded retries return above")
 }
-async fn run(input: RunInput, cx: CallContext, settings: Settings) -> Result<String, Fault> {
+async fn optional_call<I: serde::Serialize, O: serde::de::DeserializeOwned>(
+    cx: &CallContext,
+    contract: &str,
+    input: &I,
+) -> Result<Option<O>, Fault> {
+    match cx.call(contract, input).await {
+        Ok(reply) => Ok(Some(reply)),
+        Err(error)
+            if error.code == "MissingDependency"
+                && error.source == "router"
+                && error.message == contract =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result<String, Fault> {
+    let resource_reply: Option<r::ResourceReply> =
+        optional_call(&cx, r::SOURCE, &r::ResourceRequest::Snapshot).await?;
+    let resources = resource_reply.map(|reply| reply.snapshot);
+    let catalog: Option<r::Catalog> = optional_call(
+        &cx,
+        r::TOOL_CATALOG,
+        &r::CatalogRequest {
+            cwd: input.cwd.clone(),
+        },
+    )
+    .await?;
+    let selected_tools = catalog.map(|catalog| catalog.tools);
+    if !input.resume {
+        append(&cx, "submission", json!({"content":input.content})).await?;
+    }
+    if let Some(snapshot) = &resources {
+        append(&cx, "resource_snapshot", json!(snapshot)).await?;
+        for block in &mut input.content {
+            if let Block::Text { text } = block {
+                let reply: r::ResourceReply = cx
+                    .call(
+                        r::SOURCE,
+                        &r::ResourceRequest::Expand { text: text.clone() },
+                    )
+                    .await?;
+                if let Some(expanded) = reply.text {
+                    *text = expanded;
+                }
+            }
+        }
+    }
+    if let Some(hooked) = optional_call::<_, r::InputHook>(
+        &cx,
+        r::BEFORE_INPUT,
+        &r::InputHook {
+            content: input.content.clone(),
+            resource_revision: resources.as_ref().map_or(0, |s| s.revision),
+        },
+    )
+    .await?
+    {
+        append(
+            &cx,
+            "input_hook",
+            json!({"original":input.content,"transformed":hooked.content}),
+        )
+        .await?;
+        input.content = hooked.content;
+    }
     if !input.resume {
         append(
             &cx,
@@ -218,6 +280,8 @@ async fn run(input: RunInput, cx: CallContext, settings: Settings) -> Result<Str
             .call(
                 CONTEXT,
                 &ContextInput {
+                    resources: resources.clone(),
+                    tools: selected_tools.clone(),
                     action: String::new(),
                     records: history.records.clone(),
                     instructions: String::new(),
@@ -253,6 +317,8 @@ async fn run(input: RunInput, cx: CallContext, settings: Settings) -> Result<Str
                     .call(
                         CONTEXT,
                         &ContextInput {
+                            resources: resources.clone(),
+                            tools: selected_tools.clone(),
                             action: "compact".into(),
                             records: history.records,
                             instructions: String::new(),
@@ -358,16 +424,15 @@ async fn run(input: RunInput, cx: CallContext, settings: Settings) -> Result<Str
                     called = true;
                     let result = match serde_json_decode(&arguments) {
                         Ok(arguments) => {
-                            cx.call::<_, ToolResult>(
-                                TOOL,
-                                &ToolRequest {
-                                    cwd: input.cwd.clone(),
-                                    call_id: call_id.clone(),
-                                    name,
-                                    arguments,
-                                },
-                            )
-                            .await
+                            async {
+                                let original = ToolRequest { cwd:input.cwd.clone(),call_id:call_id.clone(),name,arguments };
+                                let execution = optional_call::<_, ToolRequest>(&cx, r::BEFORE_TOOL, &original).await?.unwrap_or_else(|| original.clone());
+                                if execution.call_id != original.call_id || execution.cwd != original.cwd {
+                                    return Err(Fault::new("InvalidInput", "before-tool", "hooks may change tool name and arguments, but not call identity or cwd"));
+                                }
+                                append(&cx, "tool_execution_intent", json!({"original":original,"execution":execution})).await?;
+                                cx.call::<_, ToolResult>(TOOL, &execution).await
+                            }.await
                         }
                         Err(error) => Err(error),
                     };
@@ -421,6 +486,8 @@ async fn run(input: RunInput, cx: CallContext, settings: Settings) -> Result<Str
                 .call(
                     CONTEXT,
                     &ContextInput {
+                        resources: resources.clone(),
+                        tools: selected_tools.clone(),
                         action: "compact".into(),
                         records: history.records,
                         instructions: String::new(),

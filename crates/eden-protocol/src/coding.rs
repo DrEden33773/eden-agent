@@ -59,6 +59,10 @@ pub struct RunInput {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ContextInput {
     #[serde(default)]
+    pub resources: Option<crate::resources::Snapshot>,
+    #[serde(default)]
+    pub tools: Option<Vec<ToolDefinition>>,
+    #[serde(default)]
     pub action: String,
     #[serde(default)]
     pub records: Vec<Record>,
@@ -118,6 +122,10 @@ pub struct Record {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum StoreRequest {
+    RestoreMemory {
+        session_id: u64,
+        records: Vec<Record>,
+    },
     Open {
         path: Option<String>,
         session_id: u64,

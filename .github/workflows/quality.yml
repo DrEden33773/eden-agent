@@ -75,6 +75,8 @@ jobs:
         run: python scripts/verify-sessions.py
       - name: Installed context, retry and queue recovery
         run: python scripts/verify-context.py
+      - name: Installed workspace, packages, FFF and independent interop
+        run: python scripts/verify-workspace.py
       - name: Assemble distribution
         run: python scripts/install.py artifacts/distribution
       - name: Package installed layout
@@ -88,6 +90,7 @@ jobs:
             artifacts/coding-verification.json
             artifacts/session-verification.json
             artifacts/context-verification.json
+            artifacts/workspace-verification.json
             artifacts/eden-*.tar.gz
           if-no-files-found: error
   quality:

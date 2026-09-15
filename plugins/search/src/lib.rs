@@ -101,6 +101,7 @@ impl Drop for Worker {
 struct State {
     executable: PathBuf,
     allow_broad_scan: bool,
+    excluded_paths: Vec<PathBuf>,
     history_dir: Option<PathBuf>,
     worker: tokio::sync::Mutex<Option<Arc<Worker>>>,
 }
@@ -112,6 +113,7 @@ impl State {
     ) -> Result<ToolResult, Fault> {
         request.arguments["allow_broad_scan"] = json!(self.allow_broad_scan);
         request.arguments["_history_dir"] = json!(self.history_dir);
+        request.arguments["_excluded_paths"] = json!(self.excluded_paths);
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let cancel = cx.scope.cancellation();
         let progress = cx.clone();
@@ -205,6 +207,21 @@ fn create(config: Value) -> Result<Package, Fault> {
     let state = Arc::new(State {
         executable,
         allow_broad_scan: config["allow_broad_scan"] == true,
+        excluded_paths: config.get("excluded_paths").map_or(Ok(vec![]), |value| {
+            value
+                .as_array()
+                .ok_or_else(|| fault("InvalidInput", "excluded_paths must be an array"))?
+                .iter()
+                .map(|path| {
+                    path.as_str()
+                        .map(PathBuf::from)
+                        .filter(|p| p.is_absolute())
+                        .ok_or_else(|| {
+                            fault("InvalidInput", "excluded_paths must contain absolute paths")
+                        })
+                })
+                .collect::<Result<_, _>>()
+        })?,
         history_dir: if config["persist_history"] == true {
             Some(PathBuf::from(config["history_dir"].as_str().ok_or_else(
                 || {

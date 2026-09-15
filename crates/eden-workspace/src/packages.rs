@@ -117,18 +117,44 @@ pub fn validate(composition: &Composition, store: &Path) -> Result<(), Fault> {
     Ok(())
 }
 pub fn register(store: &Path, history: &Path, composition: &Composition) -> Result<(), Fault> {
-    let mut stores = std::collections::BTreeSet::new();
-    let packages = std::fs::canonicalize(store.join("packages")).ok();
-    if packages.as_ref().is_some_and(|root| {
+    register_pending(store, history, composition, false)
+}
+/// Before a binding commit, retain both the previous and proposed libraries.
+/// After it commits, replace the reference with the committed composition.
+pub fn register_pending(
+    store: &Path,
+    history: &Path,
+    composition: &Composition,
+    pending: bool,
+) -> Result<(), Fault> {
+    register_libraries(
+        store,
+        history,
         composition
             .packages
             .iter()
-            .any(|p| Path::new(&p.library).starts_with(root))
-    }) {
+            .map(|p| p.library.clone())
+            .collect(),
+        pending,
+    )
+}
+/// Track a copied history's saved locations without loading its native libraries.
+pub fn register_libraries(
+    store: &Path,
+    history: &Path,
+    libraries: Vec<String>,
+    pending: bool,
+) -> Result<(), Fault> {
+    let mut stores = std::collections::BTreeSet::new();
+    let packages = std::fs::canonicalize(store.join("packages")).ok();
+    if packages
+        .as_ref()
+        .is_some_and(|root| libraries.iter().any(|p| Path::new(p).starts_with(root)))
+    {
         stores.insert(std::fs::canonicalize(store).map_err(fail)?);
     }
-    for package in &composition.packages {
-        if let Some(root) = receipt_root(Path::new(&package.library)) {
+    for library in &libraries {
+        if let Some(root) = receipt_root(Path::new(library)) {
             let prefix = root.ancestors().nth(3);
             if let Some(prefix) = prefix.filter(|p| p.file_name().is_some_and(|n| n == "packages"))
             {
@@ -142,7 +168,7 @@ pub fn register(store: &Path, history: &Path, composition: &Composition) -> Resu
         }
     }
     for store in stores {
-        register_at(&store, history, composition)?;
+        register_at(&store, history, &libraries, pending)?;
     }
     Ok(())
 }
@@ -152,13 +178,33 @@ fn receipt_root(library: &Path) -> Option<&Path> {
         .ancestors()
         .find(|p| p.join("receipt.json").is_file())
 }
-fn register_at(store: &Path, history: &Path, composition: &Composition) -> Result<(), Fault> {
+fn register_at(
+    store: &Path,
+    history: &Path,
+    libraries: &[String],
+    pending: bool,
+) -> Result<(), Fault> {
     let path = std::fs::canonicalize(history).map_err(fail)?;
-    let libraries: Vec<_> = composition.packages.iter().map(|p| &p.library).collect();
+    let mut libraries: std::collections::BTreeSet<String> = libraries.iter().cloned().collect();
     let directory = store.join("sessions");
     std::fs::create_dir_all(&directory).map_err(fail)?;
     let id = format!("{:x}", Sha256::digest(path.to_string_lossy().as_bytes()));
     let target = directory.join(format!("{id}.json"));
+    if pending && target.exists() {
+        let previous: Value =
+            serde_json::from_slice(&std::fs::read(&target).map_err(fail)?).map_err(fail)?;
+        for library in previous["libraries"]
+            .as_array()
+            .ok_or_else(|| fail("invalid session reference"))?
+        {
+            libraries.insert(
+                library
+                    .as_str()
+                    .ok_or_else(|| fail("invalid library reference"))?
+                    .to_owned(),
+            );
+        }
+    }
     let temporary = directory.join(format!("{id}-{}.tmp", std::process::id()));
     std::fs::write(
         &temporary,
@@ -204,6 +250,48 @@ pub fn references(store: &Path, target: &Path) -> Result<Vec<String>, Fault> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pending_reference_preserves_both_bindings_until_commit() {
+        let root = std::env::temp_dir().join(format!("eden-reference-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("old")).unwrap();
+        std::fs::create_dir_all(root.join("new")).unwrap();
+        let history = root.join("history.jsonl");
+        std::fs::write(&history, b"original binding").unwrap();
+        let composition = |version: &str| -> Composition {
+            serde_json::from_value(json!({"packages":[{
+                "descriptor":{"package":"test","version":"1","provides":[]},
+                "library":root.join(version).join("plugin"),"sdk":"test","host":"test","target":"test","config":null
+            }],"roles":{}})).unwrap()
+        };
+        register_at(
+            &root,
+            &history,
+            &[composition("old").packages[0].library.clone()],
+            false,
+        )
+        .unwrap();
+        register_at(
+            &root,
+            &history,
+            &[composition("new").packages[0].library.clone()],
+            true,
+        )
+        .unwrap();
+        // A failed binding append leaves the pending union protecting the old history.
+        assert_eq!(references(&root, &root.join("old")).unwrap().len(), 1);
+        assert_eq!(references(&root, &root.join("new")).unwrap().len(), 1);
+        std::fs::write(&history, b"new binding committed").unwrap();
+        register_at(
+            &root,
+            &history,
+            &[composition("new").packages[0].library.clone()],
+            false,
+        )
+        .unwrap();
+        assert!(references(&root, &root.join("old")).unwrap().is_empty());
+        assert_eq!(references(&root, &root.join("new")).unwrap().len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn tree_encoding_is_unambiguous() {
         let root = std::env::temp_dir().join(format!("eden-digest-{}", std::process::id()));

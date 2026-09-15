@@ -143,14 +143,9 @@ async fn model_limits(cx: &CallContext) -> Result<ModelLimits, Fault> {
     match cx.call(MODEL_INFO, &Value::Null).await {
         Ok(limits) => Ok(limits),
         Err(error)
-            if matches!(
-                error.code.as_str(),
-                "MissingDependency"
-                    | "MissingProvider"
-                    | "MissingService"
-                    | "NoRoute"
-                    | "UnresolvedRole"
-            ) =>
+            if error.code == "MissingDependency"
+                && error.source == "router"
+                && error.message == MODEL_INFO =>
         {
             Ok(ModelLimits::default())
         }
@@ -200,14 +195,9 @@ async fn optional_call<I: serde::Serialize, O: serde::de::DeserializeOwned>(
     match cx.call(contract, input).await {
         Ok(reply) => Ok(Some(reply)),
         Err(error)
-            if matches!(
-                error.code.as_str(),
-                "MissingDependency"
-                    | "MissingProvider"
-                    | "MissingService"
-                    | "NoRoute"
-                    | "UnresolvedRole"
-            ) =>
+            if error.code == "MissingDependency"
+                && error.source == "router"
+                && error.message == contract =>
         {
             Ok(None)
         }

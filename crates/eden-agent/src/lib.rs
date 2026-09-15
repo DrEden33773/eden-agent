@@ -125,14 +125,20 @@ impl Session {
             .unwrap_or_else(new_session_id);
         let next = previous.iter().map(|r| r.run_id).max().unwrap_or(0) + 1;
         let events = Events::new(id);
-        let selected = workspace_setup::prepare(&composition, &cwd, &workspace_options, &events)?;
+        let selected = workspace_setup::prepare(
+            &composition,
+            &cwd,
+            &workspace_options,
+            &events,
+            options.history.as_deref(),
+        )?;
         let desired = composition::binding(&selected, &cwd)?;
         if !rebind
             && previous
                 .iter()
                 .rev()
                 .find(|r| r.kind == "composition_lock")
-                .is_some_and(|saved| saved.payload != desired)
+                .is_some_and(|saved| !composition::equivalent(&saved.payload, &desired))
         {
             return Err(Fault::new(
                 "Unavailable",
@@ -149,12 +155,17 @@ impl Session {
         .await?;
         let coding = kernel.role(c::LOOP).is_ok();
         if options.history.is_some() && !coding {
-            kernel.shutdown().await?;
-            return Err(Fault::new(
+            let mut error = Fault::new(
                 "Unsupported",
                 "session",
                 "controlled skeleton supports only memory sessions",
-            ));
+            );
+            if let Err(cleanup) = kernel.shutdown().await {
+                error
+                    .message
+                    .push_str(&format!("; rollback cleanup: {cleanup}"));
+            }
+            return Err(error);
         }
         let session = Self(Arc::new(Inner {
             id,
@@ -203,7 +214,7 @@ impl Session {
                 });
                 let locked = composition::binding(&binding, &cwd)?;
                 let saved_lock = reply.records.iter().rev().find(|r|r.kind == "composition_lock");
-                if let Some(saved) = saved_lock && !rebind && saved.payload != locked {
+                if let Some(saved) = saved_lock && !rebind && !composition::equivalent(&saved.payload, &locked) {
  return Err(Fault::new("Unavailable",
 "composition",
 "saved package binding differs; explicitly switch the saved session composition"));
@@ -223,13 +234,18 @@ impl Session {
                 let _: Vec<c::QueueEntry> = session
                     .service(0, c::QUEUE, &c::QueueRequest::Restore)
                     .await?;
-                workspace_setup::register(&session,&session.0.kernel.composition())?;
+                workspace_setup::register(&session, &binding, true)?;
                 if rebind || saved_lock.is_none() { session.commit(0, "composition_lock", locked).await?; }
+                workspace_setup::register(&session, &binding, false)?;
                 Ok::<_, Fault>(())
             }
             .await;
-            if let Err(error) = setup {
-                let _ = session.shutdown().await;
+            if let Err(mut error) = setup {
+                if let Err(cleanup) = session.shutdown().await {
+                    error
+                        .message
+                        .push_str(&format!("; rollback cleanup: {cleanup}"));
+                }
                 return Err(error);
             }
         }
@@ -448,7 +464,16 @@ impl Session {
             Ok(())
         };
         let stopped = self.0.kernel.shutdown().await;
-        let result = close.and(stopped);
+        let result = match (close, stopped) {
+            (Err(mut error), Err(cleanup)) => {
+                error
+                    .message
+                    .push_str(&format!("; instance cleanup: {cleanup}"));
+                Err(error)
+            }
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Ok(()), Ok(())) => Ok(()),
+        };
         self.0
             .state
             .lock()

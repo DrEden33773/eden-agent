@@ -6,10 +6,8 @@ use std::{
     path::{Path, PathBuf},
     time::SystemTime,
 };
-pub fn stamp(
-    path: &Path,
-    follow: bool,
-) -> Result<BTreeMap<PathBuf, (u64, Option<SystemTime>)>, String> {
+pub type Stamp = BTreeMap<PathBuf, (PathBuf, u64, Option<SystemTime>)>;
+pub fn stamp(path: &Path, follow: bool, excluded: &[PathBuf]) -> Result<Stamp, String> {
     let mut output = BTreeMap::new();
     let is_git = path.ancestors().any(|parent| parent.join(".git").exists());
     let mut builder = ignore::WalkBuilder::new(path);
@@ -29,7 +27,10 @@ pub fn stamp(
         }
         builder.overrides(excludes.build().map_err(|e| e.to_string())?);
     }
-    builder.filter_entry(|entry| entry.file_name() != ".git");
+    let excluded = excluded.to_vec();
+    builder.filter_entry(move |entry| {
+        entry.file_name() != ".git" && !is_excluded(entry.path(), &excluded)
+    });
     for entry in builder.build() {
         let entry = match entry {
             Ok(entry) => entry,
@@ -41,9 +42,22 @@ pub fn stamp(
         }
         let canonical = std::fs::canonicalize(entry.path()).map_err(|e| e.to_string())?;
         let metadata = entry.metadata().map_err(|e| e.to_string())?;
-        output.insert(canonical, (metadata.len(), metadata.modified().ok()));
+        output.insert(
+            entry.path().to_owned(),
+            (canonical, metadata.len(), metadata.modified().ok()),
+        );
     }
     Ok(output)
+}
+/// Match lexical paths as well as aliases to excluded physical state.
+pub fn is_excluded(path: &Path, excluded: &[PathBuf]) -> bool {
+    let canonical = std::fs::canonicalize(path).ok();
+    excluded.iter().any(|root| {
+        path.starts_with(root)
+            || canonical.as_ref().is_some_and(|p| {
+                p.starts_with(std::fs::canonicalize(root).unwrap_or_else(|_| root.clone()))
+            })
+    })
 }
 pub(crate) const IGNORED_DIRS: &[&str] = &[
     // various dev tools that can be meet in the developer app

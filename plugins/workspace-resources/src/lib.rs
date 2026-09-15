@@ -102,21 +102,23 @@ fn load(config: &SourceConfig, revision: u64) -> Result<Loaded, Fault> {
             }
         }
     }
-    for (name, append) in [("SYSTEM.md", false), ("APPEND_SYSTEM.md", true)] {
-        let mut paths = vec![];
-        if config.trusted {
-            paths.push(cwd.join(".eden").join(name));
-        }
-        paths.push(global.join(name));
-        for path in paths {
-            if let Some(text) = read_optional(&path)? {
-                if append {
-                    loaded.snapshot.append_system = text;
-                } else {
-                    loaded.snapshot.system = Some(text);
+    if enabled(&config.settings, "discover_context")? {
+        for (name, append) in [("SYSTEM.md", false), ("APPEND_SYSTEM.md", true)] {
+            let mut paths = vec![];
+            if config.trusted {
+                paths.push(cwd.join(".eden").join(name));
+            }
+            paths.push(global.join(name));
+            for path in paths {
+                if let Some(text) = read_optional(&path)? {
+                    if append {
+                        loaded.snapshot.append_system = text;
+                    } else {
+                        loaded.snapshot.system = Some(text);
+                    }
+                    loaded.snapshot.sources.push(path.display().to_string());
+                    break;
                 }
-                loaded.snapshot.sources.push(path.display().to_string());
-                break;
             }
         }
     }

@@ -102,6 +102,78 @@ def stopped(pid: int) -> bool:
     return False
 
 
+def default_search_loop(
+    destination: pathlib.Path, scratch: pathlib.Path, base: Composition
+) -> dict[str, Any]:
+    project = scratch / "default-search"
+    path = project / "src/a/long/relative/path/to/component.txt"
+    path.parent.mkdir(parents=True)
+    path.write_text("".join(f"needle row {n}\n" for n in range(1, 38)), encoding="utf-8")
+    run(["git", "init", project], scratch)
+    pages: list[str] = []
+
+    def respond(body: dict[str, Any], index: int) -> tuple[int, dict[str, Any]]:
+        arguments: dict[str, Any] = {"pattern": "needle", "limit": 20}
+        if index:
+            outputs = [item for item in body["input"] if item["type"] == "function_call_output"]
+            output = outputs[-1]["output"]
+            result = json.loads(output)
+            text = result["text"]
+            pages.append(text)
+            header = json.loads(text.splitlines()[0])
+            assert header["complete"] and header["total_matches"] == 37, result
+            if not header["has_more"]:
+                return 200, complete(answer("PAGES-COMPLETE"))
+            arguments["cursor"] = header["cursor"]
+        return 200, complete(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": f"page-{index}",
+                    "name": "grep",
+                    "arguments": json.dumps(arguments),
+                }
+            ]
+        )
+
+    server = Server(respond)
+    try:
+        selected = copy.deepcopy(base)
+        for package in selected["packages"]:
+            if package["descriptor"]["package"] == "coding-tools":
+                assert isinstance(package["config"], dict)
+                package["config"]["tools"] = ["grep"]
+        config = helpers["configure"](destination, selected, server, "default-search")
+        host = destination / "bin" / ("eden.exe" if sys.platform == "win32" else "eden")
+        run(
+            [
+                host,
+                "--composition",
+                config,
+                "--cwd",
+                project,
+                "--global-dir",
+                scratch / "search-global",
+                "--json",
+                "Find needle and retrieve every page.",
+            ],
+            scratch,
+        )
+        assert len(pages) == 2 and len(server.requests) == 3
+        histories = list((project / ".eden/sessions").glob("*.jsonl"))
+        assert (
+            len(histories) == 1
+            and len([r for r in records(histories[0]) if r["kind"] == "tool_result"]) == 2
+        )
+        # Identical results and metadata; the comparator only repeats the path per row.
+        lines = pages[0].splitlines()
+        grouped_path = lines[1].removesuffix(":")
+        flat = lines[0] + "\n" + "\n".join(grouped_path + ":" + line for line in lines[2:]) + "\n"
+        return {"default_history_pagination": 37, "grouped": pages[0], "flat": flat}
+    finally:
+        server.close()
+
+
 def main() -> None:
     os.environ["EDEN_CONTEXT_KEY"] = "context-verifier-key"
     run(["cargo", "build", "--workspace", "--locked"], ROOT)
@@ -176,6 +248,7 @@ def main() -> None:
         )
         assert stopped(results["search_cancel"]["stopped_worker_pid"])
         # The installed host and probe are already fixed; only SDK and author sources follow.
+        results["default_search_loop"] = default_search_loop(destination, scratch, base)
         authors = author_packages(destination, scratch)
         assert hashlib.sha256(host.read_bytes()).hexdigest() == fixed_host
         selected = copy.deepcopy(base)
@@ -204,6 +277,21 @@ def main() -> None:
         results["interop"] = json.loads(
             run([probe, interop, project, "interop", marker], scratch).stdout
         )
+        rollback = copy.deepcopy(selected)
+        for package in rollback["packages"]:
+            if package["descriptor"]["package"] == "service-a":
+                package["config"] = {"stop_marker": str(scratch / "absent-parent/stop")}
+            if package["descriptor"]["package"] == "service-b":
+                package["descriptor"]["version"] = "wrong"
+        rollback_path = destination / "rollback.json"
+        write(rollback_path, rollback)
+        failure = command("commands", config=rollback_path, check=False)
+        assert (
+            failure.returncode
+            and "IncompatibleContract (loader)" in failure.stderr
+            and "CleanupFailure (service-a)" in failure.stderr
+        ), failure.stderr
+        results["initialization_and_finalizer_failure_visible"] = True
         untrusted_marker = scratch / "untrusted-project-effect"
         write(
             project / ".eden/settings.json",
@@ -288,6 +376,118 @@ def main() -> None:
         finally:
             server.close()
 
+        # An installed outer hook with an unresolved inner route must fail closed.
+        for stage in ["input_hooks", "tool_hooks"]:
+            sentinel = project / "hook-result.txt"
+            sentinel.unlink(missing_ok=True)
+            server = Server(respond)
+            try:
+                broken = copy.deepcopy(selected)
+                for package in broken["packages"]:
+                    if package["descriptor"]["package"] == "contributions":
+                        assert isinstance(package["config"], dict)
+                        package["config"][stage] = ["example.missing.v1"]
+                config = helpers["configure"](destination, broken, server, "missing-" + stage)
+                result = run(
+                    [
+                        host,
+                        "--composition",
+                        config,
+                        "--cwd",
+                        project,
+                        "--global-dir",
+                        global_dir,
+                        "--memory",
+                        "--json",
+                        "Exercise broken hook",
+                    ],
+                    scratch,
+                    check=False,
+                )
+                assert result.returncode and "example.missing.v1" in result.stdout + result.stderr
+                assert not sentinel.exists()
+                assert len(server.requests) == (0 if stage == "input_hooks" else 1)
+            finally:
+                server.close()
+        results["missing_inner_hook_blocks_effect"] = True
+
+        server = Server(lambda _body, _index: (200, complete(answer("NO-CONTEXT"))))
+        try:
+            for name in ["SYSTEM.md", "APPEND_SYSTEM.md", "AGENTS.md"]:
+                (global_dir / name).write_text("FORBIDDEN-AUTO-CONTEXT", encoding="utf-8")
+            config = helpers["configure"](destination, base, server, "no-context")
+            run(
+                [
+                    host,
+                    "--composition",
+                    config,
+                    "--cwd",
+                    project,
+                    "--global-dir",
+                    global_dir,
+                    "--memory",
+                    "--no-context",
+                    "--json",
+                    "Reply briefly",
+                ],
+                scratch,
+            )
+            assert "FORBIDDEN-AUTO-CONTEXT" not in json.dumps(server.requests)
+            results["no_context_actual_model_input"] = True
+        finally:
+            server.close()
+
+        if sys.platform == "win32":
+
+            def powershell_reply(_body: dict[str, Any], index: int) -> tuple[int, dict[str, Any]]:
+                if index == 0:
+                    return 200, complete(
+                        [
+                            {
+                                "type": "function_call",
+                                "call_id": "native-pwsh",
+                                "name": "powershell",
+                                "arguments": json.dumps(
+                                    {
+                                        "command": "[System.IO.File]::WriteAllText((Join-Path (Get-Location) 'pwsh-cwd.txt'), (Get-Location).Path)"
+                                    }
+                                ),
+                            }
+                        ]
+                    )
+                return 200, complete(answer("POWERSHELL-COMPLETE"))
+
+            server = Server(powershell_reply)
+            try:
+                powershell = copy.deepcopy(base)
+                for package in powershell["packages"]:
+                    if package["descriptor"]["package"] == "coding-tools":
+                        assert isinstance(package["config"], dict)
+                        package["config"]["tools"] = ["powershell"]
+                config = helpers["configure"](destination, powershell, server, "powershell")
+                run(
+                    [
+                        host,
+                        "--composition",
+                        config,
+                        "--cwd",
+                        project,
+                        "--global-dir",
+                        global_dir,
+                        "--memory",
+                        "--json",
+                        "Run the PowerShell task.",
+                    ],
+                    scratch,
+                )
+                assert (
+                    pathlib.Path((project / "pwsh-cwd.txt").read_text(encoding="utf-8")).resolve()
+                    == project.resolve()
+                )
+                results["installed_native_powershell_unicode_cwd"] = True
+            finally:
+                server.close()
+
         source = scratch / "bundle"
         source.mkdir()
         artifact = pathlib.Path(authors[0]["library"])
@@ -326,6 +526,59 @@ def main() -> None:
         locked = json.loads(command("package", "install", "--source-json", git_source).stdout)
         assert locked["source"]["commit"] == commit
         results["package_local_archive_fixed_git"] = True
+
+        # Copy using a different Store composition; the copied binding still owns v1.
+        managed = copy.deepcopy(selected)
+        for package in managed["packages"]:
+            if package["descriptor"]["package"] == "service-a":
+                package.update(copy.deepcopy(installed["manifest"]))
+                package["library"] = str(
+                    pathlib.Path(installed["path"]) / installed["manifest"]["library"]
+                )
+        server = Server(lambda _body, _index: (200, complete(answer("MANAGED-SESSION"))))
+        source_history = scratch / "managed-source.jsonl"
+        try:
+            config = helpers["configure"](destination, managed, server, "managed-session")
+            run(
+                [
+                    host,
+                    "--composition",
+                    config,
+                    "--cwd",
+                    project,
+                    "--global-dir",
+                    global_dir,
+                    "--session",
+                    source_history,
+                    "--json",
+                    "Reply briefly",
+                ],
+                scratch,
+            )
+        finally:
+            server.close()
+        copied = scratch / "managed-fork.jsonl"
+        recovered = scratch / "managed-recovery.jsonl"
+        command("session", "fork", source_history, copied, "--apply")
+        command("session", "recover", source_history, recovered, "--apply")
+        source_history.unlink()
+        references = []
+        for reference in (global_dir / "distribution/sessions").glob("*.json"):
+            value = json.loads(reference.read_text(encoding="utf-8"))
+            if pathlib.Path(value["history"]) in [copied, recovered]:
+                assert (
+                    str(pathlib.Path(installed["path"]) / installed["manifest"]["library"])
+                    in value["libraries"]
+                )
+                references.append(value["history"])
+        assert len(references) == 2
+        rejected = command("package", "remove", "service-a", "0.1.0", check=False)
+        assert (
+            rejected.returncode
+            and str(copied) in rejected.stderr
+            and str(recovered) in rejected.stderr
+        ), rejected.stderr
+        results["copied_saved_binding_references"] = True
 
         # TLS remains verified against an explicit test CA, with digest and downgrade checks.
         class ArchiveHandler(http.server.BaseHTTPRequestHandler):

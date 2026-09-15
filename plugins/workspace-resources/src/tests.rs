@@ -55,6 +55,25 @@ fn override_and_system_sources_have_distinct_precedence() {
     assert_eq!(loaded.snapshot.append_system, "append text");
 }
 #[test]
+fn no_context_disables_all_automatic_instruction_sources() {
+    let f = Fixture::new();
+    for path in [
+        "project/AGENTS.md",
+        "global/SYSTEM.md",
+        "project/.eden/SYSTEM.md",
+        "global/APPEND_SYSTEM.md",
+    ] {
+        f.write(path, "must not be loaded");
+    }
+    let mut config = f.config();
+    config.settings = json!({"discover_context": false});
+    let loaded = load(&config, 1).unwrap();
+    assert!(loaded.snapshot.instructions.is_empty());
+    assert!(loaded.snapshot.system.is_none());
+    assert!(loaded.snapshot.append_system.is_empty());
+    assert!(loaded.snapshot.sources.is_empty());
+}
+#[test]
 fn untrusted_skill_and_system_are_ignored_but_context_text_is_read() {
     let f = Fixture::new();
     f.write("project/AGENTS.md", "readable instructions");

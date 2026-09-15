@@ -304,6 +304,19 @@ pub struct Kernel {
     instances: Vec<Arc<NativeInstance>>,
     composition: Composition,
 }
+async fn rollback_initialization(mut error: Fault, instances: &[Arc<NativeInstance>]) -> Fault {
+    for instance in instances {
+        instance.close();
+    }
+    for instance in instances {
+        if let Err(cleanup) = instance.stop().await {
+            error
+                .message
+                .push_str(&format!("; rollback cleanup: {cleanup}"));
+        }
+    }
+    error
+}
 impl Kernel {
     pub async fn load(path: &Path, session_id: u64, events: Arc<Events>) -> Result<Self, Fault> {
         let bytes = std::fs::read(path)
@@ -394,9 +407,8 @@ impl Kernel {
                 }
                 Err(error) => {
                     router.open.store(false, Ordering::Release);
-                    for instance in packages.values() {
-                        let _ = instance.stop().await;
-                    }
+                    let instances: Vec<_> = packages.values().cloned().collect();
+                    let error = rollback_initialization(error, &instances).await;
                     routers()
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
@@ -421,14 +433,17 @@ impl Kernel {
         {
             Ok(fork) => fork,
             Err(error) => {
-                for instance in &instances {
-                    let _ = instance.stop().await;
-                }
+                router.open.store(false, Ordering::Release);
+                let error = rollback_initialization(
+                    Fault::new("Unavailable", "cordis", error.to_string()),
+                    &instances,
+                )
+                .await;
                 routers()
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .remove(&token);
-                return Err(Fault::new("Unavailable", "cordis", error.to_string()));
+                return Err(error);
             }
         };
         Ok(Self {
@@ -472,10 +487,16 @@ impl Kernel {
         let disposed = self.fork.dispose().await;
         // Include explicitly loaded packages that were not selected for a role;
         // instance finalizer failures survive repeated stop calls by the adapter.
-        let mut cleanup = None;
+        let mut cleanup: Option<Fault> = None;
         for instance in &self.instances {
             if let Err(error) = instance.stop().await {
-                cleanup.get_or_insert(error);
+                if let Some(first) = &mut cleanup {
+                    first
+                        .message
+                        .push_str(&format!("; instance cleanup: {error}"));
+                } else {
+                    cleanup = Some(error);
+                }
             }
         }
         let workers = std::mem::take(
@@ -492,7 +513,12 @@ impl Kernel {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&self.token);
-        if let Some(error) = cleanup {
+        if let Some(mut error) = cleanup {
+            if let Err(disposal) = disposed {
+                error
+                    .message
+                    .push_str(&format!("; cordis cleanup: {disposal}"));
+            }
             return Err(error);
         }
         disposed.map_err(|e| Fault::new("CleanupFailure", "cordis", e.to_string()))

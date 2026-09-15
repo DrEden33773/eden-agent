@@ -359,4 +359,84 @@ mod tests {
             .await;
         assert_eq!(terminal.into_result().unwrap_err().code, "Unavailable");
     }
+
+    struct RollbackFixture {
+        source: &'static str,
+        finalized: Arc<AtomicUsize>,
+        destroyed: Arc<AtomicUsize>,
+    }
+    unsafe extern "C" fn rollback_start(handle: usize, bytes: Bytes, reply: Reply) -> u64 {
+        // SAFETY: The test owns this fixture until the host's final destroy barrier.
+        let fixture = unsafe { &*(handle as *const RollbackFixture) };
+        // SAFETY: NativeInstance borrows its serialized request for this synchronous call.
+        let request: Request = unsafe { bytes.decode() }.unwrap();
+        assert_eq!(request.contract, eden_protocol::INSTANCE_STOP);
+        fixture.finalized.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: This fixture completes the accepted receiver exactly once.
+        unsafe {
+            reply.send(&Terminal::failed(Fault::new(
+                "CleanupFailure",
+                fixture.source,
+                "rollback finalizer failed",
+            )));
+        }
+        1
+    }
+    unsafe extern "C" fn rollback_destroy(handle: usize) {
+        // SAFETY: Host destruction takes unique ownership after all operations have released.
+        let fixture = unsafe { Box::from_raw(handle as *mut RollbackFixture) };
+        fixture.destroyed.fetch_add(1, Ordering::SeqCst);
+    }
+    static ROLLBACK_API: Api = Api {
+        start: rollback_start,
+        destroy: rollback_destroy,
+        ..API
+    };
+    #[tokio::test]
+    async fn initialization_rollback_preserves_all_failures_and_destroys_every_instance() {
+        let finalized = Arc::new(AtomicUsize::new(0));
+        let destroyed = Arc::new(AtomicUsize::new(0));
+        let instances: Vec<_> = ["first-plugin", "second-plugin"]
+            .into_iter()
+            .map(|source| {
+                let fixture = Box::new(RollbackFixture {
+                    source,
+                    finalized: finalized.clone(),
+                    destroyed: destroyed.clone(),
+                });
+                Arc::new(NativeInstance {
+                    api: &ROLLBACK_API,
+                    gate: Mutex::new(Gate {
+                        handle: Some(Box::into_raw(fixture) as usize),
+                        open: true,
+                        active: 0,
+                        operations: Default::default(),
+                    }),
+                    drained: Notify::new(),
+                    stop_lock: tokio::sync::Mutex::new(()),
+                    has_finalizer: true,
+                    stop_result: Mutex::new(None),
+                })
+            })
+            .collect();
+        let original = Fault::new("Unavailable", "third-plugin", "initialization rejected");
+        let error = crate::rollback_initialization(original.clone(), &instances).await;
+        assert_eq!(error.code, original.code);
+        assert_eq!(error.source, original.source);
+        assert!(error.message.starts_with(&original.message));
+        for source in ["first-plugin", "second-plugin"] {
+            assert!(
+                error
+                    .message
+                    .contains(&format!("CleanupFailure ({source})"))
+            );
+        }
+        assert_eq!(finalized.load(Ordering::SeqCst), 2);
+        assert_eq!(destroyed.load(Ordering::SeqCst), 2);
+        for instance in instances {
+            let gate = instance.gate.lock().unwrap();
+            assert!(!gate.open);
+            assert!(gate.handle.is_none());
+        }
+    }
 }

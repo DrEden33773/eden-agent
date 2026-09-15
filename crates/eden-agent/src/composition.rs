@@ -29,7 +29,22 @@ pub(crate) fn binding(composition: &eden_protocol::Composition, cwd: &str) -> Re
             }),
         );
     }
-    Ok(json!({"cwd":cwd,"roles":composition.roles,"packages":packages}))
+    Ok(
+        json!({"cwd":cwd,"roles":composition.roles,"packages":packages,
+            "library_locations":composition.packages.iter().map(|p| &p.library).collect::<Vec<_>>()
+        }),
+    )
+}
+/// Locations support data-only copy reference tracking, but are not package identity.
+pub(crate) fn equivalent(left: &Value, right: &Value) -> bool {
+    let mut left = left.clone();
+    let mut right = right.clone();
+    for value in [&mut left, &mut right] {
+        if let Some(object) = value.as_object_mut() {
+            object.remove("library_locations");
+        }
+    }
+    left == right
 }
 impl Session {
     /// Explicit generation replacement; static failure leaves the current generation live.
@@ -44,8 +59,13 @@ impl Session {
         run_id: u64,
         cancel: Cancellation,
     ) -> Result<Value, Fault> {
-        let mut selected =
-            workspace_setup::prepare(&path, self.cwd(), &self.0.workspace_options, &self.0.events)?;
+        let mut selected = workspace_setup::prepare(
+            &path,
+            self.cwd(),
+            &self.0.workspace_options,
+            &self.0.events,
+            self.0.history_path.as_deref(),
+        )?;
         eden_kernel::preflight(&selected)?;
         if selected.roles.contains_key(c::LOOP) != self.0.coding {
             return Err(failure("switch cannot change the session protocol family"));
@@ -128,7 +148,7 @@ impl Session {
                     )
                     .await
                     .into_result()?;
-                workspace_setup::register(self, kernel.composition())?;
+                workspace_setup::register(self, kernel.composition(), true)?;
                 kernel
                     .invoke(
                         Request {
@@ -145,6 +165,7 @@ impl Session {
                     )
                     .await
                     .into_result()?;
+                workspace_setup::register(self, kernel.composition(), false)?;
             }
             Ok::<_, Fault>(())
         }

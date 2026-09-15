@@ -495,6 +495,21 @@ async fn isolated_service<I: Serialize, O: serde::de::DeserializeOwned + Send + 
         } else {
             None
         };
+        let copied_libraries: Option<Vec<String>> = payload["records"]
+            .as_array()
+            .and_then(|records| {
+                records
+                    .iter()
+                    .rev()
+                    .find(|r| r["kind"] == "composition_lock")
+            })
+            .and_then(|record| record["payload"]["library_locations"].as_array())
+            .map(|paths| {
+                paths
+                    .iter()
+                    .filter_map(|p| p.as_str().map(str::to_owned))
+                    .collect()
+            });
         let kernel = Kernel::load_resolved(
             selected,
             composition.parent().unwrap_or(Path::new(".")),
@@ -516,11 +531,15 @@ async fn isolated_service<I: Serialize, O: serde::de::DeserializeOwned + Send + 
             .into_result();
         let result = result.and_then(|value| {
             if let Some(path) = created {
-                eden_workspace::packages::register(
-                    &WorkspaceOptions::default().global_dir.join("distribution"),
-                    &path,
-                    kernel.composition(),
-                )?;
+                // The creator's Store composition need not match the copied binding.
+                if let Some(libraries) = copied_libraries {
+                    eden_workspace::packages::register_libraries(
+                        &WorkspaceOptions::default().global_dir.join("distribution"),
+                        &path,
+                        libraries,
+                        false,
+                    )?;
+                }
             }
             Ok(value)
         });

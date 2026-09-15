@@ -1,3 +1,4 @@
+use super::scope::Stamp;
 use fff_search::{
     FFFMode, FFFQuery, FilePicker, FilePickerOptions, FuzzyQuery, FuzzySearchOptions, GrepMode,
     GrepSearchOptions, PaginationArgs, SharedFilePicker, SharedFrecency,
@@ -6,9 +7,8 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime},
+    time::Duration,
 };
-type Stamp = BTreeMap<PathBuf, (u64, Option<SystemTime>)>;
 struct Index {
     picker: SharedFilePicker,
     stamp: Stamp,
@@ -24,6 +24,7 @@ struct Cached {
     stamp: Stamp,
     scope: PathBuf,
     follow: bool,
+    excluded: Vec<PathBuf>,
     rows: Vec<Value>,
     metadata: Value,
     fallback: bool,
@@ -51,8 +52,8 @@ fn query_text(pattern: &str) -> FFFQuery<'_> {
         location: None,
     }
 }
-fn stamp(path: &Path, follow: bool) -> Result<Stamp, String> {
-    super::scope::stamp(path, follow)
+fn stamp(path: &Path, follow: bool, excluded: &[PathBuf]) -> Result<Stamp, String> {
+    super::scope::stamp(path, follow, excluded)
 }
 impl Engine {
     pub fn with_progress(progress: fn(&str)) -> Self {
@@ -167,7 +168,11 @@ impl Engine {
             if cached.key != key {
                 return Err("cursor belongs to a different query".into());
             }
-            if stamp(&cached.scope, cached.follow).ok().as_ref() != Some(&cached.stamp) {
+            if stamp(&cached.scope, cached.follow, &cached.excluded)
+                .ok()
+                .as_ref()
+                != Some(&cached.stamp)
+            {
                 return Err("stale cursor: search scope changed; start a new query".into());
             }
             return self.page(&id, offset, limit);
@@ -190,7 +195,20 @@ impl Engine {
             return Err("broad scan requires explicit search configuration".into());
         }
         let follow = args["follow_symlinks"] == true;
-        let before = stamp(&scope, follow)?;
+        let excluded: Vec<PathBuf> = args.get("_excluded_paths").map_or(Ok(vec![]), |value| {
+            value
+                .as_array()
+                .ok_or("excluded_paths must be an array")?
+                .iter()
+                .map(|p| {
+                    p.as_str()
+                        .map(PathBuf::from)
+                        .filter(|p| p.is_absolute())
+                        .ok_or("excluded_paths must contain absolute paths")
+                })
+                .collect::<Result<_, _>>()
+        })?;
+        let before = stamp(&scope, follow, &excluded)?;
         let pattern = args
             .get("pattern")
             .and_then(Value::as_str)
@@ -241,8 +259,21 @@ impl Engine {
             args["refresh"] == true,
             &before,
         )?;
-        let guard = index.picker.read().map_err(fail)?;
-        let picker = guard.as_ref().ok_or("index unavailable")?;
+        // Keep the write lock through search so watcher events cannot resurrect
+        // excluded files between pruning and the search/skip inventory reads.
+        let mut guard = index.picker.write().map_err(fail)?;
+        let picker = guard.as_mut().ok_or("index unavailable")?;
+        let removed: Vec<_> = picker
+            .get_files()
+            .iter()
+            .filter(|file| !file.is_deleted())
+            .map(|file| file.absolute_path(&*picker, picker.base_path()))
+            .filter(|path| super::scope::is_excluded(path, &excluded))
+            .collect();
+        for path in removed {
+            picker.remove_file_by_path(path);
+        }
+        let picker: &FilePicker = picker;
         let mut rows = vec![];
         let mut fallback = false;
         let mut metadata = json!({
@@ -271,14 +302,24 @@ impl Engine {
                 return Err("find mode must be fuzzy or glob".into());
             }
             if mode == "glob" {
-                let matcher = globset::GlobBuilder::new(pattern)
+                let folded_pattern = if insensitive {
+                    pattern.to_lowercase()
+                } else {
+                    pattern.into()
+                };
+                let matcher = globset::GlobBuilder::new(&folded_pattern)
                     .case_insensitive(insensitive)
                     .build()
                     .map_err(fail)?
                     .compile_matcher();
                 for file in picker.get_files().iter().filter(|f| !f.is_deleted()) {
                     let path = file.relative_path(picker);
-                    if matcher.is_match(&path) && !excludes.is_match(&path) {
+                    let matched_path = if insensitive {
+                        path.to_lowercase()
+                    } else {
+                        path.clone()
+                    };
+                    if matcher.is_match(&matched_path) && !excludes.is_match(&path) {
                         rows.push(json!({
                         "path":path
                         }));
@@ -317,6 +358,23 @@ impl Engine {
  score.base_score + score.filename_bonus + score.special_filename_bonus + score.path_alignment_bonus
 }
 }));
+                }
+            }
+            if mode == "fuzzy" {
+                // FFF's byte prefilters can discard Unicode case variants. Its
+                // own matcher can evaluate those paths without the byte filter.
+                let mut matcher = unicode_matcher(pattern, insensitive, false);
+                for file in picker.get_files().iter().filter(|f| !f.is_deleted()) {
+                    let path = file.relative_path(picker);
+                    if (pattern.is_ascii() && path.is_ascii())
+                        || excludes.is_match(&path)
+                        || rows.iter().any(|row| row["path"] == path)
+                    {
+                        continue;
+                    }
+                    if let Some(matched) = matcher.match_one(&path, 0) {
+                        rows.push(json!({"path":path,"score":matched.score}));
+                    }
                 }
             }
             if mode == "glob" {
@@ -364,15 +422,17 @@ impl Engine {
                 // Force explicit case handling without FFF's query-language inference.
                 let native_pattern = if insensitive && mode != "fuzzy" {
                     format!(
-                        "(?i:{})",
+                        "(?ui:{})",
                         if mode == "literal" {
                             literal_pattern(pattern)
                         } else {
-                            pattern.into()
+                            safe_regex(pattern)
                         }
                     )
                 } else if mode == "literal" {
                     literal_pattern(pattern)
+                } else if mode == "regex" {
+                    safe_regex(pattern)
                 } else {
                     pattern.into()
                 };
@@ -454,6 +514,41 @@ impl Engine {
 }));
                 }
                 if mode == "fuzzy" {
+                    use std::io::BufRead;
+                    let mut matcher = unicode_matcher(pattern, insensitive, true);
+                    for file in picker
+                        .get_files()
+                        .iter()
+                        .filter(|f| !f.is_deleted() && !f.is_binary() && f.size <= max_size)
+                    {
+                        let path = file.relative_path(picker);
+                        if excludes.is_match(&path) {
+                            continue;
+                        }
+                        let input =
+                            std::fs::File::open(file.absolute_path(picker, picker.base_path()))
+                                .map_err(fail)?;
+                        for (line_index, line) in std::io::BufReader::new(input).lines().enumerate()
+                        {
+                            let line = line.map_err(fail)?;
+                            let number = line_index + 1;
+                            if (pattern.is_ascii() && line.is_ascii())
+                                || line.len() > 512
+                                || output
+                                    .iter()
+                                    .any(|row| row["path"] == path && row["line"] == number)
+                            {
+                                continue;
+                            }
+                            if let Some((score, column)) =
+                                unicode_line_match(&mut matcher, pattern, &line)
+                            {
+                                output.push(json!({"path":path,"line":number,"column":column,"text":line,
+                                    "score":score,"definition_hint":false,"git_changed":file.git_status.is_some(),
+                                    "line_truncated":false,"line_bytes":line.len()}));
+                            }
+                        }
+                    }
                     sort_fuzzy(&mut output);
                 } else {
                     output.sort_by(|a, b| {
@@ -539,7 +634,7 @@ impl Engine {
         metadata["ranking"] = json!(ranking);
         metadata["index"]["history_persistent"] = json!(args["_history_dir"].is_string());
         drop(guard);
-        let after = stamp(&scope, follow)?;
+        let after = stamp(&scope, follow, &excluded)?;
         if before != after {
             return Err("search scope changed during query; refresh and retry".into());
         }
@@ -558,6 +653,7 @@ impl Engine {
                 stamp: after,
                 scope,
                 follow,
+                excluded,
                 rows,
                 metadata,
                 fallback,
@@ -656,12 +752,89 @@ impl Engine {
         }
     }
 }
+// FFF's regex builder rewrites every textual backslash+n, including escaped
+// backslashes. Encode escaped backslashes before that second compilation.
+fn safe_regex(pattern: &str) -> String {
+    let mut output = String::new();
+    let mut chars = pattern.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('\\') => output.push_str(r"\x5c"),
+                Some(next) => {
+                    output.push(ch);
+                    output.push(next);
+                }
+                None => output.push(ch),
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
 fn literal_pattern(pattern: &str) -> String {
-    pattern
-        .as_bytes()
-        .iter()
-        .map(|byte| format!("\\x{byte:02x}"))
-        .collect()
+    safe_regex(&regex::escape(pattern))
+}
+// The same matching engine as FFF, with character-count quality guards for
+// Unicode (FFF 0.10.6's byte-count guards can reject a one-character é match).
+fn unicode_matcher(pattern: &str, insensitive: bool, content: bool) -> neo_frizbee::Matcher {
+    let scoring = if content {
+        neo_frizbee::Scoring {
+            exact_match_bonus: 100,
+            prefix_bonus: 0,
+            capitalization_bonus: if insensitive { 0 } else { 4 },
+            ..Default::default()
+        }
+    } else {
+        Default::default()
+    };
+    neo_frizbee::Matcher::new(
+        pattern,
+        &neo_frizbee::Config {
+            casing: if insensitive {
+                neo_frizbee::CaseMatching::Ignore
+            } else {
+                neo_frizbee::CaseMatching::Respect
+            },
+            unicode: neo_frizbee::UnicodeMatching::Always,
+            max_typos: Some((pattern.chars().count() / 3).min(2) as u16),
+            scoring,
+            ..Default::default()
+        },
+    )
+}
+fn unicode_line_match(
+    matcher: &mut neo_frizbee::Matcher,
+    pattern: &str,
+    line: &str,
+) -> Option<(u16, usize)> {
+    let mut matched = matcher.match_one_indices(line, 0)?;
+    matched.indices.sort_unstable();
+    let count = pattern.chars().count();
+    let typos = (count / 3).min(2);
+    let first = *matched.indices.first()?;
+    let last = *matched.indices.last()?;
+    let span = last - first + 1;
+    let density = if matched.indices.len() >= count {
+        45
+    } else {
+        65
+    };
+    if usize::from(matched.score) < count * 8
+        || matched.indices.len() < count.saturating_sub(typos).max(1)
+        || span > count * 3
+        || matched.indices.len() * 100 / span < density
+        || matched
+            .indices
+            .windows(2)
+            .filter(|pair| pair[1] != pair[0] + 1)
+            .count()
+            > (count / 3).max(2)
+    {
+        return None;
+    }
+    Some((matched.score, line.char_indices().nth(first)?.0))
 }
 fn sort_fuzzy(rows: &mut [Value]) {
     rows.sort_by(|a, b| {
@@ -901,6 +1074,105 @@ mod tests {
             request["arguments"]["cursor"] = page["cursor"].clone();
         }
         assert_eq!(count, 35);
+    }
+    #[test]
+    fn regex_preserves_escaped_backslash_and_unicode_insensitive_literals() {
+        let fixture = Fixture::new();
+        std::fs::write(
+            fixture.0.join("text.txt"),
+            "needle\\n\nneedle\néclair\nÉCLAIR\n",
+        )
+        .unwrap();
+        let mut engine = Engine::default();
+        let mut request = fixture.request(r"needle\\n");
+        request["arguments"]["mode"] = json!("regex");
+        let page = engine.query(&request).unwrap();
+        assert_eq!(page["groups"][0]["matches"][0]["line"], 1);
+        for mode in ["literal", "regex"] {
+            request["arguments"]["mode"] = json!(mode);
+            request["arguments"]["pattern"] = json!("éclair");
+            request["arguments"]["case"] = json!("insensitive");
+            assert_eq!(engine.query(&request).unwrap()["total_matches"], 2);
+        }
+    }
+    #[test]
+    fn regex_escape_protection_preserves_multiline_and_literal_newlines() {
+        let fixture = Fixture::new();
+        std::fs::write(fixture.0.join("text.txt"), "needle\nnext\nneedle\\n\n").unwrap();
+        let mut request = fixture.request("needle\nnext");
+        let mut engine = Engine::default();
+        assert_eq!(engine.query(&request).unwrap()["total_matches"], 1);
+        request["arguments"]["mode"] = json!("regex");
+        request["arguments"]["pattern"] = json!(r"needle\nnext");
+        assert_eq!(engine.query(&request).unwrap()["total_matches"], 1);
+    }
+    #[test]
+    fn excluded_owned_state_does_not_pollute_git_search_or_invalidate_pages() {
+        let fixture = Fixture::new();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .arg(&fixture.0)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let sessions = fixture.0.join(".eden/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let history = sessions.join("active.jsonl");
+        std::fs::write(&history, "needle\n").unwrap();
+        std::fs::write(fixture.0.join("a.txt"), "needle\nneedle\n").unwrap();
+        let mut request = fixture.request("needle");
+        request["arguments"]["_excluded_paths"] = json!([sessions]);
+        request["arguments"]["limit"] = json!(1);
+        let mut engine = Engine::default();
+        let first = engine.query(&request).unwrap();
+        assert_eq!(first["total_matches"], 2);
+        std::fs::write(&history, "needle\nneedle\n").unwrap();
+        std::fs::write(sessions.join("binary.bin"), [0u8; 4096]).unwrap();
+        request["arguments"]["cursor"] = first["cursor"].clone();
+        assert_eq!(engine.query(&request).unwrap()["returned"], 1);
+        request["arguments"]
+            .as_object_mut()
+            .unwrap()
+            .remove("cursor");
+        let page = engine.query(&request).unwrap();
+        assert_eq!(page["total_matches"], 2);
+        assert_eq!(page["complete"], true);
+        assert_eq!(page["skipped_count"], 0);
+    }
+    #[test]
+    fn renamed_symlink_alias_invalidates_cursor() {
+        let fixture = Fixture::new();
+        let target = Fixture::new();
+        std::fs::write(target.0.join("text.txt"), "needle\nneedle\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target.0, fixture.0.join("old")).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&target.0, fixture.0.join("old")).unwrap();
+        let mut request = fixture.request("needle");
+        request["arguments"]["follow_symlinks"] = json!(true);
+        request["arguments"]["limit"] = json!(1);
+        let mut engine = Engine::default();
+        let first = engine.query(&request).unwrap();
+        std::fs::rename(fixture.0.join("old"), fixture.0.join("new")).unwrap();
+        request["arguments"]["cursor"] = first["cursor"].clone();
+        assert!(engine.query(&request).unwrap_err().contains("stale"));
+    }
+    #[test]
+    fn unicode_case_is_consistent_across_search_modes() {
+        let fixture = Fixture::new();
+        std::fs::write(fixture.0.join("É.TXT"), "É\n").unwrap();
+        let mut request = fixture.request("é");
+        request["arguments"]["case"] = json!("insensitive");
+        request["arguments"]["mode"] = json!("fuzzy");
+        let mut engine = Engine::default();
+        assert_eq!(engine.query(&request).unwrap()["total_matches"], 1);
+        request["name"] = json!("find");
+        assert_eq!(engine.query(&request).unwrap()["total_matches"], 1);
+        request["arguments"]["mode"] = json!("glob");
+        request["arguments"]["pattern"] = json!("é.txt");
+        assert_eq!(engine.query(&request).unwrap()["total_matches"], 1);
     }
     #[test]
     fn nonexistent_scope_does_not_widen_to_parent() {

@@ -4,6 +4,7 @@ pub(crate) fn prepare(
     cwd: &str,
     workspace_options: &WorkspaceOptions,
     events: &Arc<Events>,
+    history: Option<&Path>,
 ) -> Result<eden_protocol::Composition, Fault> {
     let workspace = eden_workspace::Workspace::discover(Path::new(cwd), workspace_options)?;
     for diagnostic in &workspace.diagnostics {
@@ -48,6 +49,23 @@ pub(crate) fn prepare(
             }
             package.config["history_dir"] =
                 serde_json::json!(workspace.global_dir.join("search-history"));
+            let mut excluded = package.config["excluded_paths"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            excluded.push(serde_json::json!(workspace.global_dir));
+            excluded.push(serde_json::json!(Path::new(cwd).join(".eden/sessions")));
+            if let Some(history) = history {
+                let history = if history.is_absolute() {
+                    history.to_owned()
+                } else {
+                    std::env::current_dir()
+                        .map_err(|e| Fault::new("FileFailure", "history", e.to_string()))?
+                        .join(history)
+                };
+                excluded.push(serde_json::json!(history));
+            }
+            package.config["excluded_paths"] = serde_json::json!(excluded);
         }
         if package.descriptor.package == "distribution" {
             if !package.config.is_object() {
@@ -66,6 +84,7 @@ pub(crate) fn prepare(
             }
         }
     }
+    eden_kernel::preflight(&selected)?;
     for package in &mut selected.packages {
         package.library = std::fs::canonicalize(
             composition
@@ -73,7 +92,13 @@ pub(crate) fn prepare(
                 .unwrap_or(Path::new("."))
                 .join(&package.library),
         )
-        .map_err(|e| Fault::new("FileFailure", "composition", e.to_string()))?
+        .map_err(|e| {
+            Fault::new(
+                "MissingDependency",
+                &package.descriptor.package,
+                e.to_string(),
+            )
+        })?
         .to_string_lossy()
         .into_owned();
     }
@@ -84,16 +109,18 @@ pub(crate) fn prepare(
 pub(crate) fn register(
     session: &Session,
     composition: &eden_protocol::Composition,
+    pending: bool,
 ) -> Result<(), Fault> {
     if let Some(history) = &session.0.history_path {
         let workspace = eden_workspace::Workspace::discover(
             Path::new(session.cwd()),
             &session.0.workspace_options,
         )?;
-        eden_workspace::packages::register(
+        eden_workspace::packages::register_pending(
             &workspace.global_dir.join("distribution"),
             history,
             composition,
+            pending,
         )?;
     }
     Ok(())

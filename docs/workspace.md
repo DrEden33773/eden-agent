@@ -51,7 +51,7 @@ Discovery injects only the name, description and source path into model context.
 
 Templates come from global `prompts/`, trusted `.eden/prompts/`, and explicit paths. `/filename arguments` expands that Markdown template. Arguments support single/double quotes and escaping, `$1`, `$2`, `$@`, `$ARGUMENTS`, `${3:-default}`, `${@:2:1}` and `${ARGUMENTS:-default}`. Expansion never executes shell syntax.
 
-`--no-context`, `--no-skills` and `--no-templates` disable their automatic discovery. Explicit skill/template paths remain explicit sources. `eden resources list` reports the active resource metadata. The shared API's `reload_resources()` is an idle management operation: it prepares a complete replacement before publishing it, and a failed reload retains the prior snapshot. Each coding run freezes one resource snapshot and tool catalog. Reopening reads current resources at the recorded cwd while retaining historical content that was actually sent to the model.
+`--no-context` also disables automatic SYSTEM/APPEND_SYSTEM loading. `--no-context`, `--no-skills` and `--no-templates` disable their automatic discovery. Explicit skill/template paths remain explicit sources. `eden resources list` reports the active resource metadata. The shared API's `reload_resources()` is an idle management operation: it prepares a complete replacement before publishing it, and a failed reload retains the prior snapshot. Each coding run freezes one resource snapshot and tool catalog. Reopening reads current resources at the recorded cwd while retaining historical content that was actually sent to the model.
 
 ## FFF search
 
@@ -77,6 +77,8 @@ Results use a compact metadata header and one quoted path per adjacent group, fo
 
 Cursors bind query semantics and searchable file revisions. Relevant changes, reopen or bounded cache eviction produce a stale-cursor error, never a silent restart. Changes to ignored content alone do not invalidate a page. The index is rebuilt when the current searchable file inventory or metadata differs, supplementing the native watcher so the next query sees write/edit effects. There is no promise of recovery of a disk content index.
 
+The host excludes its global state directory, the default `<cwd>/.eden/sessions` directory, and the active history file from search results and scope revisions. Additional absolute `plugins.search.excluded_paths` use the same policy. This keeps history writes from invalidating a page or matching the conversation itself. FFF may traverse these paths during its initial scan; the wrapper removes them under the index lock before querying.
+
 Access learning is disabled by default. `plugins.search.persist_history: true` enables an Eden-owned JSONL history under the global `search-history/` directory, separated by canonical project cwd. Only successful read-tool accesses are recorded; a returned search hit alone is never recorded as a read. A read of a previously displayed result also records the associated query. Explicit `history` ranking prioritizes decayed access counts, with a seven-day half-life and extra weight for the matching query, then retains the normal order for ties. The default order remains independent of this history.
 
 ## Package sources and locked versions
@@ -97,7 +99,7 @@ Git revisions are resolved and locked to an actual commit. HTTPS archives requir
 
 Source builds require `--build` and a `build` object with `manifest_path` and `artifact`, both relative paths inside the source bundle. Cargo metadata must identify one package containing a cdylib target. The command builds that package with `--release --locked --lib --package`; it does not rebuild the installed host. Missing target artifacts never trigger an implicit build. All dependencies are staged and checked before publishing; cancellation before publication does not install a version. Once publication begins, the transaction finishes or rolls back its new directories.
 
-Installed versions coexist under global `distribution/packages/<name>/<version>/<target>`. Receipts lock the source, manifest, dependencies and an unambiguous SHA-256 tree digest. The same version cannot be overwritten with different bytes. Resolve and session load verify managed installed packages against their receipt. Saved composition references and actual saved session references are reported before removal; `--force` explicitly removes a referenced version while preserving history files.
+Installed versions coexist under global `distribution/packages/<name>/<version>/<target>`. Receipts lock the source, manifest, dependencies and an unambiguous SHA-256 tree digest. The same version cannot be overwritten with different bytes. Resolve and session load verify managed installed packages against their receipt. Saved composition references and actual saved session references are reported before removal; `--force` explicitly removes a referenced version while preserving history files. During a binding update, a pending reference protects both old and proposed libraries; a failed update can conservatively retain both until a successful reopen reconciles the reference.
 
 ```sh
 eden package resolve '{"base":"/path/to/composition.json","packages":[{"name":"example","version":"1.0.0"}],"roles":{"example.service.v1":"example"}}'

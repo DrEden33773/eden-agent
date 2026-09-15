@@ -389,3 +389,13 @@ test("same-commit multi-ref push checks the union of each ref's required familie
   assert.equal(git(root, "ls-files", "--stage", "-z"), staged);
   assert.equal(readFileSync(join(root, "sample.py"), "utf8"), 'value: int = "wrong"\n');
 });
+
+test("autocrlf checkout preserves Biome source and configuration line endings", (t) => {
+  const root = fixture(t);
+  git(root, "-c", "core.autocrlf=true", "checkout-index", "--force", "--all");
+  for (const name of ["biome.json", "scripts/checks.mjs", "scripts/hooks.mjs"]) {
+    assert.doesNotMatch(readFileSync(join(root, name), "utf8"), /\r/);
+  }
+  const result = command(root, process.execPath, ["scripts/checks.mjs", "javascript"]);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});

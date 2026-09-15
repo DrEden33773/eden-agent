@@ -77,7 +77,7 @@ def main() -> None:
         receipt = prepare(output)
         report["preparation"] = {
             key: receipt[key]
-            for key in ("commit", "dirty", "source_fingerprint", "phases", "seconds")
+            for key in ("commit", "dirty", "source_fingerprint", "phases", "compilation", "seconds")
         }
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
             pending = [

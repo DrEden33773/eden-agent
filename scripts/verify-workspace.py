@@ -631,23 +631,30 @@ def main() -> None:
                 )
                 references.append(value["history"])
         assert len(references) == 2
+        assert all(
+            any(pathlib.Path(ref).samefile(history) for ref in references)
+            for history in [copied, recovered]
+        )
         rejected = command("package", "remove", "service-a", "0.1.0", check=False)
         assert (
             rejected.returncode
-            and str(copied) in rejected.stderr
-            and str(recovered) in rejected.stderr
+            and "PackageInUse (distribution)" in rejected.stderr
+            and all(reference in rejected.stderr for reference in references)
         ), rejected.stderr
         results["copied_saved_binding_references"] = True
 
         relocated_global = scratch / "relocated-global"
         relocated_global.mkdir()
+        managed_library = pathlib.Path(installed["path"]) / installed["manifest"]["library"]
+        # Determine containment while both paths exist; aliases/verbatim prefixes are identities,
+        # not textual prefixes. Never replace a substring in a canonical package path.
+        global_parent = next(
+            parent for parent in managed_library.parents if parent.samefile(global_dir)
+        )
+        relative_library = managed_library.relative_to(global_parent)
         shutil.move(global_dir / "distribution", relocated_global / "distribution")
         relocated = copy.deepcopy(managed)
-        new_library = pathlib.Path(
-            str(pathlib.Path(installed["path"]) / installed["manifest"]["library"]).replace(
-                str(global_dir), str(relocated_global), 1
-            )
-        )
+        new_library = relocated_global / relative_library
         for package in relocated["packages"]:
             if package["descriptor"]["package"] == "service-a":
                 package["library"] = str(new_library)
@@ -696,7 +703,21 @@ def main() -> None:
             scratch,
             check=False,
         )
-        assert rejected.returncode and str(relocated_fork) in rejected.stderr, rejected.stderr
+        relocated_references = [
+            json.loads(reference.read_text(encoding="utf-8"))["history"]
+            for reference in (relocated_global / "distribution/sessions").glob("*.json")
+        ]
+        relocated_references = [
+            ref
+            for ref in relocated_references
+            if pathlib.Path(ref).exists() and pathlib.Path(ref).samefile(relocated_fork)
+        ]
+        assert len(relocated_references) == 1
+        assert (
+            rejected.returncode
+            and "PackageInUse (distribution)" in rejected.stderr
+            and relocated_references[0] in rejected.stderr
+        ), rejected.stderr
         results["relocated_reopen_copy_references"] = True
 
         # TLS remains verified against an explicit test CA, with digest and downgrade checks.

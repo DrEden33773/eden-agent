@@ -73,10 +73,10 @@ jobs:
           for component in config["components"]:
               command.extend(["--component", component])
           subprocess.run(command, check=True)
-      - name: Development dependencies
-        run: |
-          node scripts/ci-run.mjs pnpm-install pnpm install --frozen-lockfile
-          node scripts/ci-run.mjs uv-sync uv sync --locked --python 3.12
+      - name: Node development dependencies
+        run: node scripts/ci-run.mjs pnpm-install pnpm install --frozen-lockfile
+      - name: Python development dependencies
+        run: node scripts/ci-run.mjs uv-sync uv sync --locked --python 3.12
       - name: Scope and gate regression tests
         run: node scripts/ci-run.mjs ci-routing node --test scripts/ci-scope.test.mjs scripts/ci-run.test.mjs
       - name: Python formatting, Ruff and standard types
@@ -185,6 +185,12 @@ jobs:
             ~/.cargo/git
           key: cargo-registry-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'tests/contract-authors/*/Cargo.lock') }}
           restore-keys: cargo-registry-v1-${{ runner.os }}-${{ runner.arch }}-
+      - name: Derive build cache compatibility and pinned migration
+        id: build-cache-keys
+        env:
+          CI_CACHE_OS: ${{ matrix.os }}
+          CI_CACHE_ARCH: ${{ runner.arch }}
+        run: python scripts/ci-cache.py
       # A changed source revision can reuse dependency objects while Cargo still
       # validates fingerprints. Never restore source mtimes or cached test results.
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -194,8 +200,8 @@ jobs:
             target
             !target/**/incremental
             !target/verification/seeds
-          key: cargo-target-v1-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.toml', 'Cargo.lock', 'crates/**/Cargo.toml', 'plugins/**/Cargo.toml', 'tests/contract-authors/*/Cargo.toml', 'tests/contract-authors/*/Cargo.lock', '.cargo/config*', '.github/workflows/quality.yml') }}-${{ github.sha }}
-          restore-keys: cargo-target-v1-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.toml', 'Cargo.lock', 'crates/**/Cargo.toml', 'plugins/**/Cargo.toml', 'tests/contract-authors/*/Cargo.toml', 'tests/contract-authors/*/Cargo.lock', '.cargo/config*', '.github/workflows/quality.yml') }}-
+          key: ${{ steps.build-cache-keys.outputs.key }}
+          restore-keys: ${{ steps.build-cache-keys.outputs.restore-keys }}
       - name: Record cache identity
         shell: python
         env:
@@ -212,12 +218,16 @@ jobs:
           root = pathlib.Path("artifacts/ci")
           root.mkdir(parents=True, exist_ok=True)
           fields = ["TARGET_PRIMARY_KEY", "TARGET_MATCHED_KEY", "TARGET_EXACT_HIT", "REGISTRY_MATCHED_KEY", "TOOLCHAIN_EXACT_HIT", "GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"]
-          (root / "cache.json").write_text(json.dumps({key: os.environ.get(key, "") for key in fields}, indent=2) + "\n")
-      - name: Development dependencies
-        id: deps
-        run: |
-          node scripts/ci-run.mjs pnpm-install pnpm install --frozen-lockfile
-          node scripts/ci-run.mjs uv-sync uv sync --locked --python 3.12
+          receipt = {key: os.environ.get(key, "") for key in fields}
+          planned = json.loads((root / "cache-inputs.json").read_text(encoding="utf-8"))
+          receipt["legacy_build_cache_reused"] = bool(planned["legacy_candidate"] and receipt["TARGET_MATCHED_KEY"] == planned["legacy_candidate"])
+          (root / "cache.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+      - name: Node development dependencies
+        id: node-deps
+        run: node scripts/ci-run.mjs pnpm-install pnpm install --frozen-lockfile
+      - name: Python development dependencies
+        id: python-deps
+        run: node scripts/ci-run.mjs uv-sync uv sync --locked --python 3.12
       - name: Select native Git Bash on Windows
         if: runner.os == 'Windows'
         shell: python
@@ -230,21 +240,23 @@ jobs:
               raise RuntimeError("Native Git for Windows Bash is required for process tests")
           with open(os.environ["GITHUB_PATH"], "a", encoding="utf-8") as output:
               output.write(str(bash.parent) + "\n")
+      - name: Native command failure propagation
+        run: node scripts/ci-run.mjs ci-runner node --test scripts/ci-run.test.mjs
       - name: Verification infrastructure and license regressions
         run: node scripts/ci-run.mjs verification-tests python -m unittest discover -s scripts -p "test_*.py" -v
       - name: Dependency license preflight
         run: node scripts/ci-run.mjs licenses python scripts/license_bundle.py --check --all-platforms
       - name: Clippy including independent authors
-        if: ${{ !cancelled() && steps.deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: node scripts/ci-run.mjs clippy pnpm clippy:check
       - name: Git hook behavior
-        if: ${{ !cancelled() && steps.deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: node scripts/ci-run.mjs hooks pnpm hooks:test
       - name: Core and native process tests
-        if: ${{ !cancelled() && steps.deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
-        run: node scripts/ci-run.mjs core cargo test --workspace --locked
+        if: ${{ !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        run: node scripts/ci-run.mjs core cargo test --workspace --locked --no-fail-fast
       - name: Installed suites, independent authors and distribution
-        if: ${{ !cancelled() && steps.deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: node scripts/ci-run.mjs installed python scripts/verify-all.py --workers 2 --output artifacts/verification
       - name: Package installed layout
         shell: bash

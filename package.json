@@ -7,7 +7,7 @@
   },
   "scripts": {
     "hooks:install": "node scripts/install-hooks.mjs",
-    "hooks:test": "node --test tests/development-hooks.test.mjs",
+    "hooks:test": "node --test --test-concurrency=2 tests/development-hooks.test.mjs tests/development-hooks-push.test.mjs",
     "markdown:check": "node scripts/checks.mjs markdown",
     "markdown:fix": "node scripts/checks.mjs markdown-fix",
     "rust:check": "node scripts/checks.mjs fmt",

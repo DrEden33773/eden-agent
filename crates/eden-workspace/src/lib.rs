@@ -225,7 +225,9 @@ mod tests {
             ));
             std::fs::create_dir_all(path.join("project/.eden")).unwrap();
             std::fs::create_dir_all(path.join("global")).unwrap();
-            Self(path)
+            // Persisted trust roots use the canonical identity, including Windows
+            // verbatim/long paths and macOS temporary-directory aliases.
+            Self(std::fs::canonicalize(path).unwrap())
         }
         fn options(&self) -> WorkspaceOptions {
             WorkspaceOptions {
@@ -293,8 +295,8 @@ mod tests {
         let workspace =
             Workspace::discover(&fixture.0.join("project"), &fixture.options()).unwrap();
         assert_eq!(
-            workspace.settings["skills"][0],
-            fixture.0.join("global/shared").to_str().unwrap()
+            Path::new(workspace.settings["skills"][0].as_str().unwrap()),
+            fixture.0.join("global").join("shared")
         );
     }
     #[test]
@@ -316,6 +318,12 @@ mod tests {
         )
         .unwrap();
         let options = fixture.options();
+        assert!(
+            Workspace::discover(&fixture.0.join("global"), &options)
+                .unwrap()
+                .trusted,
+            "the parent grant must match before the child denial can prove precedence"
+        );
         assert!(
             !Workspace::discover(&fixture.0.join("project"), &options)
                 .unwrap()

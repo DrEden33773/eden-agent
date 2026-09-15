@@ -1,6 +1,6 @@
 // Persist each executed phase's duration, command, compiler counts and raw log.
 import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const [label, program, ...args] = process.argv.slice(2);
@@ -12,6 +12,13 @@ mkdirSync(directory, { recursive: true });
 const startedAt = new Date().toISOString();
 const started = performance.now();
 const output = [];
+const logPath = join(directory, `${label}.log`);
+const receiptPath = join(directory, `${label}.json`);
+writeFileSync(logPath, "");
+writeFileSync(
+  receiptPath,
+  `${JSON.stringify({ label, command: [program, ...args], started_at: startedAt, status: "running" }, null, 2)}\n`,
+);
 const windowsPnpm = process.platform === "win32" && program === "pnpm";
 const child = spawn(
   windowsPnpm ? process.env.ComSpec || "cmd.exe" : program,
@@ -23,6 +30,7 @@ for (const [stream, destination] of [
   [child.stderr, process.stderr],
 ]) {
   stream.on("data", (chunk) => {
+    appendFileSync(logPath, chunk);
     output.push(chunk);
     destination.write(chunk);
   });
@@ -33,12 +41,12 @@ child.on("error", (error) => {
 });
 child.on("close", (code, signal) => {
   const log = Buffer.concat(output).toString("utf8");
-  writeFileSync(join(directory, `${label}.log`), log);
   writeFileSync(
-    join(directory, `${label}.json`),
+    receiptPath,
     `${JSON.stringify(
       {
         label,
+        status: code === 0 ? "passed" : "failed",
         command: [program, ...args],
         started_at: startedAt,
         duration_seconds: (performance.now() - started) / 1000,

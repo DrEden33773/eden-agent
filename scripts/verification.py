@@ -314,7 +314,16 @@ def prepare(output: pathlib.Path | None = None) -> dict[str, Any]:
         folder.mkdir(parents=True)
         shutil.copy2(author_target / "debug" / lib, folder / lib)
     phases["independent_authors"] = time.monotonic() - phase
+    command_records = [
+        json.loads(path.read_text(encoding="utf-8")) for path in (output / "prepare").glob("*.json")
+    ]
+    compilation = {
+        "cargo_commands": sum(record["command"][0] == "cargo" for record in command_records),
+        "compiling_lines": sum(record["cargo_compiling_lines"] for record in command_records),
+        "checking_lines": sum(record["cargo_checking_lines"] for record in command_records),
+    }
     receipt = {
+        "compilation": compilation,
         "source_fingerprint": fingerprint,
         "seeds": str(seed_root),
         "exports": str(exported),

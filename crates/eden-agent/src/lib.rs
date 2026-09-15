@@ -16,6 +16,8 @@ struct State {
     closed: bool,
     next: u64,
     active: Option<(u64, Cancellation)>,
+    management: bool,
+    pending_inputs: usize,
     terminals: BTreeMap<u64, Terminal>,
     shutdown_result: Option<Result<(), Fault>>,
 }
@@ -76,13 +78,20 @@ impl Session {
             Some(path) if path.exists() => eden_kernel::history::read(path)?,
             _ => vec![],
         };
-        let id = previous.first().map(|r| r.session_id).unwrap_or_else(|| {
-            let time = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_micros() as u64;
-            time.wrapping_add(NEXT_SESSION.fetch_add(1, Ordering::Relaxed))
-        });
+        if previous
+            .first()
+            .is_some_and(|record| record.schema_version == 1)
+        {
+            return Err(Fault::new(
+                "IncompatibleContract",
+                "session",
+                "v1 history is readable; preview an explicit session upgrade before continuing",
+            ));
+        }
+        let id = previous
+            .first()
+            .map(|r| r.session_id)
+            .unwrap_or_else(new_session_id);
         let next = previous.iter().map(|r| r.run_id).max().unwrap_or(0) + 1;
         let events = Events::new(id);
         let kernel = Kernel::load(composition.as_ref(), id, events.clone()).await?;
@@ -103,6 +112,8 @@ impl Session {
                 closed: false,
                 next,
                 active: None,
+                management: false,
+                pending_inputs: 0,
                 terminals: BTreeMap::new(),
                 shutdown_result: None,
             }),
@@ -118,8 +129,9 @@ impl Session {
                 let binding = session.0.kernel.composition();
                 let identity = serde_json::json!({"cwd":cwd, "roles":binding.roles, "packages":binding.packages.iter().map(|p| &p.descriptor).collect::<Vec<_>>()});
                 if let Some(record) = reply.records.first() {
-                    if record.kind != "session" || record.payload != identity { return Err(Fault::new("Unavailable", "session", "history cwd or composition differs; reopen with the original binding")); }
+                    if record.kind != "session" || !compatible_binding(&record.payload, &identity) { return Err(Fault::new("Unavailable", "session", "history cwd or composition differs; reopen with the original binding")); }
                 } else { session.commit(0,"session",identity).await?; }
+                let _: Vec<c::QueueEntry> = session.service(0,c::QUEUE,&c::QueueRequest::Restore).await?;
                 Ok::<_,Fault>(())
             }.await;
             if let Err(error) = setup {
@@ -139,8 +151,54 @@ impl Session {
         }])
     }
     pub fn submit_blocks(&self, content: Vec<c::Block>) -> Result<u64, Fault> {
+        self.start_loop(content, false)
+    }
+    /// Explicitly continue from committed context and restored queues, without a new prompt.
+    pub fn resume(&self) -> Result<u64, Fault> {
+        self.start_loop(vec![], true)
+    }
+    fn start_loop(&self, content: Vec<c::Block>, resume: bool) -> Result<u64, Fault> {
+        let payload = if self.0.coding {
+            serde_json::json!(c::RunInput {
+                resume,
+                cwd: self.0.cwd.clone(),
+                content
+            })
+        } else {
+            let prompt = content
+                .into_iter()
+                .filter_map(|b| match b {
+                    c::Block::Text { text } => Some(text),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            serde_json::json!(RunInput { prompt })
+        };
+        let role = if self.0.coding { c::LOOP } else { AGENT_LOOP };
+        self.start(false, move |session, run_id, cancel| async move {
+            session
+                .0
+                .kernel
+                .invoke(
+                    Request {
+                        session_id: session.id(),
+                        run_id,
+                        contract: role.into(),
+                        payload,
+                    },
+                    cancel,
+                )
+                .await
+        })
+    }
+    fn start<F, Fut>(&self, management: bool, operation: F) -> Result<u64, Fault>
+    where
+        F: FnOnce(Session, u64, Cancellation) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Terminal> + Send + 'static,
+    {
         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.closed || state.active.is_some() {
+        if state.closed || state.active.is_some() || state.pending_inputs > 0 {
             return Err(Fault::new(
                 "Unavailable",
                 "session",
@@ -148,43 +206,34 @@ impl Session {
             ));
         }
         let run_id = state.next;
-        state.next += 1;
+        state.next = state
+            .next
+            .checked_add(1)
+            .ok_or_else(|| Fault::new("Unavailable", "session", "run identity exhausted"))?;
         let cancel = Cancellation::default();
         state.active = Some((run_id, cancel.clone()));
-        self.0
-            .events
-            .push(run_id, "accepted", serde_json::Value::Null);
-        let request = Request {
-            session_id: self.id(),
+        state.management = management;
+        self.0.events.push(
             run_id,
-            contract: if self.0.coding { c::LOOP } else { AGENT_LOOP }.into(),
-            payload: if self.0.coding {
-                serde_json::json!(c::RunInput {
-                    cwd: self.0.cwd.clone(),
-                    content
-                })
-            } else {
-                let prompt = content
-                    .into_iter()
-                    .filter_map(|b| match b {
-                        c::Block::Text { text } => Some(text),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                serde_json::json!(RunInput { prompt })
-            },
-        };
+            "accepted",
+            serde_json::json!({"management":management}),
+        );
         let session = self.clone();
         tokio::spawn(async move {
-            let mut terminal = session.0.kernel.invoke(request, cancel).await;
-            if session.0.coding
-                && let Err(error) = session
+            let mut terminal = operation(session.clone(), run_id, cancel).await;
+            if session.0.coding {
+                if let Err(error) = session
+                    .service::<_, Vec<c::QueueEntry>>(run_id, c::QUEUE, &c::QueueRequest::Restore)
+                    .await
+                {
+                    terminal.cleanup_errors.push(error);
+                }
+                if let Err(error) = session
                     .commit(run_id, "terminal", serde_json::json!(terminal))
                     .await
-            {
-                // Preserve an earlier failure and report persistence failure separately.
-                terminal.cleanup_errors.push(error);
+                {
+                    terminal.cleanup_errors.push(error);
+                }
             }
             let mut state = session.0.state.lock().unwrap_or_else(|e| e.into_inner());
             state.terminals.insert(run_id, terminal.clone());
@@ -193,6 +242,7 @@ impl Session {
                 .events
                 .push(run_id, "settled", serde_json::json!(terminal));
             state.active = None;
+            state.management = false;
             session.0.settled.notify_waiters();
         });
         Ok(run_id)
@@ -279,6 +329,22 @@ impl Session {
         if let Some(run_id) = active {
             self.wait(run_id).await?;
         }
+        loop {
+            let changed = self.0.settled.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self
+                .0
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pending_inputs
+                == 0
+            {
+                break;
+            }
+            changed.await;
+        }
         let close = if self.0.coding {
             self.service::<_, c::StoreReply>(0, c::STORE, &c::StoreRequest::Close)
                 .await
@@ -358,25 +424,35 @@ impl Session {
         content: Vec<c::Block>,
     ) -> Result<c::QueueEntry, Fault> {
         let run_id = {
-            let state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
-            if state.closed {
-                return Err(Fault::new("Unavailable", "session", "session closed"));
+            let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state.closed || state.management {
+                return Err(Fault::new(
+                    "Unavailable",
+                    "session",
+                    "session closed or managing history",
+                ));
             }
+            state.pending_inputs += 1;
             state.active.as_ref().map(|(id, _)| *id).unwrap_or(0)
         };
-        let mut entries: Vec<c::QueueEntry> = self
-            .service(
-                run_id,
-                c::QUEUE,
-                &c::QueueRequest::Enqueue {
-                    kind: kind.into(),
-                    content,
-                },
-            )
-            .await?;
-        entries
-            .pop()
-            .ok_or_else(|| Fault::new("Unavailable", "queue", "missing acceptance"))
+        let session = self.clone();
+        let kind = kind.to_owned();
+        let owner = InputOwner(session.clone());
+        tokio::spawn(async move {
+            let _owner = owner;
+            let mut entries: Vec<c::QueueEntry> = session
+                .service(
+                    run_id,
+                    c::QUEUE,
+                    &c::QueueRequest::Enqueue { kind, content },
+                )
+                .await?;
+            entries
+                .pop()
+                .ok_or_else(|| Fault::new("Unavailable", "queue", "missing acceptance"))
+        })
+        .await
+        .map_err(|e| Fault::new("Unavailable", "queue", e.to_string()))?
     }
     pub async fn queued(&self) -> Result<Vec<c::QueueEntry>, Fault> {
         self.service(0, c::QUEUE, &c::QueueRequest::Inspect).await
@@ -391,5 +467,35 @@ impl Drop for SessionDelivery {
                 let _ = session.shutdown().await;
             });
         }
+    }
+}
+
+/// Session copy and migration plans.
+pub mod management;
+pub use management::{CopyKind, CopyOptions, CopyPlan};
+
+fn new_session_id() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    // Per-instance random hash keys avoid time-only collisions across processes.
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u64(NEXT_SESSION.fetch_add(1, Ordering::Relaxed));
+    hasher.write_u32(std::process::id());
+    hasher.finish()
+}
+fn compatible_binding(saved: &serde_json::Value, current: &serde_json::Value) -> bool {
+    if saved["cwd"] != current["cwd"] || saved["roles"] != current["roles"] {
+        return false;
+    }
+    // Selected role identities define the binding; unused package inventories and
+    // compatible package-version changes are not historical state dependencies.
+    true
+}
+
+struct InputOwner(Session);
+impl Drop for InputOwner {
+    fn drop(&mut self) {
+        let mut state = self.0.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.pending_inputs -= 1;
+        self.0.0.settled.notify_waiters();
     }
 }

@@ -17,9 +17,9 @@ import threading
 from install import ROOT, install, library, package, target
 
 PROVIDER = "eden.coding-provider.v1"
-CONTEXT = "eden.coding-context.v1"
+CONTEXT = "eden.coding-context.v2"
 TOOL = "eden.coding-tool.v1"
-STORE = "eden.session-store.v1"
+STORE = "eden.session-store.v2"
 
 
 def run(args, cwd, check=True, env=None):
@@ -34,7 +34,7 @@ def write(path, value):
 
 
 def records(path):
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    return [record for line in path.read_text(encoding="utf-8").splitlines() for record in (lambda value: value.get("transaction", [value]))(json.loads(line))]
 
 
 def answer(text):
@@ -140,7 +140,7 @@ def build_author(destination, scratch):
     folder = destination / "plugins/coding-replacements/0.1.0"
     folder.mkdir(parents=True, exist_ok=True)
     shutil.copy2(scratch / "author-target/debug" / lib, folder / lib)
-    return package("coding-replacements", [PROVIDER, CONTEXT, TOOL, STORE], f"plugins/coding-replacements/0.1.0/{lib}", target())
+    return package("coding-replacements", [PROVIDER, CONTEXT, TOOL, STORE, "eden.record-interpreter.v1", "eden.state-migrator.v1"], f"plugins/coding-replacements/0.1.0/{lib}", target())
 
 
 def main():
@@ -174,7 +174,7 @@ class ArithmeticTests(unittest.TestCase):
     def test_add(self):
         self.assertEqual(add(2, 3), 5)
         self.assertEqual(add(-2, 3), 1)
-        history = [json.loads(x) for x in pathlib.Path({str(history)!r}).read_text(encoding="utf-8").splitlines()]
+        history = [record for x in pathlib.Path({str(history)!r}).read_text(encoding="utf-8").splitlines() for record in json.loads(x).get("transaction", [json.loads(x)])]
         self.assertTrue(any(x["kind"] == "tool_intent" and x["payload"].get("call_id") == "tests" for x in history))
         pathlib.Path("tests-ran.txt").write_text("passed after durable intent", encoding="utf-8")
 '''
@@ -394,8 +394,8 @@ class ArithmeticTests(unittest.TestCase):
         # An interrupted durable intention is context, never executable work on reopen.
         interrupted = scratch / "interrupted.jsonl"
         seed = copy.deepcopy(before[:1])
-        seed.append({"schema_version": 1, "session_id": seed[0]["session_id"], "sequence": 2, "run_id": 1, "kind": "tool_intent", "payload": {"type": "tool_call", "call_id": "interrupted-write", "name": "write", "arguments": json.dumps({"path": "must-not-exist.txt", "content": "replayed"})}})
-        interrupted.write_text("".join(json.dumps(r) + "\n" for r in seed), encoding="utf-8")
+        seed.append({"schema_version": 2, "parent_id": 1, "branch": "main", "session_id": seed[0]["session_id"], "sequence": 2, "run_id": 1, "kind": "tool_intent", "payload": {"type": "tool_call", "call_id": "interrupted-write", "name": "write", "arguments": json.dumps({"path": "must-not-exist.txt", "content": "replayed"})}})
+        interrupted.write_text(json.dumps({"schema_version":2,"transaction":seed}) + "\n", encoding="utf-8")
         server = Server(lambda *_: answer("Historical effects remain unknown."))
         try:
             config = configure(destination, composition, server, "interrupted")

@@ -2,12 +2,15 @@
 use crate::Fault;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-pub const LOOP: &str = "eden.coding-loop.v1";
-pub const CONTEXT: &str = "eden.coding-context.v1";
+pub const LOOP: &str = "eden.coding-loop.v2";
+pub const CONTEXT: &str = "eden.coding-context.v2";
 pub const PROVIDER: &str = "eden.coding-provider.v1";
 pub const TOOL: &str = "eden.coding-tool.v1";
-pub const STORE: &str = "eden.session-store.v1";
-pub const QUEUE: &str = "eden.submission-queue.v1";
+pub const STORE: &str = "eden.session-store.v2";
+pub const MODEL_INFO: &str = "eden.model-info.v1";
+pub const INTERPRETER: &str = "eden.record-interpreter.v1";
+pub const MIGRATOR: &str = "eden.state-migrator.v1";
+pub const QUEUE: &str = "eden.submission-queue.v2";
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Block {
@@ -48,11 +51,21 @@ pub enum Item {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunInput {
+    #[serde(default)]
+    pub resume: bool,
     pub cwd: String,
     pub content: Vec<Block>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ContextInput {
+    #[serde(default)]
+    pub action: String,
+    #[serde(default)]
+    pub records: Vec<Record>,
+    #[serde(default)]
+    pub instructions: String,
+    #[serde(default)]
+    pub limits: ModelLimits,
     pub cwd: String,
     pub items: Vec<Item>,
 }
@@ -64,6 +77,8 @@ pub struct ToolDefinition {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
     pub items: Vec<Item>,
     pub tools: Vec<ToolDefinition>,
 }
@@ -89,6 +104,10 @@ pub struct ToolResult {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Record {
+    #[serde(default)]
+    pub parent_id: Option<u64>,
+    #[serde(default = "main_branch")]
+    pub branch: String,
     pub schema_version: u32,
     pub session_id: u64,
     pub sequence: u64,
@@ -108,17 +127,36 @@ pub enum StoreRequest {
         kind: String,
         payload: Value,
     },
+    AppendBatch {
+        run_id: u64,
+        entries: Vec<RecordDraft>,
+    },
+    Navigate {
+        target: u64,
+        branch: String,
+    },
+    Create {
+        path: String,
+        session_id: u64,
+        records: Vec<Record>,
+    },
     Read,
     Close,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StoreReply {
+    #[serde(default)]
+    pub active_head: Option<u64>,
+    #[serde(default = "main_branch")]
+    pub active_branch: String,
     pub session_id: u64,
     pub sequence: u64,
     pub records: Vec<Record>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct QueueEntry {
+    #[serde(default = "main_branch")]
+    pub branch: String,
     pub id: u64,
     pub kind: String,
     pub content: Vec<Block>,
@@ -126,27 +164,11 @@ pub struct QueueEntry {
 /// Validate complete public JSONL records without loading a storage or business plugin.
 /// An interrupted tail is diagnosed and preserved; reading never repairs or replays it.
 pub fn decode_records(bytes: &[u8]) -> Result<Vec<Record>, Fault> {
-    let invalid = |message: &str| Fault::new("PersistenceFailure", "public-history", message);
-    if !bytes.is_empty() && !bytes.ends_with(b"\n") {
-        return Err(invalid("incomplete history tail; source preserved"));
+    let scan = crate::history::scan_records(bytes);
+    if let Some(message) = scan.diagnostic {
+        return Err(Fault::new("PersistenceFailure", "public-history", message));
     }
-    let mut records: Vec<Record> = vec![];
-    for line in bytes.split(|b| *b == b'\n').filter(|line| !line.is_empty()) {
-        let record: Record =
-            serde_json::from_slice(line).map_err(|_| invalid("invalid public record"))?;
-        if record.schema_version != 1
-            || record.sequence != records.len() as u64 + 1
-            || records
-                .first()
-                .is_some_and(|first| first.session_id != record.session_id)
-        {
-            return Err(invalid(
-                "unsupported schema, discontinuous sequence, or mixed identity",
-            ));
-        }
-        records.push(record);
-    }
-    Ok(records)
+    Ok(scan.records)
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
@@ -154,4 +176,49 @@ pub enum QueueRequest {
     Enqueue { kind: String, content: Vec<Block> },
     Take { kind: String },
     Inspect,
+    Configure { steering: String, follow_up: String },
+    Consume { ids: Vec<u64> },
+    Restore,
+}
+
+fn main_branch() -> String {
+    "main".into()
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RecordDraft {
+    pub kind: String,
+    pub payload: Value,
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ModelLimits {
+    pub context_window: u64,
+    pub max_output_tokens: u32,
+}
+/// An extension state declares whether it is needed to continue this branch.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExtensionState {
+    pub namespace: String,
+    pub version: u32,
+    pub required: bool,
+    pub summary: String,
+    pub value: Value,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InterpretRequest {
+    pub states: Vec<ExtensionState>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InterpretReply {
+    pub items: Vec<Item>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MigrateRequest {
+    pub states: Vec<ExtensionState>,
+    pub apply: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MigrateReply {
+    pub states: Vec<ExtensionState>,
+    pub preserved: Vec<String>,
+    pub losses: Vec<String>,
 }

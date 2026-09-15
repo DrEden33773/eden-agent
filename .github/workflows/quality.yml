@@ -63,6 +63,10 @@ jobs:
         run: python scripts/verify.py
       - name: Installed coding task, resume and role replacements
         run: python scripts/verify-coding.py
+      - name: Installed session tree, migration and independent history
+        run: python scripts/verify-sessions.py
+      - name: Installed context, retry and queue recovery
+        run: python scripts/verify-context.py
       - name: Assemble distribution
         run: python scripts/install.py artifacts/distribution
       - name: Package installed layout
@@ -74,6 +78,8 @@ jobs:
           path: |
             artifacts/verification.json
             artifacts/coding-verification.json
+            artifacts/session-verification.json
+            artifacts/context-verification.json
             artifacts/eden-*.tar.gz
           if-no-files-found: error
   quality:

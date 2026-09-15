@@ -30,10 +30,18 @@ fn startup() -> Result<i32, Box<dyn std::error::Error>> {
     runtime.block_on(run(prepared.args))
 }
 async fn run(args: Vec<String>) -> Result<i32, Box<dyn std::error::Error>> {
+    if args
+        .first()
+        .is_some_and(|arg| matches!(arg.as_str(), "history" | "session"))
+    {
+        return eden_cli::session_commands::run(&args).await;
+    }
     let mut composition = None;
     let mut json = false;
     let mut prompt = None;
     let mut cwd = std::env::current_dir()?;
+    let mut cwd_explicit = false;
+    let mut resume = false;
     let mut history = None;
     let mut memory = false;
     let mut attachments = vec![];
@@ -46,7 +54,11 @@ async fn run(args: Vec<String>) -> Result<i32, Box<dyn std::error::Error>> {
                     args.next().ok_or("--composition needs a path")?,
                 ))
             }
-            "--cwd" => cwd = PathBuf::from(args.next().ok_or("--cwd needs a directory")?),
+            "--cwd" => {
+                cwd = PathBuf::from(args.next().ok_or("--cwd needs a directory")?);
+                cwd_explicit = true;
+            }
+            "--continue" => resume = true,
             "--session" | "--resume" => {
                 history = Some(PathBuf::from(
                     args.next().ok_or("session option needs a path")?,
@@ -67,7 +79,7 @@ async fn run(args: Vec<String>) -> Result<i32, Box<dyn std::error::Error>> {
             }
             "--help" => {
                 println!(
-                    "eden [--env-file PATH] [--composition PATH] [--cwd DIR] [--session PATH|--no-session] [--print|--json] [--attach TEXT|--image IMAGE|--file PDF] PROMPT\neden --history PATH\nExplicit model and credentials are required by the default Responses provider."
+                    "eden [--env-file PATH] [--composition PATH] [--cwd DIR] [--session PATH|--no-session] [--print|--json] [--attach TEXT|--image IMAGE|--file PDF] PROMPT\neden --history PATH\neden history inspect|export PATH [DEST]\neden session info|tree|compact|continue PATH\neden session fork|clone|import|upgrade|recover|migrate SOURCE DEST [--at NODE] [--cwd DIR] [--public-only] [--apply]\neden session branch PATH --at NODE --branch NAME [--summarize]\neden session metadata PATH --name NAME [--tag TAG]\neden session queue|enqueue|queue-mode|include-attachment PATH [OPTIONS]\nSession commands accept --composition PATH. Copy commands preview by default; --apply creates the new file. Explicit model and credentials are required by the default Responses provider."
                 );
                 return Ok(0);
             }
@@ -85,7 +97,26 @@ async fn run(args: Vec<String>) -> Result<i32, Box<dyn std::error::Error>> {
     if memory && history.is_some() {
         return Err("--no-session conflicts with --session/--resume".into());
     }
-    let prompt = prompt.ok_or("provide a prompt; see --help")?;
+    if let Some(path) = &history
+        && path.exists()
+        && !cwd_explicit
+    {
+        let records = eden_kernel::history::read(path)?;
+        cwd = PathBuf::from(
+            records
+                .first()
+                .and_then(|r| r.payload["cwd"].as_str())
+                .ok_or("missing recorded cwd")?,
+        );
+    }
+    if resume && (prompt.is_some() || history.is_none()) {
+        return Err("--continue requires a saved session and no new prompt".into());
+    }
+    let prompt = if resume {
+        String::new()
+    } else {
+        prompt.ok_or("provide a prompt; see --help")?
+    };
     let cwd = std::fs::canonicalize(cwd)?;
     let mut content = vec![Block::Text { text: prompt }];
     for (kind, path) in attachments {
@@ -158,7 +189,11 @@ async fn run(args: Vec<String>) -> Result<i32, Box<dyn std::error::Error>> {
     }
     let session = Session::open_with(composition, SessionOptions { cwd, history }).await?;
     let result = async {
-        let run = session.submit_blocks(content)?;
+        let run = if resume {
+            session.resume()?
+        } else {
+            session.submit_blocks(content)?
+        };
         let cancel_session = session.clone();
         let signal = tokio::spawn(async move {
             if tokio::signal::ctrl_c().await.is_ok() {
@@ -173,27 +208,7 @@ async fn run(args: Vec<String>) -> Result<i32, Box<dyn std::error::Error>> {
             }
         }
         let _signal = Signal(signal);
-        let terminal = if json {
-            use std::io::Write;
-            let mut sequence = 0;
-            loop {
-                let events = session.events_after(sequence).await;
-                let mut settled = false;
-                for event in events {
-                    sequence = event.sequence;
-                    settled |= event.kind == "settled" && event.run_id == run;
-                    let mut stdout = std::io::stdout().lock();
-                    serde_json::to_writer(&mut stdout, &event)?;
-                    writeln!(stdout)?;
-                    stdout.flush()?;
-                }
-                if settled {
-                    break session.wait(run).await?;
-                }
-            }
-        } else {
-            session.wait(run).await?
-        };
+        let terminal = eden_cli::wait_for_run(&session, run, json).await?;
         if !terminal.cleanup_errors.is_empty() {
             return Err(format!("cleanup failed: {:?}", terminal.cleanup_errors).into());
         }

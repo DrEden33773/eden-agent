@@ -21,7 +21,7 @@ pub struct Fault {
     pub message: String,
 }
 impl Fault {
-    /// Construct a non-retryable failure; retry policy is outside this release.
+    /// Construct a structured failure; the caller owns retry policy.
     pub fn new(code: &str, source: &str, message: impl Into<String>) -> Self {
         Self {
             code: code.into(),
@@ -132,3 +132,6 @@ pub enum ModelReply {
 
 /// Public coding and persistence protocols.
 pub mod coding;
+
+/// Public tree validation and standalone readable history.
+pub mod history;

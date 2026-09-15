@@ -2,6 +2,7 @@
 
 Use Rust 1.98.1 from rust-toolchain.toml. Product code and the SDK are Apache-2.0; preserve third-party notices when redistributing dependencies.
 
+- Use plain Cargo dependency requirements such as `"1.2.3"`, including path dependencies with a version. Do not use `"=1.2.3"` to freeze dependencies; commit Cargo.lock and use `--locked` for reproducible builds.
 - Build with `cargo build --workspace --locked`.
 - Set up development tools with Node.js 22+, `pnpm install --frozen-lockfile`, Python 3.12+/uv 0.9.7 with `uv sync --locked`, and `pnpm hooks:install` after cloning. This installs hooks only for this repository; see [development checks](docs/development-checks.md).
 - Check with `pnpm markdown:check`, `pnpm python:check`, `pnpm js:check`, `pnpm rust:check`, `pnpm clippy:check`, and `cargo test --workspace --locked`. The Rust commands include the root workspace and every independent author under `tests/contract-authors/*`.

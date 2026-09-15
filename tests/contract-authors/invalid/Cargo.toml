@@ -14,4 +14,4 @@ short-table = []
 metadata-panic = []
 init-panic = []
 [dependencies]
-eden-plugin-sdk = { path = "../../../crates/eden-plugin-sdk", version = "=0.1.0" }
+eden-plugin-sdk = { path = "../../../crates/eden-plugin-sdk", version = "0.1.0" }

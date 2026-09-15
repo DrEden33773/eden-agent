@@ -11,12 +11,12 @@ license = "Apache-2.0"
 repository = "https://github.com/DrEden33773/eden-agent"
 
 [workspace.dependencies]
-eden-process = { path = "crates/eden-process", version = "=0.1.0" }
-eden-protocol = { path = "crates/eden-protocol", version = "=0.1.0" }
-eden-plugin-sdk = { path = "crates/eden-plugin-sdk", version = "=0.1.0" }
-eden-kernel = { path = "crates/eden-kernel", version = "=0.1.0" }
-eden-agent = { path = "crates/eden-agent", version = "=0.1.0" }
-eden-workspace = { path = "crates/eden-workspace", version = "=0.1.0" }
+eden-process = { path = "crates/eden-process", version = "0.1.0" }
+eden-protocol = { path = "crates/eden-protocol", version = "0.1.0" }
+eden-plugin-sdk = { path = "crates/eden-plugin-sdk", version = "0.1.0" }
+eden-kernel = { path = "crates/eden-kernel", version = "0.1.0" }
+eden-agent = { path = "crates/eden-agent", version = "0.1.0" }
+eden-workspace = { path = "crates/eden-workspace", version = "0.1.0" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "process", "fs", "signal"] }

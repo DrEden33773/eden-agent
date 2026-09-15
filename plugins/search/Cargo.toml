@@ -17,12 +17,12 @@ eden-plugin-sdk.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
-fff-search = { version = "=0.10.6", features = ["definitions"] }
+fff-search = { version = "0.10.6", features = ["definitions"] }
 sha2 = "0.10.9"
-ignore = "=0.4.33"
+ignore = "0.4.33"
 globset = "0.4.18"
 regex = "1.12.3"
-neo_frizbee = "=0.11.0"
+neo_frizbee = "0.11.0"
 
 [lints]
 workspace = true

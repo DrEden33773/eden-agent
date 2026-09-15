@@ -212,7 +212,7 @@ impl Session {
                     "roles": binding.roles,
                     "packages": binding.packages.iter().map(|p| &p.descriptor).collect::<Vec<_>>()
                 });
-                let locked = composition::binding(&binding, &cwd)?;
+                let locked = desired;
                 let saved_lock = reply.records.iter().rev().find(|r|r.kind == "composition_lock");
                 if let Some(saved) = saved_lock && !rebind && !composition::equivalent(&saved.payload, &locked) {
  return Err(Fault::new("Unavailable",

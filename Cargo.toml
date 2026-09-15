@@ -29,3 +29,8 @@ unsafe_op_in_unsafe_fn = "deny"
 
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "deny"
+
+# Package identity hashes cover native library bytes on every open. Keep the
+# compression routine optimized in development, including installed verifiers.
+[profile.dev.package.sha2]
+opt-level = 3

@@ -147,8 +147,15 @@ async fn open_abandon(
     std::fs::write(composition_path, serde_json::to_vec(&composition)?)?;
     let path = composition_path.to_owned();
     let opening_options = options.clone();
-    let opening = tokio::spawn(async move { Session::open_with(path, opening_options).await });
-    let (stream, _) = listener.accept().await?;
+    let mut opening = tokio::spawn(async move { Session::open_with(path, opening_options).await });
+    let (stream, _) = tokio::select! {
+        accepted = listener.accept() => accepted?,
+        completed = &mut opening => {
+            let session = completed??;
+            session.shutdown().await?;
+            return Err("session initialized without reaching the STORE.Open gate".into());
+        }
+    };
     let mut stream = BufReader::new(stream);
     let mut line = String::new();
     stream.read_line(&mut line).await?;

@@ -8,4 +8,4 @@ license = "Apache-2.0"
 [lib]
 crate-type = ["cdylib"]
 [dependencies]
-eden-plugin-sdk = { path = "../../../crates/eden-plugin-sdk", version = "=0.1.0" }
+eden-plugin-sdk = { path = "../../../crates/eden-plugin-sdk", version = "0.1.0" }

@@ -9,6 +9,6 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 eden-plugin-sdk.workspace = true
 serde.workspace = true
-serde_yaml_ng = "=0.10.0"
+serde_yaml_ng = "0.10.0"
 [lints]
 workspace = true

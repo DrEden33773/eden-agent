@@ -20,6 +20,18 @@ const EXECUTE: &str = "eden.search-tool.v1";
 fn fault(code: &str, message: impl Into<String>) -> Fault {
     Fault::new(code, "search", message)
 }
+struct ExchangeFailure {
+    fault: Fault,
+    response_consumed: bool,
+}
+impl From<Fault> for ExchangeFailure {
+    fn from(fault: Fault) -> Self {
+        Self {
+            fault,
+            response_consumed: false,
+        }
+    }
+}
 struct Worker {
     process: Mutex<Child>,
     io: Mutex<(ChildStdin, BufReader<ChildStdout>)>,
@@ -39,7 +51,11 @@ impl Worker {
             io: Mutex::new((input, BufReader::new(output))),
         })
     }
-    fn exchange(&self, request: ToolRequest, cx: CallContext) -> Result<Value, Fault> {
+    fn exchange(
+        &self,
+        request: ToolRequest,
+        mut progress: impl FnMut(&str, Value) -> Result<(), Fault>,
+    ) -> Result<Value, ExchangeFailure> {
         let mut io = self.io.lock().unwrap_or_else(|e| e.into_inner());
         serde_json::to_writer(&mut io.0, &request)
             .map_err(|e| fault("SearchFailure", e.to_string()))?;
@@ -54,12 +70,12 @@ impl Worker {
                 .map_err(|e| fault("SearchFailure", e.to_string()))?
                 == 0
             {
-                return Err(fault("SearchFailure", "search worker exited"));
+                return Err(fault("SearchFailure", "search worker exited").into());
             }
             let reply: Value =
                 serde_json::from_str(&line).map_err(|e| fault("SearchFailure", e.to_string()))?;
             if let Some(stage) = reply["progress"].as_str() {
-                cx.emit(
+                progress(
                     &format!("search_{stage}"),
                     serde_json::json!({
                     "worker_pid":reply["worker_pid"]
@@ -68,12 +84,15 @@ impl Worker {
                 continue;
             }
             if let Some(error) = reply["error"].as_str() {
-                return Err(fault("InvalidSearch", error));
+                return Err(ExchangeFailure {
+                    fault: fault("InvalidSearch", error),
+                    response_consumed: true,
+                });
             }
             return reply
                 .get("result")
                 .cloned()
-                .ok_or_else(|| fault("SearchFailure", "invalid worker response"));
+                .ok_or_else(|| fault("SearchFailure", "invalid worker response").into());
         }
     }
     fn stop(&self) -> Result<(), Fault> {
@@ -118,7 +137,11 @@ impl State {
         let cancel = cx.scope.cancellation();
         let progress = cx.clone();
         cx.scope.spawn(async move {
-            let result = self.exchange_owned(request, cancel, progress).await;
+            let result = self
+                .exchange_owned(request, cancel, move |kind, payload| {
+                    progress.emit(kind, payload)
+                })
+                .await;
             let cleanup = result
                 .as_ref()
                 .err()
@@ -138,7 +161,7 @@ impl State {
         self: Arc<Self>,
         request: ToolRequest,
         cancel: eden_plugin_sdk::Cancellation,
-        progress: CallContext,
+        progress: impl FnMut(&str, Value) -> Result<(), Fault> + Send + 'static,
     ) -> Result<ToolResult, Fault> {
         let mut slot = tokio::select! {
             biased;
@@ -153,21 +176,24 @@ impl State {
         let mut exchange =
             tokio::task::spawn_blocking(move || exchange_worker.exchange(request, progress));
         let result = tokio::select! {
-            result=&mut exchange=>result.map_err(|e|fault("SearchFailure",e.to_string())).and_then(|r|r),
+            result=&mut exchange=>result.map_err(|e|ExchangeFailure::from(fault("SearchFailure",e.to_string()))).and_then(|r|r),
             _=cancel.cancelled()=>{
                 let stopped=tokio::task::spawn_blocking(move ||worker.stop()).await.map_err(|e|fault("CleanupFailure",e.to_string()))?;
                 let _=exchange.await;*slot=None;stopped?;
                 return Err(fault("Cancelled","search stopped"));
             }
         };
-        if result.as_ref().is_err_and(|e| e.code == "SearchFailure") {
+        // Only a fully read business-error response preserves stream alignment.
+        // A rejected progress event can leave the old result queued, regardless
+        // of the Fault code returned by the event sink.
+        if result.as_ref().is_err_and(|e| !e.response_consumed) {
             let stopped = tokio::task::spawn_blocking(move || worker.stop())
                 .await
                 .map_err(|e| fault("CleanupFailure", e.to_string()))?;
             *slot = None;
             stopped?;
         }
-        result.map(|value| ToolResult {
+        result.map_err(|error| error.fault).map(|value| ToolResult {
             text: render::render(&value),
             truncated: false,
             exit_code: None,
@@ -388,4 +414,134 @@ parameters:json!({
 })
 }
 }).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    struct Fixture(PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    #[tokio::test]
+    async fn rejected_progress_discards_unread_response_before_the_next_query() {
+        let root =
+            std::env::temp_dir().join(format!("eden-search-exchange-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let fixture = Fixture(root);
+        let source = fixture.0.join("helper.rs");
+        let executable = fixture.0.join(if cfg!(windows) {
+            "helper.exe"
+        } else {
+            "helper"
+        });
+        std::fs::write(&source, r#"
+use std::io::{BufRead, Write};
+fn main() {
+    let mut output = std::io::stdout();
+    for line in std::io::stdin().lock().lines() {
+        let line = line.unwrap();
+        if line.contains("invalid") {
+            writeln!(output, "{{\"error\":\"invalid query\"}}").unwrap();
+            output.flush().unwrap();
+            continue;
+        }
+        let name = if line.contains("alpha") { "alpha" } else { "beta" };
+        if name == "alpha" {
+            writeln!(output, "{{\"progress\":\"index_started\",\"worker_pid\":{}}}", std::process::id()).unwrap();
+            output.flush().unwrap();
+        }
+        writeln!(output, "{{\"result\":{{\"mode\":\"{}\",\"index\":{{\"worker_pid\":{}}}}}}}", name, std::process::id()).unwrap();
+        output.flush().unwrap();
+    }
+}
+"#).unwrap();
+        let compiled = Command::new("rustc")
+            .args(["--edition=2024", "--crate-name", "search_exchange_helper"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&executable)
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        let state = Arc::new(State {
+            executable,
+            allow_broad_scan: false,
+            excluded_paths: vec![],
+            history_dir: None,
+            worker: tokio::sync::Mutex::new(None),
+        });
+        let first_pid = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let progress_pid = first_pid.clone();
+        let request = |name: &str| ToolRequest {
+            cwd: fixture.0.to_string_lossy().into_owned(),
+            call_id: name.into(),
+            name: "grep".into(),
+            arguments: json!({"pattern":name}),
+        };
+        let failed = state
+            .clone()
+            .exchange_owned(
+                request("alpha"),
+                eden_plugin_sdk::Cancellation::default(),
+                move |_, payload| {
+                    progress_pid.store(
+                        payload["worker_pid"].as_u64().unwrap() as u32,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    Err(fault("Unavailable", "scope is closed"))
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(failed.code, "Unavailable");
+        let next = state
+            .clone()
+            .exchange_owned(
+                request("beta"),
+                eden_plugin_sdk::Cancellation::default(),
+                |_, _| Ok(()),
+            )
+            .await
+            .unwrap();
+        let header: Value = serde_json::from_str(next.text.lines().next().unwrap()).unwrap();
+        let old_pid = first_pid.load(std::sync::atomic::Ordering::SeqCst);
+        let invalid = state
+            .clone()
+            .exchange_owned(
+                request("invalid"),
+                eden_plugin_sdk::Cancellation::default(),
+                |_, _| Ok(()),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(invalid.code, "InvalidSearch");
+        let reused = state
+            .clone()
+            .exchange_owned(
+                request("beta"),
+                eden_plugin_sdk::Cancellation::default(),
+                |_, _| Ok(()),
+            )
+            .await
+            .unwrap();
+        let reused: Value = serde_json::from_str(reused.text.lines().next().unwrap()).unwrap();
+        assert_eq!(reused["index"]["worker_pid"], header["index"]["worker_pid"]);
+        let stopped = state.worker.lock().await.take().unwrap();
+        stopped.stop().unwrap();
+        assert_eq!(
+            header["mode"], "beta",
+            "the rejected call's queued result must not escape into the next query"
+        );
+        assert_ne!(
+            old_pid,
+            header["index"]["worker_pid"].as_u64().unwrap() as u32
+        );
+    }
 }

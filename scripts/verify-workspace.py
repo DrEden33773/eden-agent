@@ -102,6 +102,89 @@ def stopped(pid: int) -> bool:
     return False
 
 
+def tls_fixture(root: pathlib.Path) -> pathlib.Path:
+    """Generate disposable keys at execution time; no private key is committed."""
+    openssl = shutil.which("openssl")
+    if openssl is None and sys.platform == "win32":
+        for candidate in [
+            pathlib.Path("C:/Program Files/Git/usr/bin/openssl.exe"),
+            pathlib.Path("C:/Program Files/Git/mingw64/bin/openssl.exe"),
+        ]:
+            if candidate.is_file():
+                openssl = str(candidate)
+                break
+    if openssl is None:
+        raise RuntimeError("OpenSSL CLI is required for the verifier's isolated TLS fixture")
+    root.mkdir()
+    config = root / "cert.cnf"
+    config.write_text(
+        "[req]\ndistinguished_name=dn\nprompt=no\n[dn]\nCN=Eden disposable verifier\n[ca]\nbasicConstraints=critical,CA:true\nkeyUsage=critical,keyCertSign,cRLSign\n[server]\nbasicConstraints=critical,CA:false\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=IP:127.0.0.1,DNS:localhost\n",
+        encoding="utf-8",
+    )
+    run(
+        [
+            openssl,
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            root / "ca.key",
+            "-out",
+            root / "ca-cert.pem",
+            "-days",
+            "2",
+            "-config",
+            config,
+            "-extensions",
+            "ca",
+        ],
+        root,
+    )
+    run(
+        [
+            openssl,
+            "req",
+            "-new",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            root / "localhost-key.pem",
+            "-out",
+            root / "localhost.csr",
+            "-config",
+            config,
+        ],
+        root,
+    )
+    run(
+        [
+            openssl,
+            "x509",
+            "-req",
+            "-in",
+            root / "localhost.csr",
+            "-CA",
+            root / "ca-cert.pem",
+            "-CAkey",
+            root / "ca.key",
+            "-CAcreateserial",
+            "-out",
+            root / "localhost-cert.pem",
+            "-days",
+            "2",
+            "-extfile",
+            config,
+            "-extensions",
+            "server",
+        ],
+        root,
+    )
+    return root
+
+
 def default_search_loop(
     destination: pathlib.Path, scratch: pathlib.Path, base: Composition
 ) -> dict[str, Any]:
@@ -404,9 +487,10 @@ def main() -> None:
                     scratch,
                     check=False,
                 )
-                assert result.returncode and "example.missing.v1" in result.stdout + result.stderr
+                assert "example.missing.v1" in result.stdout + result.stderr
+                assert bool(result.returncode) == (stage == "input_hooks")
                 assert not sentinel.exists()
-                assert len(server.requests) == (0 if stage == "input_hooks" else 1)
+                assert len(server.requests) == (0 if stage == "input_hooks" else 2)
             finally:
                 server.close()
         results["missing_inner_hook_blocks_effect"] = True
@@ -580,6 +664,63 @@ def main() -> None:
         ), rejected.stderr
         results["copied_saved_binding_references"] = True
 
+        relocated_global = scratch / "relocated-global"
+        relocated_global.mkdir()
+        shutil.move(global_dir / "distribution", relocated_global / "distribution")
+        relocated = copy.deepcopy(managed)
+        new_library = pathlib.Path(
+            str(pathlib.Path(installed["path"]) / installed["manifest"]["library"]).replace(
+                str(global_dir), str(relocated_global), 1
+            )
+        )
+        for package in relocated["packages"]:
+            if package["descriptor"]["package"] == "service-a":
+                package["library"] = str(new_library)
+        server = Server(lambda _body, _index: (200, complete(answer("RELOCATED-SESSION"))))
+        try:
+            config = helpers["configure"](destination, relocated, server, "relocated-session")
+            run(
+                [
+                    host,
+                    "--composition",
+                    config,
+                    "--global-dir",
+                    relocated_global,
+                    "--session",
+                    copied,
+                    "--json",
+                    "Reply briefly",
+                ],
+                scratch,
+            )
+        finally:
+            server.close()
+        newest_lock = [r for r in records(copied) if r["kind"] == "composition_lock"][-1]
+        assert str(new_library) in newest_lock["payload"]["library_locations"]
+        relocated_fork = scratch / "relocated-fork.jsonl"
+        command("session", "fork", copied, relocated_fork, "--apply")
+        copied.unlink()
+        recovered.unlink()
+        rejected = run(
+            [
+                host,
+                "package",
+                "remove",
+                "service-a",
+                "0.1.0",
+                "--composition",
+                destination / "composition.json",
+                "--global-dir",
+                relocated_global,
+                "--cwd",
+                project,
+            ],
+            scratch,
+            check=False,
+        )
+        assert rejected.returncode and str(relocated_fork) in rejected.stderr, rejected.stderr
+        results["relocated_reopen_copy_references"] = True
+
         # TLS remains verified against an explicit test CA, with digest and downgrade checks.
         class ArchiveHandler(http.server.BaseHTTPRequestHandler):
             def log_message(self, format: str, *args: object) -> None:
@@ -598,7 +739,7 @@ def main() -> None:
                 self.wfile.write(payload)
 
         tls = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ArchiveHandler)
-        certs = ROOT / "tests/fixtures/package-tls"
+        certs = tls_fixture(scratch / "tls")
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(certs / "localhost-cert.pem", certs / "localhost-key.pem")
         tls.socket = context.wrap_socket(tls.socket, server_side=True)

@@ -235,7 +235,9 @@ impl Session {
                     .service(0, c::QUEUE, &c::QueueRequest::Restore)
                     .await?;
                 workspace_setup::register(&session, &binding, true)?;
-                if rebind || saved_lock.is_none() { session.commit(0, "composition_lock", locked).await?; }
+                if rebind || saved_lock.is_none_or(|saved| saved.payload["library_locations"] != locked["library_locations"]) {
+                    session.commit(0, "composition_lock", locked).await?;
+                }
                 workspace_setup::register(&session, &binding, false)?;
                 Ok::<_, Fault>(())
             }

@@ -1,3 +1,5 @@
-# Local HTTPS package fixture
+# Disposable TLS fixture
 
-This public, disposable localhost certificate and key are used only by `scripts/verify-workspace.py`. The verifier explicitly adds this CA to its isolated distribution configuration, serves a temporary native package over HTTPS, and verifies checksum rejection and HTTPS downgrade rejection. Neither file is an application credential or a default trust root.
+The installed workspace verifier generates a fresh two-day test CA and localhost certificate in its temporary directory using the OpenSSL CLI. No private key is stored in the repository or distribution. Linux and macOS runners provide OpenSSL; Windows uses OpenSSL from Git for Windows when it is absent from PATH.
+
+The package client receives the temporary CA explicitly and retains certificate verification. The verifier checks a real HTTPS package download, digest rejection and an HTTPS-to-HTTP redirect rejection.

@@ -26,4 +26,4 @@ The ordinary host shutdown path awaits run settlement, withdraws services and de
 
 ## Release scope
 
-The default installation provides coding runs with OpenAI Responses, read/write/edit/bash, JSONL history, basic resume and queues through native roles. Model and credentials are explicitly configured. The controlled skeleton remains an isolated lifecycle regression composition. See [coding sessions](coding.md) for current behavior; complete session trees, broader Provider authentication and terminal UI are subsequent product work.
+The default installation provides coding runs with OpenAI Responses, read/write/edit/bash, JSONL history, tree navigation, context compaction, explicit migration, resume and queues through native roles. Model and credentials are explicitly configured. The controlled skeleton remains an isolated lifecycle regression composition. See [coding sessions](coding.md) for current behavior; broader Provider authentication and terminal UI are subsequent product work.

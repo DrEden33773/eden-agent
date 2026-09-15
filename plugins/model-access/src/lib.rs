@@ -4,7 +4,7 @@
 use eden_plugin_sdk::{Package, protocol::Descriptor};
 use eden_protocol::{
     Fault,
-    coding::{ModelInput, ModelReply, PROVIDER},
+    coding::{MODEL_INFO, ModelInput, ModelLimits, ModelReply, PROVIDER},
 };
 use futures_util::StreamExt;
 use serde::Deserialize;
@@ -13,6 +13,7 @@ use std::sync::Arc;
 use wire::{Sse, failure};
 mod wire;
 
+const DEEPSEEK_CONTEXT_WINDOW: u64 = 1_048_576;
 const DEEPSEEK_MAX_OUTPUT_TOKENS: u32 = 393_216;
 
 #[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -51,6 +52,7 @@ struct Config {
     profile: Option<Profile>,
     max_output_tokens: Option<u32>,
     reasoning_effort: Option<String>,
+    context_window: Option<u64>,
 }
 impl Config {
     fn settings(&self) -> Result<Settings, Fault> {
@@ -81,6 +83,14 @@ impl Config {
             .ok_or_else(|| {
                 failure("configured API key environment variable is missing or empty")
             })?;
+        Ok(Settings {
+            model,
+            endpoint,
+            key,
+            options: self.options_with(&env)?,
+        })
+    }
+    fn options_with(&self, env: impl Fn(&str) -> Option<String>) -> Result<RequestOptions, Fault> {
         let profile = match self.profile {
             Some(profile) => profile,
             None => match env("EDEN_RESPONSES_PROFILE").as_deref() {
@@ -114,15 +124,23 @@ impl Config {
         {
             return Err(failure("reasoning_effort must not be empty"));
         }
-        Ok(Settings {
-            model,
-            endpoint,
-            key,
-            options: RequestOptions {
-                profile,
-                max_output_tokens,
-                reasoning_effort,
-            },
+        Ok(RequestOptions {
+            profile,
+            max_output_tokens,
+            reasoning_effort,
+        })
+    }
+    fn limits_with(&self, env: impl Fn(&str) -> Option<String>) -> Result<ModelLimits, Fault> {
+        let options = self.options_with(env)?;
+        Ok(ModelLimits {
+            context_window: self.context_window.unwrap_or_else(|| {
+                if options.profile == Profile::Deepseek {
+                    DEEPSEEK_CONTEXT_WINDOW
+                } else {
+                    0
+                }
+            }),
+            max_output_tokens: options.max_output_tokens.unwrap_or(0),
         })
     }
 }
@@ -130,7 +148,7 @@ fn descriptor() -> Descriptor {
     Descriptor {
         package: "model-access".into(),
         version: "0.1.0".into(),
-        provides: vec![PROVIDER.into()],
+        provides: vec![MODEL_INFO.into(), PROVIDER.into()],
     }
 }
 fn create(config: Value) -> Result<Package, Fault> {
@@ -141,7 +159,11 @@ fn create(config: Value) -> Result<Package, Fault> {
     })
     .map_err(|_| failure("invalid model-access configuration"))?;
     let config = Arc::new(config);
-    Ok(Package::new("model-access").service(PROVIDER,move |input: ModelInput,cx| {
+    let info_config = config.clone();
+    Ok(Package::new("model-access").service(MODEL_INFO, move |_: (), _| {
+        let config = info_config.clone();
+        async move { config.limits_with(|key| std::env::var(key).ok()) }
+    }).service(PROVIDER,move |input: ModelInput,cx| {
         let config = config.clone();
         async move {
             let settings = config.settings()?;
@@ -189,27 +211,38 @@ async fn request(
         .json(&body)
         .send()
         .await
-        .map_err(|_| failure("Responses request transport failed"))?;
+        .map_err(transport_failure)?;
     if !response.status().is_success() {
-        return Err(failure(format!(
-            "Responses HTTP status {}",
-            response.status().as_u16()
-        )));
+        let status = response.status().as_u16();
+        // Parse only a bounded error envelope and never expose its contents.
+        let mut bytes = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let Ok(chunk) = chunk else { break };
+            if bytes.len() + chunk.len() > 64 * 1024 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        return Err(wire::provider_fault(Some(status), &body));
     }
     let mut stream = response.bytes_stream();
     let mut sse = Sse::default();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| failure("Responses stream transport failed"))?;
+        let chunk = chunk.map_err(transport_failure)?;
         for event in sse.push(&chunk)? {
             match event.get("type").and_then(Value::as_str) {
                 Some("response.completed") => {
                     return wire::completed(&event["response"], options.profile);
                 }
-                Some("response.failed" | "response.incomplete" | "error") => {
-                    return Err(failure(
-                        "Responses stream reported failure or incomplete output",
-                    ));
+                Some("response.incomplete") => {
+                    return Err(wire::incomplete(&event["response"], input, options));
                 }
+                Some("response.failed") => {
+                    return Err(wire::provider_fault(None, &event["response"]));
+                }
+                Some("error") => return Err(wire::provider_fault(None, &event)),
                 Some("response.output_text.delta" | "response.refusal.delta") => {
                     emit("model_text_delta", event)?
                 }
@@ -222,7 +255,24 @@ async fn request(
             }
         }
     }
-    Err(failure("Responses stream ended before response.completed"))
+    Err(Fault::new(
+        "RetryableProviderFailure",
+        "model-access",
+        "Responses stream ended before response.completed",
+    ))
+}
+fn transport_failure(error: reqwest::Error) -> Fault {
+    if !error.is_builder()
+        && (error.is_timeout() || error.is_connect() || error.is_body() || error.is_request())
+    {
+        Fault::new(
+            "RetryableProviderFailure",
+            "model-access",
+            "Responses transport interrupted",
+        )
+    } else {
+        failure("Responses request transport failed")
+    }
 }
 #[cfg(test)]
 mod tests;

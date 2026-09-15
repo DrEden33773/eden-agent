@@ -41,7 +41,16 @@ pub(crate) fn project(
         body["store"] = json!(false);
         body["include"] = json!(["reasoning.encrypted_content"]);
     }
-    if let Some(tokens) = options.max_output_tokens {
+    if input.max_output_tokens == Some(0) {
+        return Err(failure(
+            "request max_output_tokens must be a positive integer",
+        ));
+    }
+    let output_limit = match (input.max_output_tokens, options.max_output_tokens) {
+        (Some(requested), Some(configured)) => Some(requested.min(configured)),
+        (requested, configured) => requested.or(configured),
+    };
+    if let Some(tokens) = output_limit {
         body["max_output_tokens"] = json!(tokens);
     }
     if let Some(effort) = &options.reasoning_effort {
@@ -177,4 +186,93 @@ impl Sse {
         self.line.clear();
         Ok(())
     }
+}
+
+/// Return only a classification; provider error fields may echo prompts or credentials.
+pub(crate) fn provider_fault(status: Option<u16>, body: &Value) -> Fault {
+    let error = body.get("error").unwrap_or(body);
+    let codes = [
+        error["code"].as_str().unwrap_or(""),
+        error["type"].as_str().unwrap_or(""),
+    ];
+    let message = error["message"].as_str().unwrap_or("").to_ascii_lowercase();
+    let terminal = codes.iter().any(|code| {
+        matches!(
+            *code,
+            "insufficient_quota"
+                | "billing_hard_limit_reached"
+                | "billing_not_active"
+                | "insufficient_balance"
+                | "invalid_api_key"
+                | "authentication_error"
+                | "permission_denied"
+        )
+    });
+    let terminal = terminal
+        || message.contains("exceeded your current quota")
+        || message.contains("insufficient balance")
+        || message.contains("billing hard limit");
+    let overflow = codes.iter().any(|code| {
+        matches!(
+            *code,
+            "context_length_exceeded"
+                | "context_window_exceeded"
+                | "context_window_overflow"
+                | "prompt_too_long"
+        )
+    });
+    let overflow = overflow
+        || message.starts_with("this model's maximum context length is")
+        || message.starts_with("maximum context length exceeded")
+        || message.starts_with("context window exceeded");
+    let transient = codes.iter().any(|code| {
+        matches!(
+            *code,
+            "rate_limit_exceeded"
+                | "rate_limit_error"
+                | "server_error"
+                | "internal_server_error"
+                | "overloaded_error"
+        )
+    });
+    let code = if terminal || matches!(status, Some(401..=403)) {
+        "ProviderFailure"
+    } else if overflow {
+        "ContextOverflow"
+    } else if transient
+        || status.is_some_and(|status| status == 429 || (500..600).contains(&status))
+    {
+        "RetryableProviderFailure"
+    } else {
+        "ProviderFailure"
+    };
+    Fault::new(
+        code,
+        "model-access",
+        status.map_or_else(
+            || "Responses stream reported failure".into(),
+            |status| format!("Responses HTTP status {status}"),
+        ),
+    )
+}
+
+pub(crate) fn incomplete(response: &Value, input: &ModelInput, options: &RequestOptions) -> Fault {
+    let reason = response["incomplete_details"]["reason"].as_str();
+    let used = response["usage"]["output_tokens"].as_u64();
+    // Explicit allowances identify bounded requests such as summaries. These
+    // fail atomically instead of recursively invoking history compaction.
+    let recoverable = input.max_output_tokens.is_none()
+        && matches!(reason, Some("max_output_tokens" | "length"))
+        && used
+            .zip(options.max_output_tokens)
+            .is_some_and(|(used, desired)| used < u64::from(desired));
+    Fault::new(
+        if recoverable {
+            "RecoverableLength"
+        } else {
+            "ProviderFailure"
+        },
+        "model-access",
+        "Responses output is incomplete",
+    )
 }

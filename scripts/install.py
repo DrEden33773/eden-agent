@@ -42,7 +42,7 @@ def install(destination, profile="debug", controlled=False):
         shutil.copy2(ROOT / doc, destination / doc)
     composition = {"packages": [package("standard", ROLES, f"plugins/standard/0.1.0/{name}", target())], "roles": {role: "standard" for role in ROLES}}
     if not controlled:
-        defaults = [("coding", ["eden.coding-loop.v1", "eden.coding-context.v1", "eden.submission-queue.v1"]), ("coding-tools", ["eden.coding-tool.v1"]), ("model-access", ["eden.coding-provider.v1"]), ("local-history", ["eden.session-store.v1"])]
+        defaults = [("coding", ["eden.coding-loop.v2", "eden.coding-context.v2", "eden.submission-queue.v2"]), ("coding-tools", ["eden.coding-tool.v1"]), ("model-access", ["eden.model-info.v1", "eden.coding-provider.v1"]), ("local-history", ["eden.session-store.v2"])]
         composition = {"packages": [], "roles": {}}
         for pkg, roles in defaults:
             lib = library("eden_" + pkg.replace("-", "_"))

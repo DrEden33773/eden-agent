@@ -62,6 +62,7 @@ async fn server(status: &str, body: String) -> (String, tokio::task::JoinHandle<
 }
 fn input() -> ModelInput {
     ModelInput {
+        max_output_tokens: None,
         items: vec![],
         tools: vec![],
     }
@@ -82,6 +83,7 @@ async fn streams_unicode_and_complete_multiple_calls_and_projects_all_input() {
     );
     let (endpoint, server) = server("200 OK", body).await;
     let input = ModelInput {
+        max_output_tokens: None,
         items: vec![
             Item::Message {
                 role: "user".into(),
@@ -194,7 +196,6 @@ async fn streams_unicode_and_complete_multiple_calls_and_projects_all_input() {
 #[tokio::test]
 async fn partial_and_failed_streams_never_become_success_or_leak_server_secrets() {
     for body in [
-        event(json!({"type":"response.output_text.delta","delta":"partial"})),
         event(json!({"type":"error","message":"test-secret"})),
         event(json!({"type":"response.failed","response":{"error":{"message":"test-secret"}}})),
         event(json!({"type":"response.incomplete","response":{"status":"incomplete"}})),
@@ -438,6 +439,7 @@ async fn deepseek_reasoning_and_tool_result_roundtrip_preserves_images_and_full_
     )
     .unwrap();
     let mut conversation = ModelInput {
+        max_output_tokens: None,
         items: vec![Item::Message {
             role: "user".into(),
             content: vec![Block::Image {
@@ -579,4 +581,226 @@ async fn deepseek_http_error_returns_first_failure_without_retrying() {
     let (_, body) = server.await.unwrap();
     assert_eq!(body["max_output_tokens"], 393216);
     assert!(body.get("max_tool_calls").is_none());
+}
+
+#[test]
+fn request_output_override_is_bounded_and_zero_is_rejected() {
+    let options = RequestOptions {
+        max_output_tokens: Some(393216),
+        ..Default::default()
+    };
+    let mut input = input();
+    for (requested, expected) in [(None, 393216), (Some(13107), 13107), (Some(500000), 393216)] {
+        input.max_output_tokens = requested;
+        assert_eq!(
+            wire::project(&input, "model", &options).unwrap()["max_output_tokens"],
+            expected
+        );
+    }
+    input.max_output_tokens = Some(0);
+    assert!(wire::project(&input, "model", &options).is_err());
+}
+
+#[test]
+fn model_limits_do_not_read_credentials_or_require_a_model() {
+    let config: Config = serde_json::from_value(json!({"profile":"deepseek"})).unwrap();
+    let limits = config
+        .limits_with(|key| {
+            assert_ne!(key, "OPENAI_API_KEY");
+            None
+        })
+        .unwrap();
+    assert_eq!(limits.context_window, 1_048_576);
+    assert_eq!(limits.max_output_tokens, 393216);
+    let config: Config =
+        serde_json::from_value(json!({"context_window":90000,"max_output_tokens":8000})).unwrap();
+    let limits = config.limits_with(|_| None).unwrap();
+    assert_eq!(limits.context_window, 90000);
+    assert_eq!(limits.max_output_tokens, 8000);
+    assert_eq!(
+        Config::default()
+            .limits_with(|_| None)
+            .unwrap()
+            .context_window,
+        0
+    );
+    assert!(descriptor().provides.iter().any(|role| role == MODEL_INFO));
+    assert!(create(json!({"profile":"deepseek"})).is_ok());
+}
+
+#[tokio::test]
+async fn provider_failures_classify_without_exposing_private_details() {
+    for (status, code, expected) in [
+        (
+            "429 Too Many Requests",
+            "rate_limit_exceeded",
+            "RetryableProviderFailure",
+        ),
+        (
+            "503 Service Unavailable",
+            "server_error",
+            "RetryableProviderFailure",
+        ),
+        (
+            "429 Too Many Requests",
+            "insufficient_quota",
+            "ProviderFailure",
+        ),
+        (
+            "429 Too Many Requests",
+            "billing_hard_limit_reached",
+            "ProviderFailure",
+        ),
+        ("401 Unauthorized", "invalid_api_key", "ProviderFailure"),
+        (
+            "400 Bad Request",
+            "context_length_exceeded",
+            "ContextOverflow",
+        ),
+        (
+            "422 Unprocessable Entity",
+            "invalid_parameter",
+            "ProviderFailure",
+        ),
+    ] {
+        let (endpoint, server) = server(
+            status,
+            json!({"error":{"code":code,"message":"test-secret"}}).to_string(),
+        )
+        .await;
+        let fault = request(
+            &endpoint,
+            "model",
+            "test-secret",
+            &input(),
+            &RequestOptions::default(),
+            |_, _| Ok(()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(fault.code, expected, "{status}: {code}");
+        assert!(!fault.to_string().contains("test-secret"));
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn dropped_stream_is_retryable_and_incomplete_output_never_returns_calls() {
+    for (body, expected) in [
+        (
+            event(json!({"type":"response.output_text.delta","delta":"partial"})),
+            "RetryableProviderFailure",
+        ),
+        (
+            event(
+                json!({"type":"response.failed","response":{"error":{"code":"context_length_exceeded","message":"test-secret"}}}),
+            ),
+            "ContextOverflow",
+        ),
+        (
+            event(
+                json!({"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"output_tokens":100},"output":[{"type":"function_call","call_id":"c1","name":"write","arguments":"{}"}]}}),
+            ),
+            "RecoverableLength",
+        ),
+        (
+            event(
+                json!({"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"output_tokens":1000}}}),
+            ),
+            "ProviderFailure",
+        ),
+    ] {
+        let (endpoint, server) = server("200 OK", body).await;
+        let options = RequestOptions {
+            max_output_tokens: Some(1000),
+            ..Default::default()
+        };
+        let fault = request(
+            &endpoint,
+            "model",
+            "test-secret",
+            &input(),
+            &options,
+            |_, _| Ok(()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(fault.code, expected);
+        assert!(!fault.to_string().contains("test-secret"));
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn incomplete_summary_is_terminal_even_when_usage_is_below_its_allowance() {
+    let body = event(
+        json!({"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"},"usage":{"output_tokens":10}}}),
+    );
+    let (endpoint, server) = server("200 OK", body).await;
+    let mut input = input();
+    input.max_output_tokens = Some(13107);
+    let options = RequestOptions {
+        max_output_tokens: Some(393216),
+        ..Default::default()
+    };
+    assert_eq!(
+        request(&endpoint, "model", "key", &input, &options, |_, _| Ok(()))
+            .await
+            .unwrap_err()
+            .code,
+        "ProviderFailure"
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn connection_dropped_before_response_is_retryable() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/responses", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        read_request(&mut socket).await;
+        socket.shutdown().await.unwrap();
+    });
+    let fault = request(
+        &endpoint,
+        "model",
+        "test-secret",
+        &input(),
+        &RequestOptions::default(),
+        |_, _| Ok(()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(fault.code, "RetryableProviderFailure");
+    assert!(!fault.to_string().contains("test-secret"));
+    server.await.unwrap();
+}
+
+#[test]
+fn explicit_context_errors_and_quota_messages_are_classified_without_echoing_them() {
+    for (status, message, expected) in [
+        (
+            400,
+            "This model's maximum context length is 1048576 tokens. Your messages resulted in too many tokens: test-secret",
+            "ContextOverflow",
+        ),
+        (
+            429,
+            "You exceeded your current quota, please check your plan and billing details. test-secret",
+            "ProviderFailure",
+        ),
+        (
+            400,
+            "invalid parameter containing test-secret",
+            "ProviderFailure",
+        ),
+    ] {
+        let fault = wire::provider_fault(
+            Some(status),
+            &json!({"error":{"type":"invalid_request_error","message":message}}),
+        );
+        assert_eq!(fault.code, expected);
+        assert!(!fault.to_string().contains("test-secret"));
+    }
 }

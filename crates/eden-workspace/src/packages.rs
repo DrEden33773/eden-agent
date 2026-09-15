@@ -357,16 +357,25 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(target, link).unwrap();
         #[cfg(windows)]
-        assert!(
-            std::process::Command::new("cmd")
-                .args(["/C", "mklink", "/J"])
-                .arg(link)
-                .arg(target)
+        {
+            // cmd treats embedded forward slashes as switches. Rebuild the
+            // separators without resolving the intermediate aliases under test.
+            let link: PathBuf = link.components().collect();
+            let target: PathBuf = target.components().collect();
+            let output = std::process::Command::new("cmd")
+                .args(["/D", "/C", "mklink", "/J"])
+                .arg(&link)
+                .arg(&target)
                 .output()
-                .unwrap()
-                .status
-                .success()
-        );
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "mklink /J {link:?} {target:?}: {}; stdout={}; stderr={}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
     fn file_link(target: &Path, link: &Path) {
         #[cfg(unix)]

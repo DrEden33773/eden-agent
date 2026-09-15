@@ -480,14 +480,19 @@ def main() -> None:
                         project,
                         "--global-dir",
                         global_dir,
-                        "--memory",
+                        "--no-session",
                         "--json",
                         "Exercise broken hook",
                     ],
                     scratch,
                     check=False,
                 )
-                assert "example.missing.v1" in result.stdout + result.stderr
+                assert "example.missing.v1" in result.stdout + result.stderr, (
+                    stage,
+                    result.returncode,
+                    result.stderr,
+                    result.stdout[-2000:],
+                )
                 assert bool(result.returncode) == (stage == "input_hooks")
                 assert not sentinel.exists()
                 assert len(server.requests) == (0 if stage == "input_hooks" else 2)
@@ -509,7 +514,7 @@ def main() -> None:
                     project,
                     "--global-dir",
                     global_dir,
-                    "--memory",
+                    "--no-session",
                     "--no-context",
                     "--json",
                     "Reply briefly",
@@ -558,7 +563,7 @@ def main() -> None:
                         project,
                         "--global-dir",
                         global_dir,
-                        "--memory",
+                        "--no-session",
                         "--json",
                         "Run the PowerShell task.",
                     ],
@@ -649,10 +654,14 @@ def main() -> None:
         references = []
         for reference in (global_dir / "distribution/sessions").glob("*.json"):
             value = json.loads(reference.read_text(encoding="utf-8"))
-            if pathlib.Path(value["history"]) in [copied, recovered]:
-                assert (
-                    str(pathlib.Path(installed["path"]) / installed["manifest"]["library"])
-                    in value["libraries"]
+            if pathlib.Path(value["history"]).exists() and any(
+                pathlib.Path(value["history"]).samefile(p) for p in [copied, recovered]
+            ):
+                assert any(
+                    pathlib.Path(p).samefile(
+                        pathlib.Path(installed["path"]) / installed["manifest"]["library"]
+                    )
+                    for p in value["libraries"]
                 )
                 references.append(value["history"])
         assert len(references) == 2
@@ -696,7 +705,10 @@ def main() -> None:
         finally:
             server.close()
         newest_lock = [r for r in records(copied) if r["kind"] == "composition_lock"][-1]
-        assert str(new_library) in newest_lock["payload"]["library_locations"]
+        assert any(
+            pathlib.Path(p).samefile(new_library)
+            for p in newest_lock["payload"]["library_locations"]
+        )
         relocated_fork = scratch / "relocated-fork.jsonl"
         command("session", "fork", copied, relocated_fork, "--apply")
         copied.unlink()

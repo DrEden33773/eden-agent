@@ -145,6 +145,16 @@ pub fn register_libraries(
     libraries: Vec<String>,
     pending: bool,
 ) -> Result<(), Fault> {
+    // Saved compositions can use aliases such as macOS /var or Windows paths
+    // without a verbatim prefix. Reference membership uses physical identities.
+    let libraries: Vec<String> = libraries
+        .into_iter()
+        .map(|library| {
+            std::fs::canonicalize(&library)
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or(library)
+        })
+        .collect();
     let mut stores = std::collections::BTreeSet::new();
     let packages = std::fs::canonicalize(store.join("packages")).ok();
     if packages
@@ -255,12 +265,14 @@ mod tests {
         let root = std::env::temp_dir().join(format!("eden-reference-{}", std::process::id()));
         std::fs::create_dir_all(root.join("old")).unwrap();
         std::fs::create_dir_all(root.join("new")).unwrap();
+        std::fs::write(root.join("old/plugin"), b"old library").unwrap();
+        std::fs::write(root.join("new/plugin"), b"new library").unwrap();
         let history = root.join("history.jsonl");
         std::fs::write(&history, b"original binding").unwrap();
         let composition = |version: &str| -> Composition {
             serde_json::from_value(json!({"packages":[{
                 "descriptor":{"package":"test","version":"1","provides":[]},
-                "library":root.join(version).join("plugin"),"sdk":"test","host":"test","target":"test","config":null
+                "library":std::fs::canonicalize(root.join(version).join("plugin")).unwrap(),"sdk":"test","host":"test","target":"test","config":null
             }],"roles":{}})).unwrap()
         };
         register_at(

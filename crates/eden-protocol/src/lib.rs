@@ -1,6 +1,7 @@
 //! Public data records shared by the host and native plugin SDK.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+pub mod resources;
 
 /// Exact host/SDK pairing for this development release.
 pub const CONTRACT: &str = "eden-native-0.1.0";
@@ -12,6 +13,8 @@ pub const CONTEXT: &str = "eden.context.v1";
 pub const PROVIDER: &str = "eden.provider.v1";
 /// Tool role.
 pub const TOOL: &str = "eden.tool.v1";
+/// Optional instance finalizer, invoked by the host after normal admission drains.
+pub const INSTANCE_STOP: &str = "eden.instance-stop.v1";
 
 /// Structured failure with its owning source.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -104,6 +107,9 @@ pub struct PackageManifest {
     pub library: String,
     #[serde(default)]
     pub config: Value,
+    /// Required selected contracts, including domains unknown to the host.
+    #[serde(default)]
+    pub requires: Vec<String>,
 }
 /// Resolved local composition. Paths are relative to this file, never caller cwd.
 #[derive(Clone, Debug, Serialize, Deserialize)]

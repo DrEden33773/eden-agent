@@ -20,6 +20,10 @@ impl Cancellation {
     pub fn cancel(&self) {
         self.0.send_replace(true);
     }
+    /// Observe cancellation inside synchronous copy or hashing loops.
+    pub fn is_cancelled(&self) -> bool {
+        *self.0.borrow()
+    }
     pub async fn cancelled(&self) {
         let mut receiver = self.0.subscribe();
         while !*receiver.borrow_and_update() {

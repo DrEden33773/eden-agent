@@ -11,26 +11,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Sequence
 from typing import Any
 
-from install import ROLES, ROOT, install, library, package, target
-
-
-def run(
-    args: Sequence[str | pathlib.Path], cwd: pathlib.Path, check: bool = True
-) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(
-        [str(arg) for arg in args],
-        cwd=cwd,
-        text=True,
-        encoding="utf-8",
-        capture_output=True,
-        timeout=240,
-    )
-    if check and result.returncode:
-        raise RuntimeError(f"{args}: exit {result.returncode}\n{result.stdout}\n{result.stderr}")
-    return result
+from install import ROLES, ROOT, library, package, target
+from verification import author_artifact, installed, prepare, run
 
 
 def write(path: pathlib.Path, value: object) -> None:
@@ -38,17 +22,11 @@ def write(path: pathlib.Path, value: object) -> None:
 
 
 def main() -> None:
-    run(["cargo", "build", "--workspace", "--locked"], ROOT)
-    run(["cargo", "build", "-p", "eden-agent", "--examples", "--locked"], ROOT)
+    prepare()
     artifacts = ROOT / "artifacts"
     artifacts.mkdir(exist_ok=True)
-    destination = install(artifacts / "install", controlled=True)
+    destination = installed(artifacts / "install", controlled=True)
     suffix = ".exe" if sys.platform == "win32" else ""
-    for example in ["embedded", "contract_probe", "initialization_probe"]:
-        shutil.copy2(
-            ROOT / "target/debug/examples" / (example + suffix),
-            destination / "bin" / (example + suffix),
-        )
     fixed = {
         path.name: path.read_bytes() for path in (destination / "bin").iterdir() if path.is_file()
     }
@@ -58,75 +36,19 @@ def main() -> None:
     triple = target()
     with tempfile.TemporaryDirectory(prefix="eden-independent-authors-") as temp:
         scratch = pathlib.Path(temp)
-        # This tree contains the public SDK and protocol, with no kernel, CLI or first-party plugin source.
-        sdk = scratch / "sdk"
-        (sdk / "crates").mkdir(parents=True)
-        for crate in ["eden-protocol", "eden-plugin-sdk"]:
-            shutil.copytree(ROOT / "crates" / crate, sdk / "crates" / crate)
-        manifest = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
-        manifest = manifest.replace('members = ["crates/*", "plugins/*"]', 'members = ["crates/*"]')
-        manifest = (
-            "\n".join(
-                line
-                for line in manifest.splitlines()
-                if not line.startswith("exclude =")
-                and not line.startswith("eden-kernel =")
-                and not line.startswith("eden-agent =")
-            )
-            + "\n"
-        )
-        (sdk / "Cargo.toml").write_text(manifest, encoding="utf-8")
-        shutil.copy2(ROOT / "rust-toolchain.toml", scratch / "rust-toolchain.toml")
         for name, roles in [
             ("loop-a", [ROLES[0]]),
             ("context-b", [ROLES[1]]),
             ("lifecycle", [ROLES[0]]),
             ("init-probe", [ROLES[0]]),
         ]:
-            author = scratch / "authors" / name
-            shutil.copytree(
-                ROOT / "tests/contract-authors" / name,
-                author,
-                ignore=shutil.ignore_patterns("target"),
-            )
-            cargo = author / "Cargo.toml"
-            cargo.write_text(
-                cargo.read_text(encoding="utf-8").replace(
-                    "../../../crates/eden-plugin-sdk",
-                    "../../sdk/crates/eden-plugin-sdk",
-                ),
-                encoding="utf-8",
-            )
-            run(
-                [
-                    "cargo",
-                    "build",
-                    "--locked",
-                    "--target-dir",
-                    scratch / "author-target",
-                ],
-                author,
-            )
             lib = library("author_" + name.replace("-", "_"))
             plugin_dir = destination / "plugins" / name / "0.1.0"
             plugin_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(scratch / "author-target/debug" / lib, plugin_dir / lib)
+            shutil.copy2(author_artifact(name), plugin_dir / lib)
             composition["packages"].append(
                 package(name, roles, f"plugins/{name}/0.1.0/{lib}", triple)
             )
-        invalid_author = scratch / "authors" / "invalid"
-        shutil.copytree(
-            ROOT / "tests/contract-authors/invalid",
-            invalid_author,
-            ignore=shutil.ignore_patterns("target"),
-        )
-        cargo = invalid_author / "Cargo.toml"
-        cargo.write_text(
-            cargo.read_text(encoding="utf-8").replace(
-                "../../../crates/eden-plugin-sdk", "../../sdk/crates/eden-plugin-sdk"
-            ),
-            encoding="utf-8",
-        )
         invalid_paths = {}
         for feature in [
             "wrong-abi",
@@ -135,22 +57,10 @@ def main() -> None:
             "metadata-panic",
             "init-panic",
         ]:
-            run(
-                [
-                    "cargo",
-                    "build",
-                    "--locked",
-                    "--features",
-                    feature,
-                    "--target-dir",
-                    scratch / "author-target",
-                ],
-                invalid_author,
-            )
             lib = library("author_invalid")
             invalid_dir = destination / "plugins" / feature
             invalid_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(scratch / "author-target/debug" / lib, invalid_dir / lib)
+            shutil.copy2(author_artifact("invalid", feature), invalid_dir / lib)
             invalid_paths[feature] = f"plugins/{feature}/{lib}"
         caller = scratch / "unrelated caller 工作目录"
         caller.mkdir()

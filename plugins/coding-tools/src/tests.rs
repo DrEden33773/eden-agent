@@ -42,6 +42,77 @@ impl Drop for Project {
     }
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn powershell_uses_native_paths_and_explicit_cwd() {
+    let project = Project::new();
+    std::fs::create_dir(project.0.join("space dir")).unwrap();
+    let result = execute(
+        project.request(
+            "powershell",
+            json!({
+"command":"[IO.File]::WriteAllText((Join-Path (Get-Location) 'space dir/value.txt'), \
+                'native UTF-8'); Get-Content -LiteralPath 'space dir/value.txt'"}),
+        ),
+        Scope::default(),
+        "pwsh".into(),
+    )
+    .await
+    .unwrap();
+    assert!(result.error.is_none(), "{result:?}");
+    assert!(result.text.contains("native UTF-8"));
+    assert_eq!(
+        std::fs::read_to_string(project.0.join("space dir/value.txt")).unwrap(),
+        "native UTF-8"
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn powershell_cancellation_reaps_native_descendant_before_completion() {
+    let project = Project::new();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::fs::write(
+        project.0.join("child.ps1"),
+        format!(
+            "$client=[Net.Sockets.TcpClient]::new('127.0.0.1',{port}); \
+                $stream=$client.GetStream(); $stream.WriteByte(82); $stream.Flush(); \
+                Start-Sleep -Seconds 300"
+        ),
+    )
+    .unwrap();
+    let request = project.request(
+        "powershell",
+        json!({"command":"$child=Start-Process pwsh -ArgumentList \
+                '-NoProfile','-NonInteractive','-File','child.ps1' -PassThru; Wait-Process \
+                -Id $child.Id"}),
+    );
+    let scope = Scope::default();
+    let cancel = scope.cancellation();
+    let task = tokio::spawn(execute(request, scope, "pwsh".into()));
+    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(15), listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    use tokio::io::AsyncReadExt;
+    let mut byte = [0; 1];
+    socket.read_exact(&mut byte).await.unwrap();
+    assert_eq!(byte, *b"R");
+    cancel.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.error.unwrap().code, "Cancelled");
+    assert_closed(
+        tokio::time::timeout(Duration::from_secs(5), socket.read(&mut byte))
+            .await
+            .unwrap(),
+    );
+}
+
 #[tokio::test]
 async fn write_edit_and_read_use_explicit_cwd_and_utf8_line_ranges() {
     let project = Project::new();
@@ -287,7 +358,8 @@ async fn cancelled_descendant_with_closed_stdio_has_exited_before_result() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let command = format!(
-        "(exec 1>&- 2>&-; exec 3<>/dev/tcp/127.0.0.1/{port}; printf R >&3; exec sleep 300) & wait"
+        "(exec 1>&- 2>&-; exec 3<>/dev/tcp/127.0.0.1/{port}; printf R >&3; exec \
+                sleep 300) & wait"
     );
     let scope = Scope::default();
     let cancellation = scope.cancellation();

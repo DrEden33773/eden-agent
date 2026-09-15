@@ -38,7 +38,25 @@ Checks write only temporary snapshots and build outputs (`target/hooks` for hook
 
 ## CI and tests
 
-The native matrix runs the same Markdown, Python, JavaScript, formatting and Clippy commands on Linux, Windows and macOS, plus `pnpm hooks:test` for real Git commit/push regression scenarios. Local hooks provide early feedback; the required Quality check remains the merge gate even when a local hook was not installed or was bypassed.
+Static Markdown, Ruff, basedpyright standard, Biome and Rust formatting checks run once before native jobs. A PR that changes only the root README or Markdown below `docs/` needs the static gate; every other path, an unknown comparison, and every main push requires native Linux, Windows and macOS. Changes to the selector and workflow run the complete matrix. The required Quality check rejects failed or missing required jobs, including cancellation. Local hooks remain an early snapshot check.
+
+Each native job runs verification-infrastructure regressions, dependency-license preflight, all workspace core/process tests with `--no-fail-fast`, Clippy including independent authors, and real Git hook scenarios. These checks retain native coverage of Windows locks, process trees, paths, line endings and dynamic libraries. Compilation failures and test failures include the command, phase, exit status, output and timing. Independent phases continue after another phase fails so one platform run can report multiple problems. Cargo continues to later crates after one test target fails; it still returns failure. Node and Python dependency installation have separate steps, so PowerShell cannot replace an earlier failure with a later success. The CI runner writes its running receipt and output while the command is still active.
+
+Run the installed acceptance collection locally with:
+
+```sh
+python scripts/verify-all.py --workers 2 --output artifacts/verification
+```
+
+Preparation builds the workspace and examples once, assembles isolated installation seeds with their license bundle, and freezes the host before building SDK-only external authors. Each invalid ABI variant has its own copied artifact. Stable exported inputs preserve unchanged file timestamps, remove deleted inputs and contain no kernel, CLI or first-party plugin source. Cargo checks the current source and locks on every preparation. Individual `verify*.py` entry points remain supported and use the same preparation.
+
+Five suites execute in separate processes with separate installation copies, project directories, state and loopback ports. Controlled HTTP fixtures stop through a wakeup socket, join every request handler, and inspect errors after those handlers finish; late handler failures cannot produce a green close. Every assertion executes again, including explicit source-package compilation, reopen behavior and unknown namespaced interop. Source fingerprints and artifact digests reject preparation reuse after changed sources or native bytes; prior verification JSON is removed before execution. The final distribution is copied from the frozen default installation only after every suite passes. Reports live in `artifacts/verification/timings.json`, with per-suite results and per-command stdout/stderr; the original `artifacts/*verification.json` paths remain available.
+
+Each native runner also extracts its actual release archive into a fresh directory beneath an unrelated receipt file. `scripts/verify-archive.py` compares every file and its bytes against the frozen distribution, checks executable permission bits on POSIX, and executes the packaged CLI's `--version` and `resources list` commands with an isolated project and global directory. Windows execution validates native executable access. These commands make no Provider calls. `artifacts/ci/archive-verification.json` binds the archive, host and plugin hashes to the source commit and native target; it is a compact downloadable proof alongside the raw native diagnostics.
+
+CI caches the pinned Rust toolchain, pnpm store, uv downloads, Cargo registry/Git sources and native build outputs separately. Build caches include OS, architecture, toolchain, manifests, locks and CI profile identity, and can restore compatible dependencies across source revisions. Cargo validates restored outputs; CI does not restore source timestamps or cache test verdicts. CI disables incremental compilation and uses debug level 1 to reduce cache transfer size while retaining line information and debug assertions. Cache identities, compilation counts and phase durations are uploaded under `artifacts/ci` on success or failure. A cache hit alone is not evidence of a passed test or an avoided rebuild.
+
+Measure cold and warm runs on the same source and toolchain. Compare preparation, compilation, execution and cache transfer separately; preserve the failed baseline and the original regression assertions. Do not speed up a failing test by adding retries, broad sleeps, skips or weaker assertions. `python -m unittest discover -s scripts -p 'test_*.py' -v` checks license packaging, preparation invalidation, installation isolation and failure diagnostics without compiling the workspace.
 
 ## Python and JavaScript policy
 

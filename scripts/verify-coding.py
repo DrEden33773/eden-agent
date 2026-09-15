@@ -8,42 +8,23 @@ import json
 import os
 import pathlib
 import platform
-import re
 import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from typing import Any
 
-from install import ROOT, Composition, Package, install, library, package, target
+from http_fixture import FixtureHTTPServer
+from install import ROOT, Composition, Package, library, package, target
+from verification import author_artifact, installed, prepare, run
 
 PROVIDER = "eden.coding-provider.v1"
 CONTEXT = "eden.coding-context.v2"
 TOOL = "eden.coding-tool.v1"
 STORE = "eden.session-store.v2"
-
-
-def run(
-    args: Sequence[str | pathlib.Path],
-    cwd: pathlib.Path,
-    check: bool = True,
-    env: dict[str, str] | None = None,
-) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(
-        [str(a) for a in args],
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        timeout=240,
-        env=env,
-    )
-    if check and result.returncode:
-        raise AssertionError(f"{args}: {result.returncode}\n{result.stdout}\n{result.stderr}")
-    return result
 
 
 def write(path: pathlib.Path, value: object) -> None:
@@ -137,8 +118,7 @@ class Server:
                 except BaseException as error:
                     owner.errors.append(repr(error))
 
-        self.http = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.http.daemon_threads = True
+        self.http = FixtureHTTPServer(("127.0.0.1", 0), Handler)
         self.address = f"127.0.0.1:{self.http.server_port}"
         self.thread = threading.Thread(target=self.http.serve_forever, daemon=True)
         self.thread.start()
@@ -184,43 +164,10 @@ def events(
 
 
 def build_author(destination: pathlib.Path, scratch: pathlib.Path) -> Package:
-    sdk = scratch / "sdk"
-    (sdk / "crates").mkdir(parents=True)
-    for name in ["eden-protocol", "eden-plugin-sdk"]:
-        shutil.copytree(ROOT / "crates" / name, sdk / "crates" / name)
-    manifest = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
-    manifest = re.sub(r"^members = .*$", 'members = ["crates/*"]', manifest, flags=re.MULTILINE)
-    manifest = (
-        "\n".join(
-            line
-            for line in manifest.splitlines()
-            if not line.startswith(("exclude =", "eden-kernel =", "eden-agent ="))
-        )
-        + "\n"
-    )
-    (sdk / "Cargo.toml").write_text(manifest, encoding="utf-8")
-    shutil.copy2(ROOT / "rust-toolchain.toml", scratch / "rust-toolchain.toml")
-    author = scratch / "authors" / "coding-replacements"
-    shutil.copytree(
-        ROOT / "tests/contract-authors/coding-replacements",
-        author,
-        ignore=shutil.ignore_patterns("target"),
-    )
-    cargo = author / "Cargo.toml"
-    cargo.write_text(
-        cargo.read_text(encoding="utf-8").replace(
-            "../../../crates/eden-plugin-sdk", "../../sdk/crates/eden-plugin-sdk"
-        ),
-        encoding="utf-8",
-    )
-    run(
-        ["cargo", "build", "--locked", "--target-dir", scratch / "author-target"],
-        author,
-    )
     lib = library("author_coding_replacements")
     folder = destination / "plugins/coding-replacements/0.1.0"
     folder.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(scratch / "author-target/debug" / lib, folder / lib)
+    shutil.copy2(author_artifact("coding-replacements"), folder / lib)
     return package(
         "coding-replacements",
         [
@@ -238,18 +185,13 @@ def build_author(destination: pathlib.Path, scratch: pathlib.Path) -> Package:
 
 def main() -> None:
     os.environ["EDEN_VERIFY_KEY"] = "controlled-verifier-key"
-    run(["cargo", "build", "--workspace", "--locked"], ROOT)
-    run(
-        ["cargo", "build", "-p", "eden-agent", "--example", "coding_probe", "--locked"],
-        ROOT,
-    )
+    prepare()
     artifacts = ROOT / "artifacts"
     artifacts.mkdir(exist_ok=True)
-    destination = install(artifacts / "coding-install")
+    destination = installed(artifacts / "coding-install")
     suffix = ".exe" if sys.platform == "win32" else ""
     host = destination / "bin" / ("eden" + suffix)
     probe = destination / "bin" / ("coding_probe" + suffix)
-    shutil.copy2(ROOT / "target/debug/examples" / probe.name, probe)
     fixed_host = host.read_bytes()
     composition = json.loads((destination / "composition.json").read_text(encoding="utf-8"))
     results: dict[str, Any] = {}

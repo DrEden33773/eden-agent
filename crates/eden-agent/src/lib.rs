@@ -1,8 +1,12 @@
 //! Shared persistent and memory session API for the CLI and Rust consumers.
 use eden_kernel::{Events, Kernel};
+mod composition;
+mod generation;
+mod workspace_setup;
 use eden_plugin_sdk::Cancellation;
 use eden_protocol::{AGENT_LOOP, Request, RunInput, coding as c};
 pub use eden_protocol::{Event, Fault, Outcome, Terminal};
+pub use eden_workspace::{Workspace, WorkspaceOptions, save_trust};
 use std::{
     collections::BTreeMap,
     path::Path,
@@ -23,7 +27,10 @@ struct State {
 }
 struct Inner {
     id: u64,
-    kernel: Kernel,
+    kernel: generation::Generation,
+    workspace_options: WorkspaceOptions,
+    history_path: Option<std::path::PathBuf>,
+    offline_records: Mutex<Vec<c::Record>>,
     events: Arc<Events>,
     state: Mutex<State>,
     settled: tokio::sync::Notify,
@@ -50,10 +57,32 @@ impl Session {
         composition: impl AsRef<Path>,
         options: SessionOptions,
     ) -> Result<Self, Fault> {
-        let composition = composition.as_ref().to_owned();
+        Self::open_with_workspace(composition, options, WorkspaceOptions::default()).await
+    }
+    pub async fn open_with_workspace(
+        composition: impl AsRef<Path>,
+        options: SessionOptions,
+        workspace: WorkspaceOptions,
+    ) -> Result<Self, Fault> {
+        Self::open_with_policy(composition.as_ref().to_owned(), options, workspace, false).await
+    }
+    /// Explicitly bind saved history to a different installed composition without running it.
+    pub async fn open_rebound(
+        composition: impl AsRef<Path>,
+        options: SessionOptions,
+        workspace: WorkspaceOptions,
+    ) -> Result<Self, Fault> {
+        Self::open_with_policy(composition.as_ref().to_owned(), options, workspace, true).await
+    }
+    async fn open_with_policy(
+        composition: std::path::PathBuf,
+        options: SessionOptions,
+        workspace: WorkspaceOptions,
+        rebind: bool,
+    ) -> Result<Self, Fault> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            let result = Self::open_owned(composition, options).await;
+            let result = Self::open_owned(composition, options, workspace, rebind).await;
             let _ = sender.send(SessionDelivery(Some(result)));
         });
         let mut delivery = receiver
@@ -67,6 +96,8 @@ impl Session {
     async fn open_owned(
         composition: std::path::PathBuf,
         options: SessionOptions,
+        workspace_options: WorkspaceOptions,
+        rebind: bool,
     ) -> Result<Self, Fault> {
         let cwd = std::fs::canonicalize(&options.cwd)
             .map_err(|e| Fault::new("InvalidInput", "cwd", e.to_string()))?;
@@ -94,19 +125,54 @@ impl Session {
             .unwrap_or_else(new_session_id);
         let next = previous.iter().map(|r| r.run_id).max().unwrap_or(0) + 1;
         let events = Events::new(id);
-        let kernel = Kernel::load(composition.as_ref(), id, events.clone()).await?;
+        let selected = workspace_setup::prepare(
+            &composition,
+            &cwd,
+            &workspace_options,
+            &events,
+            options.history.as_deref(),
+        )?;
+        let desired = composition::binding(&selected, &cwd)?;
+        if !rebind
+            && previous
+                .iter()
+                .rev()
+                .find(|r| r.kind == "composition_lock")
+                .is_some_and(|saved| !composition::equivalent(&saved.payload, &desired))
+        {
+            return Err(Fault::new(
+                "Unavailable",
+                "composition",
+                "saved package binding differs; use an explicit session switch",
+            ));
+        }
+        let kernel = Kernel::load_resolved(
+            selected,
+            composition.parent().unwrap_or(Path::new(".")),
+            id,
+            events.clone(),
+        )
+        .await?;
         let coding = kernel.role(c::LOOP).is_ok();
         if options.history.is_some() && !coding {
-            kernel.shutdown().await?;
-            return Err(Fault::new(
+            let mut error = Fault::new(
                 "Unsupported",
                 "session",
                 "controlled skeleton supports only memory sessions",
-            ));
+            );
+            if let Err(cleanup) = kernel.shutdown().await {
+                error
+                    .message
+                    .push_str(&format!("; rollback cleanup: {cleanup}"));
+            }
+            return Err(error);
         }
         let session = Self(Arc::new(Inner {
             id,
-            kernel,
+            kernel: generation::Generation::new(kernel),
+            workspace_options,
+            history_path: options.history.clone(),
+            offline_records: Mutex::new(previous.clone()),
             events,
             state: Mutex::new(State {
                 closed: false,
@@ -146,8 +212,16 @@ impl Session {
                     "roles": binding.roles,
                     "packages": binding.packages.iter().map(|p| &p.descriptor).collect::<Vec<_>>()
                 });
+                let locked = desired;
+                let saved_lock = reply.records.iter().rev().find(|r|r.kind == "composition_lock");
+                if let Some(saved) = saved_lock && !rebind && !composition::equivalent(&saved.payload, &locked) {
+ return Err(Fault::new("Unavailable",
+"composition",
+"saved package binding differs; explicitly switch the saved session composition"));
+
+}
                 if let Some(record) = reply.records.first() {
-                    if record.kind != "session" || !compatible_binding(&record.payload, &identity) {
+                    if record.kind != "session" || (!rebind && saved_lock.is_none() && !compatible_binding(&record.payload, &identity)) {
                         return Err(Fault::new(
                             "Unavailable",
                             "session",
@@ -160,11 +234,20 @@ impl Session {
                 let _: Vec<c::QueueEntry> = session
                     .service(0, c::QUEUE, &c::QueueRequest::Restore)
                     .await?;
+                workspace_setup::register(&session, &binding, true)?;
+                if rebind || saved_lock.is_none_or(|saved| saved.payload["library_locations"] != locked["library_locations"]) {
+                    session.commit(0, "composition_lock", locked).await?;
+                }
+                workspace_setup::register(&session, &binding, false)?;
                 Ok::<_, Fault>(())
             }
             .await;
-            if let Err(error) = setup {
-                let _ = session.shutdown().await;
+            if let Err(mut error) = setup {
+                if let Err(cleanup) = session.shutdown().await {
+                    error
+                        .message
+                        .push_str(&format!("; rollback cleanup: {cleanup}"));
+                }
                 return Err(error);
             }
         }
@@ -187,6 +270,7 @@ impl Session {
         self.start_loop(vec![], true)
     }
     fn start_loop(&self, content: Vec<c::Block>, resume: bool) -> Result<u64, Fault> {
+        self.0.kernel.get()?;
         let payload = if self.0.coding {
             serde_json::json!(c::RunInput {
                 resume,
@@ -250,7 +334,7 @@ impl Session {
         let session = self.clone();
         tokio::spawn(async move {
             let mut terminal = operation(session.clone(), run_id, cancel).await;
-            if session.0.coding {
+            if session.0.coding && session.0.kernel.available() {
                 if let Err(error) = session
                     .service::<_, Vec<c::QueueEntry>>(run_id, c::QUEUE, &c::QueueRequest::Restore)
                     .await
@@ -374,7 +458,7 @@ impl Session {
             }
             changed.await;
         }
-        let close = if self.0.coding {
+        let close = if self.0.coding && self.0.kernel.available() {
             self.service::<_, c::StoreReply>(0, c::STORE, &c::StoreRequest::Close)
                 .await
                 .map(|_| ())
@@ -382,7 +466,16 @@ impl Session {
             Ok(())
         };
         let stopped = self.0.kernel.shutdown().await;
-        let result = close.and(stopped);
+        let result = match (close, stopped) {
+            (Err(mut error), Err(cleanup)) => {
+                error
+                    .message
+                    .push_str(&format!("; instance cleanup: {cleanup}"));
+                Err(error)
+            }
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Ok(()), Ok(())) => Ok(()),
+        };
         self.0
             .state
             .lock()
@@ -441,6 +534,17 @@ impl Session {
     }
     /// Read committed public history through the selected storage role.
     pub async fn history(&self) -> Result<Vec<c::Record>, Fault> {
+        if !self.0.kernel.available() {
+            return match &self.0.history_path {
+                Some(path) => eden_kernel::history::read(path),
+                None => Ok(self
+                    .0
+                    .offline_records
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()),
+            };
+        }
         Ok(self
             .service::<_, c::StoreReply>(0, c::STORE, &c::StoreRequest::Read)
             .await?

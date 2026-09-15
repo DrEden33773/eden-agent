@@ -5,6 +5,7 @@ pub mod environment;
 
 /// Shared-session management commands.
 pub mod session_commands;
+pub mod workspace_commands;
 
 /// Wait for a settled run and optionally stream its ordered JSON events.
 pub async fn wait_for_run(
@@ -13,6 +14,18 @@ pub async fn wait_for_run(
     json: bool,
 ) -> Result<eden_agent::Terminal, Box<dyn std::error::Error>> {
     if !json {
+        for event in session
+            .events()
+            .iter()
+            .filter(|event| event.kind == "resource_diagnostic")
+        {
+            eprintln!(
+                "{}",
+                event.payload["message"]
+                    .as_str()
+                    .unwrap_or("resource diagnostic")
+            );
+        }
         return Ok(session.wait(run).await?);
     }
     use std::io::Write;

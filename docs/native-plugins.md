@@ -27,3 +27,9 @@ The ordinary host shutdown path awaits run settlement, withdraws services and de
 ## Release scope
 
 The default installation provides coding runs with OpenAI Responses, read/write/edit/bash, JSONL history, tree navigation, context compaction, explicit migration, resume and queues through native roles. Model and credentials are explicitly configured. The controlled skeleton remains an isolated lifecycle regression composition. See [coding sessions](coding.md) for current behavior; broader Provider authentication and terminal UI are subsequent product work.
+
+## Instance finalization and authored services
+
+An instance may additionally provide `eden.instance-stop.v1`. After public admission closes and ordinary operations drain, the host calls this finalizer once, awaits its cleanup, then destroys the instance. Finalizers must finish their own work without calling withdrawn services. Their failures are reported by shutdown, including repeated shutdown observations. Libraries without the service retain their prior destruction behavior. This is an additive string service; the C ABI table layout is unchanged.
+
+Manifest `requires` lists selected dependency contract strings. The host validates those strings before loading code, including contracts it has never seen before. The independent service authors and `scripts/verify-workspace.py` demonstrate native author B calling author A through `CallContext::call`, command and hook contributions, ResourceSource replacement, explicit composition recovery and old-handle rejection. See [workspace facilities](workspace.md) for configuration and package sources.

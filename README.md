@@ -51,3 +51,5 @@ Install Node.js 22+ and pnpm 10.32.1 for development checks, then run `pnpm inst
 Changes enter `main` through a PR with independent review and passing Quality checks, using squash merge. See [AGENTS.md](AGENTS.md) for development commands.
 
 Product code and SDK: [Apache-2.0](LICENSE). Dependencies retain their [third-party notices](THIRD_PARTY_NOTICES.md).
+
+See [resources, trust and package composition](docs/workspace.md) for Skills, templates, FFF search, package commands and independent service contributions.

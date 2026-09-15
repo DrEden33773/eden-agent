@@ -13,6 +13,7 @@ pub async fn run(args: &[String]) -> Result<i32> {
         .as_str();
     let mut positional = vec![];
     let mut composition = None;
+    let mut workspace = eden_agent::WorkspaceOptions::default();
     let mut cwd = None;
     let mut target = None;
     let mut branch = None;
@@ -34,6 +35,11 @@ pub async fn run(args: &[String]) -> Result<i32> {
                     iter.next().ok_or("missing composition path")?,
                 ))
             }
+            "--global-dir" => {
+                workspace.global_dir = PathBuf::from(iter.next().ok_or("missing global directory")?)
+            }
+            "--trust-project" => workspace.project_trust = Some(true),
+            "--no-trust-project" => workspace.project_trust = Some(false),
             "--cwd" => cwd = Some(PathBuf::from(iter.next().ok_or("missing cwd")?)),
             "--at" => target = Some(iter.next().ok_or("missing node id")?.parse::<u64>()?),
             "--branch" => branch = Some(iter.next().ok_or("missing branch")?.clone()),
@@ -164,8 +170,40 @@ pub async fn run(args: &[String]) -> Result<i32> {
         }
         return Ok(0);
     }
-    let session = Session::open_saved(&composition, path, cwd).await?;
+    let cwd = match cwd {
+        Some(cwd) => cwd,
+        None => PathBuf::from(
+            eden_kernel::history::read(&path)?
+                .first()
+                .and_then(|r| r.payload["cwd"].as_str())
+                .ok_or("missing recorded cwd")?,
+        ),
+    };
+    let options = eden_agent::SessionOptions {
+        cwd,
+        history: Some(path),
+    };
+    let session = if command == "switch" {
+        Session::open_rebound(&composition, options, workspace).await?
+    } else {
+        Session::open_with_workspace(&composition, options, workspace).await?
+    };
     let result = async {
+        if command == "switch" {
+            writeln!(
+                std::io::stdout(),
+                "{{\"available\":true,\"binding_updated\":true}}"
+            )?;
+            return Ok(0);
+        }
+        if command == "resources" {
+            writeln!(
+                std::io::stdout(),
+                "{}",
+                serde_json::to_string(&session.resources().await?)?
+            )?;
+            return Ok(0);
+        }
         if command == "queue" {
             writeln!(
                 std::io::stdout(),

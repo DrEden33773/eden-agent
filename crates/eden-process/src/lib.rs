@@ -1,15 +1,19 @@
 //! Platform process ownership. Every shell starts inside its cleanup domain.
-use super::fault;
+fn fault(code: &str, message: impl Into<String>) -> Fault {
+    Fault::new(code, "process", message)
+}
+#[cfg(unix)]
+mod unix_exit;
 use eden_plugin_sdk::protocol::Fault;
 use std::{path::Path, process::Stdio};
 use tokio::process::{Child, Command};
 
-pub(crate) async fn spawn(shell: &str, script: &str, cwd: &Path) -> Result<(Child, Tree), Fault> {
+pub async fn spawn(shell: &str, args: &[&str], cwd: &Path) -> Result<(Child, Tree), Fault> {
     #[cfg(windows)]
     let shell = &resolve_windows_shell(shell, cwd)?;
     let mut command = Command::new(shell);
+    command.args(args);
     command
-        .args(["--noprofile", "--norc", "-c", script])
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -20,8 +24,7 @@ pub(crate) async fn spawn(shell: &str, script: &str, cwd: &Path) -> Result<(Chil
         fault(
             "ShellUnavailable",
             format!(
-                "cannot launch bash executable {shell:?}: {error}; install bash or configure \
-                 coding-tools.bash with its executable path"
+                "cannot launch shell executable {shell:?}: {error}; configure coding-tools.bash or coding-tools.powershell with its executable path"
             ),
         )
     })?;
@@ -65,18 +68,17 @@ fn resolve_windows_shell(shell: &str, cwd: &Path) -> Result<std::path::PathBuf, 
     Err(fault(
         "ShellUnavailable",
         format!(
-            "native bash executable {shell:?} was not found in PATH; install Git Bash or \
-             configure coding-tools.bash with its absolute path"
+            "native shell executable {shell:?} was not found in PATH; configure the selected shell with its absolute path"
         ),
     ))
 }
-pub(crate) use platform::Tree;
+pub use platform::Tree;
 
 #[cfg(unix)]
 mod platform {
     use super::*;
     use crate::unix_exit::{Observer, observe};
-    pub(crate) struct Tree {
+    pub struct Tree {
         pid: i32,
         terminated: std::sync::atomic::AtomicBool,
         observers: std::sync::Mutex<Vec<Observer>>,
@@ -112,7 +114,7 @@ mod platform {
         }
     }
     impl Tree {
-        pub(crate) fn terminate(&self) -> Result<(), Fault> {
+        pub fn terminate(&self) -> Result<(), Fault> {
             if self.terminated.load(std::sync::atomic::Ordering::Relaxed) {
                 return Ok(());
             }
@@ -130,7 +132,7 @@ mod platform {
                 .unwrap_or_else(|poison| poison.into_inner()) = observers?;
             stopped
         }
-        pub(crate) async fn settle(&self) -> Result<(), Fault> {
+        pub async fn settle(&self) -> Result<(), Fault> {
             let group = self.pid;
             let mut observers = std::mem::take(
                 &mut *self
@@ -198,7 +200,7 @@ mod platform {
             },
         },
     };
-    pub(crate) struct Tree(Arc<OwnedHandle>);
+    pub struct Tree(Arc<OwnedHandle>);
     fn win_error(action: &str) -> Fault {
         fault(
             "CleanupFailure",
@@ -325,7 +327,7 @@ mod platform {
         }
     }
     impl Tree {
-        pub(crate) fn terminate(&self) -> Result<(), Fault> {
+        pub fn terminate(&self) -> Result<(), Fault> {
             // SAFETY: This job contains only the shell and its descendants.
             if unsafe { TerminateJobObject(self.0.as_raw_handle(), 1) } == 0 {
                 Err(win_error("terminate shell job"))
@@ -333,7 +335,7 @@ mod platform {
                 Ok(())
             }
         }
-        pub(crate) async fn settle(&self) -> Result<(), Fault> {
+        pub async fn settle(&self) -> Result<(), Fault> {
             let job = self.0.clone();
             tokio::task::spawn_blocking(move || {
                 // Completion-port exit messages are not guaranteed by Win32.

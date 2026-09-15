@@ -9,3 +9,8 @@ __pycache__/
 .env
 .env.*
 !.env.example
+
+# Local Python development tools and caches.
+.venv/
+.ruff_cache/
+__pycache__/

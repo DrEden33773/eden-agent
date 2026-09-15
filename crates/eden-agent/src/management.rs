@@ -119,8 +119,13 @@ fn copy_records(
                 && (copy.schema_version == 1 || consumed_deliveries.contains(&copy.sequence))
             {
                 copy.kind = "message".into();
-                copy.payload =
-                    json!({"type":"message","role":"user","content":copy.payload["content"]});
+                copy.payload = json!({
+                    "type": "message",
+                    "role": "user",
+                    "content": copy.payload[
+                        "content"
+                    ]
+                });
             } else {
                 continue;
             }
@@ -188,7 +193,8 @@ impl Session {
         let scan = eden_protocol::history::scan_records(&bytes);
         if scan.diagnostic.is_some() && !matches!(options.kind, CopyKind::Recover) {
             return Err(invalid(
-                "source has damaged/uncommitted data; use explicit recover to copy the validated prefix",
+                "source has damaged/uncommitted data; use explicit recover to copy the validated \
+                 prefix",
             ));
         }
         let first = scan
@@ -231,10 +237,18 @@ impl Session {
             ));
         }
         if options.public_only {
-            losses.push("Plugin private state and provider reasoning state are omitted; this is not a full state restoration.".into());
+            losses.push(
+                "Plugin private state and provider reasoning state are omitted; this is not a \
+                 full state restoration."
+                    .into(),
+            );
         }
         if cwd != first.payload["cwd"].as_str().unwrap_or("") {
-            losses.push("Working directory binding changes; external project files are not copied or rolled back.".into());
+            losses.push(
+                "Working directory binding changes; external project files are not copied or \
+                 rolled back."
+                    .into(),
+            );
         }
         let composition = std::fs::canonicalize(composition).map_err(|e| invalid(e.to_string()))?;
         let selected: eden_protocol::Composition = serde_json::from_slice(
@@ -295,7 +309,13 @@ impl Session {
         };
         let header = &mut records[0];
         header.payload["cwd"] = json!(cwd);
-        header.payload["origin"] = json!({"session_id":first.session_id,"sequence":selected_node,"source_tip":scan.records.last().unwrap().sequence,"operation":options.kind,"source":options.source});
+        header.payload["origin"] = json!({
+            "session_id": first.session_id,
+            "sequence": selected_node,
+            "source_tip": scan.records.last().unwrap().sequence,
+            "operation": options.kind,
+            "source": options.source
+        });
         if matches!(options.kind, CopyKind::Migrate | CopyKind::Upgrade) {
             header.payload["roles"] = json!(selected.roles);
             header.payload["packages"] = json!(
@@ -306,7 +326,11 @@ impl Session {
                     .collect::<Vec<_>>()
             );
         }
-        let mut preserved=vec!["Public selected history, attachments, branch links and source provenance; source bytes remain unchanged.".into()];
+        let mut preserved = vec![
+            "Public selected history, attachments, branch links and source provenance; source \
+             bytes remain unchanged."
+                .into(),
+        ];
         if let Some(reply) = &migration {
             preserved.extend(reply.preserved.clone());
         }
@@ -331,20 +355,66 @@ impl Session {
     pub async fn apply_copy(plan: CopyPlan) -> Result<PathBuf, Fault> {
         // The owned task retains destination creation and cleanup if its receiver is dropped.
         tokio::spawn(async move {
-            if std::fs::read(&plan.source).map_err(|e|invalid(e.to_string()))?!=plan.bytes {return Err(invalid("source changed after preview; generate a new plan"));}
-            let mut records=plan.records;
-            if let Some(preview)=plan.migration {
-                let states=records.iter().filter(|r|r.kind=="extension_state").map(|r|serde_json::from_value(r.payload.clone()).map_err(|e|invalid(e.to_string()))).collect::<Result<_,_>>()?;
-                let reply:c::MigrateReply=isolated_service(&plan.composition,plan.new_session,c::MIGRATOR,&c::MigrateRequest {states,apply:true}).await?;
-                if serde_json::to_value(&reply).ok()!=serde_json::to_value(&preview).ok() {return Err(invalid("migrator result differs from preview; destination not created"));}
-                let count=records.iter().filter(|r|r.kind=="extension_state").count();
-                if reply.states.len()!=count {return Err(invalid("migrator must preserve one state result per source record; preview a public-only copy to discard state"));}
-                let mut states=reply.states.into_iter();
-                for record in &mut records {if record.kind=="extension_state" {record.payload=json!(states.next().unwrap());}}
+            if std::fs::read(&plan.source).map_err(|e| invalid(e.to_string()))? != plan.bytes {
+                return Err(invalid("source changed after preview; generate a new plan"));
             }
-            let _:c::StoreReply=isolated_service(&plan.composition,plan.new_session,c::STORE,&c::StoreRequest::Create {path:plan.destination.to_string_lossy().into_owned(),session_id:plan.new_session,records}).await?;
+            let mut records = plan.records;
+            if let Some(preview) = plan.migration {
+                let states = records
+                    .iter()
+                    .filter(|r| r.kind == "extension_state")
+                    .map(|r| {
+                        serde_json::from_value(r.payload.clone())
+                            .map_err(|e| invalid(e.to_string()))
+                    })
+                    .collect::<Result<_, _>>()?;
+                let reply: c::MigrateReply = isolated_service(
+                    &plan.composition,
+                    plan.new_session,
+                    c::MIGRATOR,
+                    &c::MigrateRequest {
+                        states,
+                        apply: true,
+                    },
+                )
+                .await?;
+                if serde_json::to_value(&reply).ok() != serde_json::to_value(&preview).ok() {
+                    return Err(invalid(
+                        "migrator result differs from preview; destination not created",
+                    ));
+                }
+                let count = records
+                    .iter()
+                    .filter(|r| r.kind == "extension_state")
+                    .count();
+                if reply.states.len() != count {
+                    return Err(invalid(
+                        "migrator must preserve one state result per source record; preview a \
+                         public-only copy to discard state",
+                    ));
+                }
+                let mut states = reply.states.into_iter();
+                for record in &mut records {
+                    if record.kind == "extension_state" {
+                        record.payload = json!(states.next().unwrap());
+                    }
+                }
+            }
+            let _: c::StoreReply = isolated_service(
+                &plan.composition,
+                plan.new_session,
+                c::STORE,
+                &c::StoreRequest::Create {
+                    path: plan.destination.to_string_lossy().into_owned(),
+                    session_id: plan.new_session,
+                    records,
+                },
+            )
+            .await?;
             Ok(plan.destination)
-        }).await.map_err(|e|invalid(e.to_string()))?
+        })
+        .await
+        .map_err(|e| invalid(e.to_string()))?
     }
 }
 async fn isolated_service<I: Serialize, O: serde::de::DeserializeOwned + Send + 'static>(
@@ -419,32 +489,88 @@ impl Session {
     }
     /// Change the active path without modifying previous nodes or project files.
     pub fn navigate(&self, target: u64, branch: String, summarize: bool) -> Result<u64, Fault> {
-        self.start(true,move|session,run_id,cancel|async move {
-            let result=async {
-                let records=session.history().await?;
-                let (head,old_branch)=eden_protocol::history::branch_state(&records)?;
-                let old_path=eden_protocol::history::active_path(&records)?;
-                tokio::select! {biased; _=cancel.cancelled()=>return Err(Fault::new("Cancelled","navigation","cancelled")), _=std::future::ready(())=>{}}
-                let _:c::StoreReply=session.service(run_id,c::STORE,&c::StoreRequest::Navigate{target,branch}).await?;
+        self.start(true, move |session, run_id, cancel| async move {
+            let result = async {
+                let records = session.history().await?;
+                let (head, old_branch) = eden_protocol::history::branch_state(&records)?;
+                let old_path = eden_protocol::history::active_path(&records)?;
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        return Err(Fault::new("Cancelled", "navigation", "cancelled"));
+                    }
+                    _ = std::future::ready(()) => {}
+                }
+                let _: c::StoreReply = session
+                    .service(
+                        run_id,
+                        c::STORE,
+                        &c::StoreRequest::Navigate { target, branch },
+                    )
+                    .await?;
                 if summarize {
-                    let new_path=eden_protocol::history::active_path(&session.history().await?)?;
-                    let ids:BTreeSet<_>=new_path.iter().map(|r|r.sequence).collect();
-                    let departed:Vec<_>=old_path.into_iter().filter(|r|!ids.contains(&r.sequence)).collect();
+                    let new_path = eden_protocol::history::active_path(&session.history().await?)?;
+                    let ids: BTreeSet<_> = new_path.iter().map(|r| r.sequence).collect();
+                    let departed: Vec<_> = old_path
+                        .into_iter()
+                        .filter(|r| !ids.contains(&r.sequence))
+                        .collect();
                     if !departed.is_empty() {
-                        let reply=session.0.kernel.invoke(Request{session_id:session.id(),run_id,contract:c::CONTEXT.into(),payload:json!(c::ContextInput {action:"branch_summary".into(),records:departed,instructions:String::new(),limits:c::ModelLimits::default(),cwd:session.cwd().into(),items:vec![]})},cancel).await.into_result();
-                        if let Err(error)=reply {
-                            if let Some(target)=head {
-                                session.service::<_,c::StoreReply>(run_id,c::STORE,&c::StoreRequest::Navigate{target,branch:old_branch}).await.map_err(|restore|Fault::new("PersistenceFailure","navigation",format!("summary failed ({error}); could not restore selection: {restore}")))?;
+                        let reply = session
+                            .0
+                            .kernel
+                            .invoke(
+                                Request {
+                                    session_id: session.id(),
+                                    run_id,
+                                    contract: c::CONTEXT.into(),
+                                    payload: json!(c::ContextInput {
+                                        action: "branch_summary".into(),
+                                        records: departed,
+                                        instructions: String::new(),
+                                        limits: c::ModelLimits::default(),
+                                        cwd: session.cwd().into(),
+                                        items: vec![]
+                                    }),
+                                },
+                                cancel,
+                            )
+                            .await
+                            .into_result();
+                        if let Err(error) = reply {
+                            if let Some(target) = head {
+                                session
+                                    .service::<_, c::StoreReply>(
+                                        run_id,
+                                        c::STORE,
+                                        &c::StoreRequest::Navigate {
+                                            target,
+                                            branch: old_branch,
+                                        },
+                                    )
+                                    .await
+                                    .map_err(|restore| {
+                                        Fault::new(
+                                            "PersistenceFailure",
+                                            "navigation",
+                                            format!(
+                                                "summary failed ({error}); could not restore \
+                                                 selection: {restore}"
+                                            ),
+                                        )
+                                    })?;
                             }
                             return Err(error);
                         }
                     }
                 }
                 Ok(json!("Branch selected; project files unchanged."))
-            }.await;
+            }
+            .await;
             as_terminal(result)
         })
     }
+
     /// Manual compaction participates in the same cancellation and settled barrier as a run.
     pub fn compact(&self, instructions: String) -> Result<u64, Fault> {
         self.start(true, move |session, run_id, cancel| async move {
@@ -607,7 +733,17 @@ mod tests {
     }
     #[test]
     fn copied_queue_keeps_consumed_conversation_but_never_pending_work() {
-        let q = json!({"id":2,"kind":"steering","branch":"main","content":[{"type":"text","text":"change requested"}]});
+        let q = json!({
+            "id": 2,
+            "kind": "steering",
+            "branch": "main",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "change requested"
+                }
+            ]
+        });
         let records = vec![
             r(1, None, "session", json!({})),
             r(2, Some(1), "queue_accepted", q.clone()),
@@ -623,7 +759,17 @@ mod tests {
     }
     #[test]
     fn returned_delivery_is_not_copied_twice_or_before_consumption() {
-        let q = json!({"id":2,"kind":"steering","branch":"main","content":[{"type":"text","text":"one user input"}]});
+        let q = json!({
+            "id": 2,
+            "kind": "steering",
+            "branch": "main",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "one user input"
+                }
+            ]
+        });
         let records = vec![
             r(1, None, "session", json!({})),
             r(2, Some(1), "queue_accepted", q.clone()),
@@ -650,7 +796,16 @@ mod tests {
     }
     #[test]
     fn v1_upgrade_preserves_delivered_context_without_pending_queue() {
-        let q = json!({"id":2,"kind":"steering","content":[{"type":"text","text":"legacy instruction"}]});
+        let q = json!({
+            "id": 2,
+            "kind": "steering",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "legacy instruction"
+                }
+            ]
+        });
         let mut records = vec![
             r(1, None, "session", json!({})),
             r(2, Some(1), "queue_accepted", q.clone()),
@@ -728,8 +883,43 @@ mod tests {
     }
     #[test]
     fn binding_ignores_unused_packages_and_compatible_inventory_changes() {
-        let original = json!({"cwd":"/p","roles":{"context":"author"},"packages":[{"package":"author","version":"1","provides":["context"]},{"package":"old-display","provides":["display"]}]});
-        let updated = json!({"cwd":"/p","roles":{"context":"author"},"packages":[{"package":"author","version":"2","provides":["context","extra"]}]});
+        let original = json!({
+            "cwd": "/p",
+            "roles": {
+                "context": "author"
+            },
+            "packages": [
+                {
+                    "package": "author",
+                    "version": "1",
+                    "provides": [
+                        "context"
+                    ]
+                },
+                {
+                    "package": "old-display",
+                    "provides": [
+                        "display"
+                    ]
+                }
+            ]
+        });
+        let updated = json!({
+            "cwd": "/p",
+            "roles": {
+                "context": "author"
+            },
+            "packages": [
+                {
+                    "package": "author",
+                    "version": "2",
+                    "provides": [
+                        "context",
+                        "extra"
+                    ]
+                }
+            ]
+        });
         assert!(compatible_binding(&original, &updated));
         let mut relocated = updated;
         relocated["cwd"] = json!("/other");

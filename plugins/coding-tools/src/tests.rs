@@ -59,7 +59,11 @@ async fn write_edit_and_read_use_explicit_cwd_and_utf8_line_ranges() {
         project
             .run(
                 "edit",
-                json!({"path":"nested/example.txt", "old_text":"second", "new_text":"二"})
+                json!({
+                    "path": "nested/example.txt",
+                    "old_text": "second",
+                    "new_text": "二"
+                })
             )
             .await
             .error
@@ -324,7 +328,8 @@ async fn foreground_exit_waits_for_descendant_that_closed_stdio() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let command = format!(
-        "mkfifo ready; (exec 1>&- 2>&-; exec 3<>/dev/tcp/127.0.0.1/{port}; printf R >&3; echo ready >ready; exec sleep 300) & read line <ready; exit 0"
+        "mkfifo ready; (exec 1>&- 2>&-; exec 3<>/dev/tcp/127.0.0.1/{port}; printf R >&3; echo \
+         ready >ready; exec sleep 300) & read line <ready; exit 0"
     );
     let task = tokio::spawn(execute(
         project.request("bash", json!({"command":command})),

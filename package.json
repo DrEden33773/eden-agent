@@ -2,7 +2,9 @@
   "name": "eden-agent-dev-tools",
   "private": true,
   "packageManager": "pnpm@10.32.1",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "hooks:install": "node scripts/install-hooks.mjs",
     "hooks:test": "node --test tests/development-hooks.test.mjs",
@@ -11,7 +13,17 @@
     "rust:check": "node scripts/checks.mjs fmt",
     "rust:fmt": "node scripts/checks.mjs format",
     "clippy:check": "node scripts/checks.mjs clippy",
-    "clippy:fix": "node scripts/checks.mjs clippy-fix"
+    "clippy:fix": "node scripts/checks.mjs clippy-fix",
+    "python:format": "node scripts/checks.mjs python-format",
+    "python:format:check": "node scripts/checks.mjs python-format-check",
+    "python:lint": "node scripts/checks.mjs python-lint",
+    "python:types": "node scripts/checks.mjs python-types",
+    "python:check": "node scripts/checks.mjs python",
+    "js:check": "node scripts/checks.mjs javascript",
+    "js:fix": "node scripts/checks.mjs javascript-fix"
   },
-  "devDependencies": { "markdownlint-cli2": "0.23.2" }
+  "devDependencies": {
+    "markdownlint-cli2": "0.23.2",
+    "@biomejs/biome": "2.5.3"
+  }
 }

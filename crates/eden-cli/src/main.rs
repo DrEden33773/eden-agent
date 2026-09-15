@@ -79,7 +79,17 @@ async fn run(args: Vec<String>) -> Result<i32, Box<dyn std::error::Error>> {
             }
             "--help" => {
                 println!(
-                    "eden [--env-file PATH] [--composition PATH] [--cwd DIR] [--session PATH|--no-session] [--print|--json] [--attach TEXT|--image IMAGE|--file PDF] PROMPT\neden --history PATH\neden history inspect|export PATH [DEST]\neden session info|tree|compact|continue PATH\neden session fork|clone|import|upgrade|recover|migrate SOURCE DEST [--at NODE] [--cwd DIR] [--public-only] [--apply]\neden session branch PATH --at NODE --branch NAME [--summarize]\neden session metadata PATH --name NAME [--tag TAG]\neden session queue|enqueue|queue-mode|include-attachment PATH [OPTIONS]\nSession commands accept --composition PATH. Copy commands preview by default; --apply creates the new file. Explicit model and credentials are required by the default Responses provider."
+                    "eden [--env-file PATH] [--composition PATH] [--cwd DIR] [--session \
+                     PATH|--no-session] [--print|--json] [--attach TEXT|--image IMAGE|--file \
+                     PDF] PROMPT\neden --history PATH\neden history inspect|export PATH \
+                     [DEST]\neden session info|tree|compact|continue PATH\neden session \
+                     fork|clone|import|upgrade|recover|migrate SOURCE DEST [--at NODE] [--cwd \
+                     DIR] [--public-only] [--apply]\neden session branch PATH --at NODE --branch \
+                     NAME [--summarize]\neden session metadata PATH --name NAME [--tag \
+                     TAG]\neden session queue|enqueue|queue-mode|include-attachment PATH \
+                     [OPTIONS]\nSession commands accept --composition PATH. Copy commands \
+                     preview by default; --apply creates the new file. Explicit model and \
+                     credentials are required by the default Responses provider."
                 );
                 return Ok(0);
             }

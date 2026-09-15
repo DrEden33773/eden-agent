@@ -23,7 +23,9 @@ mod tests {
     #[test]
     fn inspect_exposes_prefix_without_repairing_damaged_tail() {
         let path = std::env::temp_dir().join(format!("eden-inspect-{}.jsonl", std::process::id()));
-        let bytes = b"{\"schema_version\":1,\"session_id\":7,\"sequence\":1,\"run_id\":1,\"kind\":\"user\",\"payload\":{}}\n{\"partial\":";
+        let bytes = b"{\"schema_version\":1,\"session_id\":7,\"sequence\":1,\
+                     \"run_id\":1,\"kind\":\"user\",\
+         \"payload\":{}}\n{\"partial\":";
         std::fs::write(&path, bytes).unwrap();
         let scan = inspect(&path).unwrap();
         assert_eq!(scan.records.len(), 1);

@@ -44,11 +44,99 @@ use queue::queue;
 use settings::Settings;
 fn tools() -> Vec<ToolDefinition> {
     [
-        ("read", "Read a UTF-8 file. offset is a 1-based line; limit bounds lines.", json!({"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1}},"required":["path"],"additionalProperties":false})),
-        ("write", "Write a UTF-8 file, creating parent directories.", json!({"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"],"additionalProperties":false})),
-        ("edit", "Replace exactly one occurrence of old_text with new_text. Fails without changing the file if absent or ambiguous.", json!({"type":"object","properties":{"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"}},"required":["path","old_text","new_text"],"additionalProperties":false})),
-        ("bash", "Run a bash command in the session cwd. Returns bounded output and the exit code.", json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"],"additionalProperties":false})),
-    ].into_iter().map(|(name,description,parameters)| ToolDefinition { name:name.into(), description:description.into(), parameters }).collect()
+        (
+            "read",
+            "Read a UTF-8 file. offset is a 1-based line; limit bounds lines.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string"
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 1
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1
+                    }
+                },
+                "required": [
+                    "path"
+                ],
+                "additionalProperties": false
+            }),
+        ),
+        (
+            "write",
+            "Write a UTF-8 file, creating parent directories.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string"
+                    },
+                    "content": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "path",
+                    "content"
+                ],
+                "additionalProperties": false
+            }),
+        ),
+        (
+            "edit",
+            "Replace exactly one occurrence of old_text with new_text. Fails without changing \
+             the file if absent or ambiguous.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string"
+                    },
+                    "old_text": {
+                        "type": "string"
+                    },
+                    "new_text": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "path",
+                    "old_text",
+                    "new_text"
+                ],
+                "additionalProperties": false
+            }),
+        ),
+        (
+            "bash",
+            "Run a bash command in the session cwd. Returns bounded output and the exit code.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "command"
+                ],
+                "additionalProperties": false
+            }),
+        ),
+    ]
+    .into_iter()
+    .map(|(name, description, parameters)| ToolDefinition {
+        name: name.into(),
+        description: description.into(),
+        parameters,
+    })
+    .collect()
 }
 async fn model_limits(cx: &CallContext) -> Result<ModelLimits, Fault> {
     match cx.call(MODEL_INFO, &Value::Null).await {
@@ -93,7 +181,9 @@ async fn provider_retry(
                 )?;
                 let cancellation = cx.scope.cancellation();
                 tokio::select! {
-                    _=cancellation.cancelled()=>return Err(Fault::new("Cancelled","coding-loop","retry cancelled")),
+                    _ = cancellation.cancelled() => {
+                        return Err(Fault::new("Cancelled", "coding-loop", "retry cancelled"));
+                    }
                     _=tokio::time::sleep(std::time::Duration::from_millis(delay_ms))=>{}
                 }
             }
@@ -298,9 +388,22 @@ async fn run(input: RunInput, cx: CallContext, settings: Settings) -> Result<Str
                     append(
                         &cx,
                         "tool_result",
-                        json!(Item::ToolResult { call_id: call_id.clone(), result }),
+                        json!(Item::ToolResult {
+                            call_id: call_id.clone(),
+                            result
+                        }),
                     )
-                    .await.map_err(|error| Fault::new("PersistenceFailure", "coding-loop", format!("Tool call {call_id}: external side effects may already have occurred; result commit failed: {error}")))?;
+                    .await
+                    .map_err(|error| {
+                        Fault::new(
+                            "PersistenceFailure",
+                            "coding-loop",
+                            format!(
+                                "Tool call {call_id}: external side effects may already have \
+                                 occurred; result commit failed: {error}"
+                            ),
+                        )
+                    })?;
                 }
                 Item::Message { content, .. } => {
                     for block in content {
@@ -413,9 +516,11 @@ mod tests {
             }),
         }];
         let projected = project_records(&records).unwrap();
-        assert!(
-            matches!(&projected[0],Item::Message { content,.. } if matches!(&content[0],Block::Text { text } if text.contains("unknown")))
-        );
+        assert!(matches!(
+            &projected[0],
+            Item::Message { content, .. }
+                if matches!(&content[0], Block::Text { text } if text.contains("unknown"))
+        ));
     }
 }
 
@@ -436,7 +541,17 @@ mod s2_tests {
     }
     #[test]
     fn returned_delivery_is_pending_and_not_projected_twice() {
-        let entry = json!({"id":1,"kind":"steering","branch":"main","content":[{"type":"text","text":"correct this"}]});
+        let entry = json!({
+            "id": 1,
+            "kind": "steering",
+            "branch": "main",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "correct this"
+                }
+            ]
+        });
         let records = vec![
             record(1, "queue_accepted", entry.clone()),
             record(2, "queue_delivered", entry.clone()),
@@ -484,7 +599,13 @@ mod s2_tests {
             record(
                 3,
                 "compaction",
-                json!({"summary":"retained goal","first_kept":2,"uncertainties":[],"read_files":[],"modified_files":[]}),
+                json!({
+                    "summary": "retained goal",
+                    "first_kept": 2,
+                    "uncertainties": [],
+                    "read_files": [],
+                    "modified_files": []
+                }),
             ),
         ];
         let items = project_records(&records).unwrap();

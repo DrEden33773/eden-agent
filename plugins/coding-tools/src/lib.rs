@@ -47,15 +47,26 @@ async fn execute(request: ToolRequest, scope: Scope, shell: String) -> Result<To
     // The SDK drops a cancelled root future. The admitted child owns all file
     // operations and process cleanup until their side effects have settled.
     scope.spawn(async move {
-        let result = if tokio::select! { biased; _ = cancellation.cancelled() => true, _ = std::future::ready(()) => false } {
+        let result = if tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => true,
+            _ = std::future::ready(()) => false,
+        } {
             Err(fault("Cancelled", "tool cancelled before execution"))
         } else {
             run(request, shell, cancellation).await
         };
         let result = result.unwrap_or_else(failed);
-        let cleanup = result.error.as_ref().filter(|error| error.code == "CleanupFailure").cloned();
+        let cleanup = result
+            .error
+            .as_ref()
+            .filter(|error| error.code == "CleanupFailure")
+            .cloned();
         let _ = sender.send(result);
-        match cleanup { Some(error) => Err(error), None => Ok(()) }
+        match cleanup {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     })?;
     receiver
         .await

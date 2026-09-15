@@ -98,24 +98,51 @@ pub unsafe extern "C" fn start(instance: usize, bytes: Bytes, reply: Reply) -> u
     let host = instance.host;
     let task = instance.runtime.spawn(async move {
         let scope = Scope::default();
-        let context = CallContext { scope: scope.clone(), host, request: request.clone() };
-        let mut root = Box::pin(std::panic::AssertUnwindSafe(package.invoke(request.payload, &request.contract, context)).catch_unwind());
+        let context = CallContext {
+            scope: scope.clone(),
+            host,
+            request: request.clone(),
+        };
+        let mut root = Box::pin(
+            std::panic::AssertUnwindSafe(package.invoke(
+                request.payload,
+                &request.contract,
+                context,
+            ))
+            .catch_unwind(),
+        );
         let outcome = {
             tokio::select! {
                 biased;
                 result = &mut root => match result {
                     Ok(Ok(value)) => Outcome::Completed(value),
                     Ok(Err(error)) => Outcome::Failed(error),
-                    Err(_) => Outcome::Failed(Fault::new("PluginFailure", &package.descriptor.package, "operation panicked")),
+                    Err(_) => Outcome::Failed(Fault::new(
+                        "PluginFailure",
+                        &package.descriptor.package,
+                        "operation panicked",
+                    )),
                 },
                 _ = operation_cancel.cancelled() => Outcome::Cancelled,
             }
         };
-        let drop_failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(root))).is_err();
+        let drop_failed =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(root))).is_err();
         let mut cleanup_errors = scope.finish().await;
-        if drop_failed { cleanup_errors.push(Fault::new("CleanupFailure", "root", "root destructor panicked")); }
+        if drop_failed {
+            cleanup_errors.push(Fault::new(
+                "CleanupFailure",
+                "root",
+                "root destructor panicked",
+            ));
+        }
         // SAFETY: Host keeps the receiver live until this one completion; spans are copied by it.
-        unsafe { reply.send(&Terminal { outcome, cleanup_errors }); }
+        unsafe {
+            reply.send(&Terminal {
+                outcome,
+                cleanup_errors,
+            });
+        }
     });
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
     instance

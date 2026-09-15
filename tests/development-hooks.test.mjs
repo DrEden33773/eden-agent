@@ -1,13 +1,28 @@
-import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const source = fileURLToPath(new URL("../", import.meta.url));
-function git(root, ...args) { return execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }); }
+function git(root, ...args) {
+  return execFileSync("git", args, {
+    cwd: root,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
 function command(root, program, args, options = {}) {
   return spawnSync(program, args, { cwd: root, encoding: "utf8", ...options });
 }
@@ -17,14 +32,41 @@ function fixture(t) {
   git(root, "init", "-b", "main");
   git(root, "config", "user.name", "Hook Test");
   git(root, "config", "user.email", "hooks@example.invalid");
-  for (const name of [".githooks", "scripts", ".markdownlint-cli2.jsonc", "rust-toolchain.toml", ".gitattributes"]) {
-    cpSync(join(source, name), join(root, name), { recursive: true });
+  for (const name of [
+    ".githooks",
+    "scripts",
+    ".markdownlint-cli2.jsonc",
+    "pyproject.toml",
+    "uv.lock",
+    "biome.json",
+    "package.json",
+    "rustfmt.toml",
+    "rust-toolchain.toml",
+    ".gitattributes",
+  ]) {
+    if (existsSync(join(source, name)))
+      cpSync(join(source, name), join(root, name), { recursive: true });
   }
-  symlinkSync(join(source, "node_modules"), join(root, "node_modules"), process.platform === "win32" ? "junction" : "dir");
-  writeFileSync(join(root, ".gitignore"), "node_modules\ntarget/\n");
+  symlinkSync(
+    join(source, "node_modules"),
+    join(root, "node_modules"),
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  symlinkSync(
+    join(source, ".venv"),
+    join(root, ".venv"),
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  writeFileSync(join(root, ".gitignore"), "node_modules\n.venv\ntarget/\n");
   mkdirSync(join(root, "src"));
-  writeFileSync(join(root, "Cargo.toml"), '[package]\nname = "hooks-fixture"\nversion = "0.1.0"\nedition = "2024"\n');
-  writeFileSync(join(root, "Cargo.lock"), 'version = 4\n\n[[package]]\nname = "hooks-fixture"\nversion = "0.1.0"\n');
+  writeFileSync(
+    join(root, "Cargo.toml"),
+    '[package]\nname = "hooks-fixture"\nversion = "0.1.0"\nedition = "2024"\n',
+  );
+  writeFileSync(
+    join(root, "Cargo.lock"),
+    'version = 4\n\n[[package]]\nname = "hooks-fixture"\nversion = "0.1.0"\n',
+  );
   writeFileSync(join(root, "src/lib.rs"), "pub fn value() -> u32 {\n    1\n}\n");
   writeFileSync(join(root, "README.md"), "# Fixture\n\nValid documentation.\n");
   git(root, "add", ".");
@@ -99,15 +141,24 @@ test("standalone author crates participate in formatting and Clippy hooks", (t) 
   const root = fixture(t);
   const author = join(root, "tests", "contract-authors", "new-author");
   mkdirSync(join(author, "src"), { recursive: true });
-  writeFileSync(join(author, "Cargo.toml"), '[package]\nname = "new-author"\nversion = "0.1.0"\nedition = "2024"\n[workspace]\n');
-  writeFileSync(join(author, "Cargo.lock"), 'version = 4\n\n[[package]]\nname = "new-author"\nversion = "0.1.0"\n');
+  writeFileSync(
+    join(author, "Cargo.toml"),
+    '[package]\nname = "new-author"\nversion = "0.1.0"\nedition = "2024"\n[workspace]\n',
+  );
+  writeFileSync(
+    join(author, "Cargo.lock"),
+    'version = 4\n\n[[package]]\nname = "new-author"\nversion = "0.1.0"\n',
+  );
   writeFileSync(join(author, "src/lib.rs"), "pub fn value()->u32{2}\n");
   git(root, "add", "tests");
   let result = command(root, "git", ["commit", "-m", "bad author format"]);
   assert.notEqual(result.status, 0);
   assert.match(result.stdout + result.stderr, /new-author/);
   assert.match(result.stdout + result.stderr, /Diff in/);
-  writeFileSync(join(author, "src/lib.rs"), "pub fn value() -> u32 {\n    let unused = 2;\n    2\n}\n");
+  writeFileSync(
+    join(author, "src/lib.rs"),
+    "pub fn value() -> u32 {\n    let unused = 2;\n    2\n}\n",
+  );
   git(root, "add", "tests");
   git(root, "commit", "-m", "formatted author with lint error");
   const remote = mkdtempSync(join(tmpdir(), "eden-hooks-remote-"));
@@ -115,7 +166,10 @@ test("standalone author crates participate in formatting and Clippy hooks", (t) 
   git(remote, "init", "--bare");
   result = command(root, "git", ["push", remote, "main:refs/heads/topic"]);
   assert.notEqual(result.status, 0);
-  assert.match(result.stdout + result.stderr, /clippy: tests\/contract-authors\/new-author\/Cargo.toml/);
+  assert.match(
+    result.stdout + result.stderr,
+    /clippy: tests\/contract-authors\/new-author\/Cargo.toml/,
+  );
   assert.match(result.stdout + result.stderr, /unused variable/);
 });
 
@@ -142,7 +196,10 @@ test("pre-push accepts committed code despite dirty staged and worktree files, a
 test("pre-commit uses staged lint configuration and checks remaining Markdown on deletion", (t) => {
   const root = fixture(t);
   const normalConfig = readFileSync(join(root, ".markdownlint-cli2.jsonc"), "utf8");
-  writeFileSync(join(root, ".markdownlint-cli2.jsonc"), '{"config":{"default":true,"MD013":false,"MD018":false},"ignores":["node_modules/**"]}\n');
+  writeFileSync(
+    join(root, ".markdownlint-cli2.jsonc"),
+    '{"config":{"default":true,"MD013":false,"MD018":false},"ignores":["node_modules/**"]}\n',
+  );
   writeFileSync(join(root, "README.md"), "# Fixture\n\n##Unspaced\n");
   git(root, "add", "README.md", ".markdownlint-cli2.jsonc");
   writeFileSync(join(root, ".markdownlint-cli2.jsonc"), normalConfig);
@@ -207,7 +264,10 @@ test("multi-ref push checks both an existing remote update and a second branch",
   git(root, "commit", "-m", "good update");
   const good = git(root, "rev-parse", "HEAD").trim();
   git(root, "switch", "-c", "other", baseline);
-  writeFileSync(join(root, "src/lib.rs"), "pub fn value() -> u32 {\n    let unused = 9;\n    9\n}\n");
+  writeFileSync(
+    join(root, "src/lib.rs"),
+    "pub fn value() -> u32 {\n    let unused = 9;\n    9\n}\n",
+  );
   git(root, "add", "src/lib.rs");
   git(root, "commit", "-m", "bad second ref");
   git(root, "switch", "main");
@@ -232,7 +292,8 @@ test("pre-commit omits intent-to-add placeholders for paths already present in H
   const relative = "tests/contract-authors/existing/Cargo.toml";
   const author = dirname(join(root, relative));
   mkdirSync(join(author, "src"), { recursive: true });
-  const manifest = '[package]\nname = "existing"\nversion = "0.1.0"\nedition = "2024"\n[workspace]\n';
+  const manifest =
+    '[package]\nname = "existing"\nversion = "0.1.0"\nedition = "2024"\n[workspace]\n';
   writeFileSync(join(root, relative), manifest);
   writeFileSync(join(author, "src/lib.rs"), "pub fn value() -> u32 {\n    1\n}\n");
   git(root, "add", "tests");
@@ -244,4 +305,87 @@ test("pre-commit omits intent-to-add placeholders for paths already present in H
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.equal(git(root, "ls-files", "--stage", "-z"), staged);
   assert.equal(readFileSync(join(root, relative), "utf8"), manifest);
+});
+
+for (const [name, bad, good, diagnostic] of [
+  ["Python formatting", "value=1\n", "value = 1\n", /Would reformat/],
+  ["Ruff lint", "import os\n", "value = 1\n", /F401/],
+  ["Python types", 'value: int = "wrong"\n', "value: int = 1\n", /reportAssignmentType/],
+  ["Biome", "debugger;\n", 'console.log("ok");\n', /noDebugger/],
+]) {
+  test(`pre-commit checks staged ${name} and preserves an unstaged repair`, (t) => {
+    const root = fixture(t);
+    const path = name === "Biome" ? "sample.mjs" : "sample.py";
+    writeFileSync(join(root, path), bad);
+    git(root, "add", path);
+    writeFileSync(join(root, path), good);
+    const result = command(root, "git", ["commit", "-m", `bad staged ${name}`]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stdout + result.stderr, diagnostic);
+    unchanged(root, path, bad, good);
+    git(root, "add", path);
+    writeFileSync(join(root, path), bad);
+    const repaired = command(root, "git", ["commit", "-m", `good staged ${name}`]);
+    assert.equal(repaired.status, 0, repaired.stdout + repaired.stderr);
+    unchanged(root, path, good, bad);
+  });
+}
+
+test("Python checks read staged configuration and reject type errors in a non-HEAD push", (t) => {
+  const root = fixture(t);
+  const bad = 'value: int = "wrong"\n';
+  writeFileSync(join(root, "sample.py"), bad);
+  git(root, "add", "sample.py");
+  const config = readFileSync(join(root, "pyproject.toml"), "utf8");
+  writeFileSync(
+    join(root, "pyproject.toml"),
+    config.replace('typeCheckingMode = "standard"', 'typeCheckingMode = "off"'),
+  );
+  const rejected = command(root, "git", ["commit", "-m", "staged standard must apply"]);
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stdout + rejected.stderr, /reportAssignmentType/);
+  writeFileSync(join(root, "pyproject.toml"), config);
+  git(root, "switch", "-c", "bad-python");
+  git(root, "-c", "core.hooksPath=", "commit", "-m", "type error fixture");
+  git(root, "switch", "main");
+  const remote = mkdtempSync(join(tmpdir(), "eden-python-remote-"));
+  t.after(() => rmSync(remote, { recursive: true, force: true }));
+  git(remote, "init", "--bare");
+  const head = git(root, "rev-parse", "HEAD");
+  const pushed = command(root, "git", ["push", remote, "bad-python:topic"]);
+  assert.notEqual(pushed.status, 0);
+  assert.match(pushed.stdout + pushed.stderr, /reportAssignmentType/);
+  assert.equal(git(root, "rev-parse", "HEAD"), head);
+  assert.equal(git(remote, "for-each-ref", "--format=%(refname)", "refs/heads/topic"), "");
+});
+
+test("private-style submodule boundaries are not traversed by snapshot checks", (t) => {
+  const root = fixture(t);
+  const oid = git(root, "rev-parse", "HEAD").trim();
+  git(root, "update-index", "--add", "--cacheinfo", `160000,${oid},nested-product`);
+  writeFileSync(join(root, "sample.py"), "value = 1\n");
+  git(root, "add", "sample.py");
+  const result = command(root, "git", ["commit", "-m", "own source beside gitlink"]);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
+test("same-commit multi-ref push checks the union of each ref's required families", (t) => {
+  const root = fixture(t);
+  writeFileSync(join(root, "sample.py"), 'value: int = "wrong"\n');
+  git(root, "add", "sample.py");
+  git(root, "-c", "core.hooksPath=", "commit", "-m", "existing type debt");
+  const previous = git(root, "rev-parse", "HEAD").trim();
+  writeFileSync(join(root, "README.md"), "# Fixture\n\nUpdated documentation.\n");
+  git(root, "add", "README.md");
+  git(root, "commit", "-m", "documentation update");
+  const head = git(root, "rev-parse", "HEAD").trim();
+  const staged = git(root, "ls-files", "--stage", "-z");
+  const result = command(root, process.execPath, ["scripts/hooks.mjs", "pre-push"], {
+    input: `refs/heads/main ${head} refs/heads/main ${previous}\nrefs/heads/new ${head} refs/heads/new ${"0".repeat(40)}\n`,
+  });
+  assert.notEqual(result.status, 0, "new ref skipped checks already absent from first ref delta");
+  assert.match(result.stdout + result.stderr, /reportAssignmentType/);
+  assert.equal(git(root, "rev-parse", "HEAD").trim(), head);
+  assert.equal(git(root, "ls-files", "--stage", "-z"), staged);
+  assert.equal(readFileSync(join(root, "sample.py"), "utf8"), 'value: int = "wrong"\n');
 });

@@ -160,21 +160,34 @@ fn create(config: Value) -> Result<Package, Fault> {
     .map_err(|_| failure("invalid model-access configuration"))?;
     let config = Arc::new(config);
     let info_config = config.clone();
-    Ok(Package::new("model-access").service(MODEL_INFO, move |_: (), _| {
-        let config = info_config.clone();
-        async move { config.limits_with(|key| std::env::var(key).ok()) }
-    }).service(PROVIDER,move |input: ModelInput,cx| {
-        let config = config.clone();
-        async move {
-            let settings = config.settings()?;
-            let cancel = cx.scope.cancellation();
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => Err(Fault::new("Cancelled","model-access","request cancelled")),
-                reply = request(&settings.endpoint,&settings.model,&settings.key,&input,&settings.options,|kind,payload|cx.emit(kind,payload)) => reply,
+    Ok(Package::new("model-access")
+        .service(MODEL_INFO, move |_: (), _| {
+            let config = info_config.clone();
+            async move { config.limits_with(|key| std::env::var(key).ok()) }
+        })
+        .service(PROVIDER, move |input: ModelInput, cx| {
+            let config = config.clone();
+            async move {
+                let settings = config.settings()?;
+                let cancel = cx.scope.cancellation();
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => Err(Fault::new(
+                        "Cancelled",
+                        "model-access",
+                        "request cancelled",
+                    )),
+                    reply = request(
+                        &settings.endpoint,
+                        &settings.model,
+                        &settings.key,
+                        &input,
+                        &settings.options,
+                        |kind, payload| cx.emit(kind, payload),
+                    ) => reply,
+                }
             }
-        }
-    }))
+        }))
 }
 eden_plugin_sdk::export_plugin!(descriptor, create);
 

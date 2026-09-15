@@ -141,7 +141,13 @@ async fn main() -> Result<()> {
     session.shutdown().await?;
     println!(
         "{}",
-        json!({"mode":mode,"ids":ids,"pending":pending,"records":records.len(),"terminal":terminal})
+        json!({
+            "mode": mode,
+            "ids": ids,
+            "pending": pending,
+            "records": records.len(),
+            "terminal": terminal
+        })
     );
     Ok(())
 }

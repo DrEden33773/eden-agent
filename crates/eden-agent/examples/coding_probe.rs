@@ -113,7 +113,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     reopened.shutdown().await?;
     println!(
         "{}",
-        serde_json::json!({"terminal":terminal,"queue_ids":accepted,"record_count":records.len(),"reopened_without_execution":true,"writer_exclusion":true,"double_shutdown":true})
+        serde_json::json!({
+            "terminal": terminal,
+            "queue_ids": accepted,
+            "record_count": records.len(),
+            "reopened_without_execution": true,
+            "writer_exclusion": true,
+            "double_shutdown": true
+        })
     );
     Ok(())
 }
@@ -170,7 +177,12 @@ async fn open_abandon(
     reopened.shutdown().await?;
     println!(
         "{}",
-        serde_json::json!({"open_lock_observed":true,"caller_aborted":true,"store_close_acknowledged":true,"reopened_after_abandoned_delivery":true})
+        serde_json::json!({
+            "open_lock_observed": true,
+            "caller_aborted": true,
+            "store_close_acknowledged": true,
+            "reopened_after_abandoned_delivery": true
+        })
     );
     Ok(())
 }

@@ -16,7 +16,15 @@ pub(crate) async fn spawn(shell: &str, script: &str, cwd: &Path) -> Result<(Chil
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     platform::configure(&mut command);
-    let mut child = command.spawn().map_err(|error| fault("ShellUnavailable", format!("cannot launch bash executable {shell:?}: {error}; install bash or configure coding-tools.bash with its executable path")))?;
+    let mut child = command.spawn().map_err(|error| {
+        fault(
+            "ShellUnavailable",
+            format!(
+                "cannot launch bash executable {shell:?}: {error}; install bash or configure \
+                 coding-tools.bash with its executable path"
+            ),
+        )
+    })?;
     match platform::attach(&child) {
         Ok(tree) => Ok((child, tree)),
         Err(error) => {
@@ -57,7 +65,8 @@ fn resolve_windows_shell(shell: &str, cwd: &Path) -> Result<std::path::PathBuf, 
     Err(fault(
         "ShellUnavailable",
         format!(
-            "native bash executable {shell:?} was not found in PATH; install Git Bash or configure coding-tools.bash with its absolute path"
+            "native bash executable {shell:?} was not found in PATH; install Git Bash or \
+             configure coding-tools.bash with its absolute path"
         ),
     ))
 }

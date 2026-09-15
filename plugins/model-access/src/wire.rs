@@ -14,28 +14,81 @@ pub(crate) fn project(
     model: &str,
     options: &RequestOptions,
 ) -> Result<Value, Fault> {
-    let items = input.items.iter().map(|item| match item {
-        Item::Message {role, content} => {
-            if !["system","developer","user","assistant"].contains(&role.as_str()) {
-                return Err(failure("unsupported message role"));
+    let items = input
+        .items
+        .iter()
+        .map(|item| match item {
+            Item::Message { role, content } => {
+                if !["system", "developer", "user", "assistant"].contains(&role.as_str()) {
+                    return Err(failure("unsupported message role"));
+                }
+                let content = content
+                    .iter()
+                    .map(|block| match block {
+                        Block::Text { text } => Ok(if role == "assistant" {
+                            json!({"type":"output_text","text":text,"annotations":[]})
+                        } else {
+                            json!({"type":"input_text","text":text})
+                        }),
+                        Block::Image { media_type, data } if role == "user" => Ok(json!({
+                            "type": "input_image",
+                            "image_url": format!("data:{media_type};base64,{data}")
+                        })),
+                        Block::File { .. } if options.profile == Profile::Deepseek => Err(failure(
+                            "DeepSeek Responses does not support file input; \
+                             use text or images",
+                        )),
+                        Block::File {
+                            name,
+                            media_type,
+                            data,
+                        } if role == "user" => Ok(json!({
+                            "type": "input_file",
+                            "filename": name,
+                            "file_data": format!("data:{media_type};base64,{data}")
+                        })),
+                        _ => Err(failure("attachments require a user message")),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(json!({"type":"message","role":role,"content":content}))
             }
-            let content = content.iter().map(|block| match block {
-                Block::Text {text} => Ok(if role == "assistant" {
-                    json!({"type":"output_text","text":text,"annotations":[]})
-                } else { json!({"type":"input_text","text":text}) }),
-                Block::Image {media_type,data} if role == "user" => Ok(json!({"type":"input_image","image_url":format!("data:{media_type};base64,{data}")})),
-                Block::File {..} if options.profile == Profile::Deepseek => Err(failure("DeepSeek Responses does not support file input; use text or images")),
-                Block::File {name,media_type,data} if role == "user" => Ok(json!({"type":"input_file","filename":name,"file_data":format!("data:{media_type};base64,{data}")})),
-                _ => Err(failure("attachments require a user message")),
-            }).collect::<Result<Vec<_>,_>>()?;
-            Ok(json!({"type":"message","role":role,"content":content}))
-        }
-        Item::ToolCall {call_id,name,arguments} => Ok(json!({"type":"function_call","call_id":call_id,"name":name,"arguments":arguments})),
-        Item::ToolResult {call_id,result} => Ok(json!({"type":"function_call_output","call_id":call_id,"output":serde_json::to_string(result).map_err(|_| failure("tool output serialization failed"))?})),
-        Item::ProviderState {provider,value} if provider == options.profile.state() && value["type"] == "reasoning" => Ok(value.clone()),
-        Item::ProviderState {..} => Err(failure("incompatible provider state")),
-    }).collect::<Result<Vec<_>,_>>()?;
-    let tools: Vec<_> = input.tools.iter().map(|tool| json!({"type":"function","name":tool.name,"description":tool.description,"parameters":tool.parameters,"strict":false})).collect();
+            Item::ToolCall {
+                call_id,
+                name,
+                arguments,
+            } => Ok(json!({
+                "type": "function_call",
+                "call_id": call_id,
+                "name": name,
+                "arguments": arguments
+            })),
+            Item::ToolResult { call_id, result } => Ok(json!({
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": serde_json::to_string(result)
+                    .map_err(|_| failure("tool output serialization failed"))?
+            })),
+            Item::ProviderState { provider, value }
+                if provider == options.profile.state() && value["type"] == "reasoning" =>
+            {
+                Ok(value.clone())
+            }
+            Item::ProviderState { .. } => Err(failure("incompatible provider state")),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let tools: Vec<_> = input
+        .tools
+        .iter()
+        .map(|tool| {
+            json!({
+                "type": "function",
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+                "strict": false
+            })
+        })
+        .collect();
     let mut body = json!({"model":model,"input":items,"tools":tools,"stream":true});
     if options.profile == Profile::Openai {
         body["store"] = json!(false);

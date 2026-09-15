@@ -107,10 +107,18 @@ fn project_path(path: &[Record], records: &[Record]) -> Result<Vec<Item>, Fault>
             }
         })
         .collect();
-    Ok(items.into_iter().map(|item|match item {
-        Item::ToolCall {ref call_id,..} if !completed.contains(call_id)=>text_item(format!("Historical tool call {call_id} was interrupted; result and external effects are unknown. It was not replayed.")),
-        other=>other,
-    }).collect())
+    Ok(items
+        .into_iter()
+        .map(|item| match item {
+            Item::ToolCall { ref call_id, .. } if !completed.contains(call_id) => {
+                text_item(format!(
+                    "Historical tool call {call_id} was interrupted; result and external effects \
+                     are unknown. It was not replayed."
+                ))
+            }
+            other => other,
+        })
+        .collect())
 }
 fn add_uncertainties(items: &mut Vec<Item>, payload: &Value) {
     for (key, label) in [
@@ -294,15 +302,37 @@ fn summary_prefix(path: &[Record], cut: usize, records: &[Record]) -> Result<Vec
     project_path(&prefix, records)
 }
 fn summary_safe_items(items: Vec<Item>) -> Vec<Item> {
-    items.into_iter().map(|item| match item {
-        Item::Message{role,content}=>Item::Message{role,content:content.into_iter().map(|block|match block {
-            Block::Image{media_type,..}=>Block::Text{text:format!("[Image attachment {media_type}; preserved in original record]")},
-            Block::File{name,media_type,..}=>Block::Text{text:format!("[File attachment {name} ({media_type}); preserved in original record]")},
-            other=>other,
-        }).collect()},
-        Item::ProviderState{provider,..}=>text_item(format!("[Opaque {provider} provider state preserved in original record]")),
-        other=>other,
-    }).collect()
+    items
+        .into_iter()
+        .map(|item| match item {
+            Item::Message { role, content } => Item::Message {
+                role,
+                content: content
+                    .into_iter()
+                    .map(|block| match block {
+                        Block::Image { media_type, .. } => Block::Text {
+                            text: format!(
+                                "[Image attachment {media_type}; preserved in original record]"
+                            ),
+                        },
+                        Block::File {
+                            name, media_type, ..
+                        } => Block::Text {
+                            text: format!(
+                                "[File attachment {name} ({media_type}); preserved in original \
+                                 record]"
+                            ),
+                        },
+                        other => other,
+                    })
+                    .collect(),
+            },
+            Item::ProviderState { provider, .. } => text_item(format!(
+                "[Opaque {provider} provider state preserved in original record]"
+            )),
+            other => other,
+        })
+        .collect()
 }
 fn latest_states(records: &[Record]) -> Result<Vec<ExtensionState>, Fault> {
     let states: Vec<ExtensionState> = records
@@ -413,7 +443,12 @@ pub(crate) async fn context(
                 role: "system".into(),
                 content: vec![Block::Text {
                     text: format!(
-                        "Summarize this coding conversation for continuation. Use headings: Goal, Constraints, Progress (Done/In Progress/Blocked), Key Decisions, Next Steps, Critical Context. Preserve user requirements, exact paths/functions/errors, failed checks, pending work, and unknown external tool effects. Update previous summaries rather than discarding them. Do not continue the task. {}",
+                        "Summarize this coding conversation for continuation. Use headings: \
+                         Goal, Constraints, Progress (Done/In Progress/Blocked), Key Decisions, \
+                         Next Steps, Critical Context. Preserve user requirements, exact \
+                         paths/functions/errors, failed checks, pending work, and unknown \
+                         external tool effects. Update previous summaries rather than discarding \
+                         them. Do not continue the task. {}",
                         input.instructions
                     ),
                 }],
@@ -482,7 +517,12 @@ pub(crate) async fn context(
             } else {
                 "compaction"
             };
-            let mut payload = json!({"summary":summary,"read_files":read,"modified_files":modified,"uncertainties":uncertainties});
+            let mut payload = json!({
+                "summary": summary,
+                "read_files": read,
+                "modified_files": modified,
+                "uncertainties": uncertainties
+            });
             if kind == "compaction" {
                 payload["first_kept"] = json!(path.get(cut).map_or(0, |r| r.sequence));
                 payload["source_ids"] =
@@ -501,7 +541,9 @@ pub(crate) async fn context(
         role: "system".into(),
         content: vec![Block::Text {
             text: format!(
-                "You are eden, a coding assistant. Work in {}. Use read, write, edit and bash to inspect, change and verify the project. Report observed results accurately. Tool failures are evidence to address; do not claim unexecuted checks passed.",
+                "You are eden, a coding assistant. Work in {}. Use read, write, edit and bash to \
+                 inspect, change and verify the project. Report observed results accurately. \
+                 Tool failures are evidence to address; do not claim unexecuted checks passed.",
                 input.cwd
             ),
         }],
@@ -585,12 +627,24 @@ mod tests {
             record(
                 1,
                 "extension_state",
-                json!({"namespace":"plugin.x","version":1,"required":true,"summary":"old","value":{}}),
+                json!({
+                    "namespace": "plugin.x",
+                    "version": 1,
+                    "required": true,
+                    "summary": "old",
+                    "value": {}
+                }),
             ),
             record(
                 2,
                 "extension_state",
-                json!({"namespace":"plugin.x","version":2,"required":false,"summary":"new","value":{}}),
+                json!({
+                    "namespace": "plugin.x",
+                    "version": 2,
+                    "required": false,
+                    "summary": "new",
+                    "value": {}
+                }),
             ),
         ];
         let states = latest_states(&path).unwrap();
@@ -776,7 +830,17 @@ mod tests {
             record(
                 2,
                 "queue_delivered",
-                json!({"id":4,"kind":"steering","branch":"main","content":[{"type":"text","text":"x".repeat(90000)}]}),
+                json!({
+                    "id": 4,
+                    "kind": "steering",
+                    "branch": "main",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "x".repeat(90000)
+                        }
+                    ]
+                }),
             ),
         ];
         assert_eq!(retained_cut(&path, 20000).unwrap(), 1);

@@ -32,7 +32,8 @@ fn validate_next(records: &[Record], record: &Record) -> Result<(), Fault> {
         })
     {
         return Err(invalid(
-            "unsupported or mixed schema, discontinuous sequence, empty branch/kind, or mixed identity",
+            "unsupported or mixed schema, discontinuous sequence, empty branch/kind, or mixed \
+             identity",
         ));
     }
     if let Some(parent) = record.parent_id {
@@ -196,7 +197,16 @@ mod tests {
     #[test]
     fn invalid_transaction_never_partially_commits_its_records() {
         let mut bytes = encode_transaction(&[record(1, None, "user")]).unwrap();
-        bytes.extend(serde_json::to_vec(&json!({"schema_version":2,"transaction":[record(2, Some(1), "assistant"),record(4, Some(2), "tool_intent")]})).unwrap());
+        bytes.extend(
+            serde_json::to_vec(&json!({
+                "schema_version": 2,
+                "transaction": [
+                    record(2, Some(1), "assistant"),
+                    record(4, Some(2), "tool_intent")
+                ]
+            }))
+            .unwrap(),
+        );
         bytes.push(b'\n');
         let scan = scan_records(&bytes);
         assert_eq!(scan.records.len(), 1);
@@ -233,7 +243,10 @@ mod tests {
     }
     #[test]
     fn v1_is_readable_with_linear_parent_projection() {
-        let bytes = b"{\"schema_version\":1,\"session_id\":7,\"sequence\":1,\"run_id\":1,\"kind\":\"user\",\"payload\":{}}\n{\"schema_version\":1,\"session_id\":7,\"sequence\":2,\"run_id\":1,\"kind\":\"assistant\",\"payload\":{}}\n";
+        let bytes = b"{\"schema_version\":1,\"session_id\":7,\"sequence\":1,\
+                     \"run_id\":1,\"kind\":\"user\",\
+         \"payload\":{}}\n{\"schema_version\":1,\"session_id\":7,\"sequence\":2,\"run_id\":1,\
+         \"kind\":\"assistant\",\"payload\":{}}\n";
         let scan = scan_records(bytes);
         assert!(scan.diagnostic.is_none());
         assert_eq!(scan.records[1].parent_id, Some(1));

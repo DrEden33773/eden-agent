@@ -36,8 +36,10 @@ async fn probe(path: &Path, mode: &str) -> Result<(), Error> {
         .ok_or("packages missing")?
     {
         if package["descriptor"]["package"] == "lifecycle" {
-            package["config"] =
-                serde_json::json!({"address": listener.local_addr()?.to_string(), "mode": mode});
+            package["config"] = serde_json::json!({
+                "address": listener.local_addr()?.to_string(),
+                "mode": mode
+            });
         }
     }
     let local_path = path.with_file_name(format!("probe-{mode}.json"));
@@ -127,9 +129,11 @@ async fn probe(path: &Path, mode: &str) -> Result<(), Error> {
     let terminal = session.wait(run).await?;
     match mode {
         "complete" => assert!(matches!(terminal.outcome, Outcome::Completed(_))),
-        "failed_then_cancel" => assert!(
-            matches!(&terminal.outcome, Outcome::Failed(error) if error.code == "ProviderFailure" && error.source == "author-root")
-        ),
+        "failed_then_cancel" => assert!(matches!(
+            &terminal.outcome,
+            Outcome::Failed(error)
+                if error.code == "ProviderFailure" && error.source == "author-root"
+        )),
         "panic" => assert!(
             matches!(&terminal.outcome, Outcome::Failed(error) if error.code == "PluginFailure")
         ),
@@ -167,7 +171,15 @@ async fn probe(path: &Path, mode: &str) -> Result<(), Error> {
     other.shutdown().await?;
     println!(
         "{}",
-        serde_json::json!({"mode": mode, "terminal": terminal, "cleanup_gate": "held_until_release", "root_socket": "eof", "child": "joined", "stale_handle": "rejected", "other_session": "unaffected"})
+        serde_json::json!({
+            "mode": mode,
+            "terminal": terminal,
+            "cleanup_gate": "held_until_release",
+            "root_socket": "eof",
+            "child": "joined",
+            "stale_handle": "rejected",
+            "other_session": "unaffected"
+        })
     );
     Ok(())
 }

@@ -1,1 +1,3 @@
 .githooks/* text eol=lf
+*.mjs text eol=lf
+biome.json text eol=lf

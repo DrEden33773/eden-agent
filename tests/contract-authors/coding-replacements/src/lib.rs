@@ -37,13 +37,32 @@ async fn provider(input: ModelInput, _: CallContext) -> Result<ModelReply, Fault
             "Independent provider observed: {}",
             result.text
         ))],
-        None if input.items.iter().any(|item| matches!(item, Item::Message {content,..} if content.iter().any(|block| matches!(block,Block::Text {text} if text.contains("AUTHOR_TOOL_COMPLETED=author-write") || text.contains("AUTHOR_TOOL_UNCERTAIN=author-write"))))) => vec![message("Independent provider retained the earlier tool outcome; no replay".into())],
+        None if input.items.iter().any(|item| {
+            matches!(
+                item,
+                Item::Message { content, .. } if content.iter().any(|block| {
+                    matches!(
+                        block,
+                        Block::Text { text }
+                            if text.contains("AUTHOR_TOOL_COMPLETED=author-write")
+                                || text.contains("AUTHOR_TOOL_UNCERTAIN=author-write")
+                    )
+                })
+            )
+        }) =>
+        {
+            vec![message(
+                "Independent provider retained the earlier tool outcome; no replay".into(),
+            )]
+        }
         None => vec![Item::ToolCall {
             call_id: "author-write".into(),
             name: "write".into(),
-            arguments:
-                json!({"path":"author-created.txt","content":"independent provider wrote this\n"})
-                    .to_string(),
+            arguments: json!({
+                "path": "author-created.txt",
+                "content": "independent provider wrote this\n"
+            })
+            .to_string(),
         }],
     };
     Ok(ModelReply {
@@ -161,9 +180,17 @@ fn summarize_items(path: &[Record], items: Vec<Item>) -> Result<Value, Fault> {
     for call_id in &uncertainties {
         observations.push(format!("AUTHOR_TOOL_UNCERTAIN={call_id}; do not replay"));
     }
-    Ok(
-        json!({"summary":format!("INDEPENDENT_SUMMARY\nGoals and constraints: {}\nObserved progress: {}",goals.join("; "),observations.join("; ")),"first_kept":0,"source_ids":path.iter().map(|record|record.sequence).collect::<Vec<_>>(),"uncertainties":uncertainties,"author":"coding-replacements"}),
-    )
+    Ok(json!({
+        "summary": format!(
+            "INDEPENDENT_SUMMARY\nGoals and constraints: {}\nObserved progress: {}",
+            goals.join("; "),
+            observations.join("; ")
+        ),
+        "first_kept": 0,
+        "source_ids": path.iter().map(|record|record.sequence).collect::<Vec<_>>(),
+        "uncertainties": uncertainties,
+        "author": "coding-replacements"
+    }))
 }
 
 async fn context(input: ContextInput, cx: CallContext) -> Result<ModelInput, Fault> {
@@ -223,7 +250,21 @@ async fn context(input: ContextInput, cx: CallContext) -> Result<ModelInput, Fau
         tools: vec![ToolDefinition {
             name: "write".into(),
             description: "Independent author write schema".into(),
-            parameters: json!({"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string"
+                    },
+                    "content": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "path",
+                    "content"
+                ]
+            }),
         }],
     })
 }

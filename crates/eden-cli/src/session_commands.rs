@@ -88,14 +88,27 @@ pub async fn run(args: &[String]) -> Result<i32> {
             writeln!(
                 std::io::stdout(),
                 "{}",
-                json!({"session_id":scan.records.first().map(|r|r.session_id),"records":scan.records.len(),"head":state.0,"branch":state.1,"binding":scan.records.first().map(|r|&r.payload),"metadata":metadata,"diagnostic":scan.diagnostic})
+                json!({
+                    "session_id": scan.records.first().map(|r|r.session_id),
+                    "records": scan.records.len(),
+                    "head": state.0,
+                    "branch": state.1,
+                    "binding": scan.records.first().map(|r|&r.payload),
+                    "metadata": metadata,
+                    "diagnostic": scan.diagnostic
+                })
             )?;
         } else if command == "tree" {
             for record in &scan.records {
                 writeln!(
                     std::io::stdout(),
                     "{}",
-                    json!({"id":record.sequence,"parent":record.parent_id,"branch":record.branch,"kind":record.kind})
+                    json!({
+                        "id": record.sequence,
+                        "parent": record.parent_id,
+                        "branch": record.branch,
+                        "kind": record.kind
+                    })
                 )?;
             }
         } else if command == "inspect" {

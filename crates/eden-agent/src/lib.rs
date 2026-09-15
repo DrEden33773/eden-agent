@@ -124,16 +124,45 @@ impl Session {
         }));
         if coding {
             let setup = async {
-                let reply: c::StoreReply = session.service(0, c::STORE, &c::StoreRequest::Open { path: options.history.map(|p| p.to_string_lossy().into_owned()), session_id: id }).await?;
-                session.0.state.lock().unwrap_or_else(|e| e.into_inner()).next = reply.records.iter().map(|r| r.run_id).max().unwrap_or(0) + 1;
+                let reply: c::StoreReply = session
+                    .service(
+                        0,
+                        c::STORE,
+                        &c::StoreRequest::Open {
+                            path: options.history.map(|p| p.to_string_lossy().into_owned()),
+                            session_id: id,
+                        },
+                    )
+                    .await?;
+                session
+                    .0
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .next = reply.records.iter().map(|r| r.run_id).max().unwrap_or(0) + 1;
                 let binding = session.0.kernel.composition();
-                let identity = serde_json::json!({"cwd":cwd, "roles":binding.roles, "packages":binding.packages.iter().map(|p| &p.descriptor).collect::<Vec<_>>()});
+                let identity = serde_json::json!({
+                    "cwd": cwd,
+                    "roles": binding.roles,
+                    "packages": binding.packages.iter().map(|p| &p.descriptor).collect::<Vec<_>>()
+                });
                 if let Some(record) = reply.records.first() {
-                    if record.kind != "session" || !compatible_binding(&record.payload, &identity) { return Err(Fault::new("Unavailable", "session", "history cwd or composition differs; reopen with the original binding")); }
-                } else { session.commit(0,"session",identity).await?; }
-                let _: Vec<c::QueueEntry> = session.service(0,c::QUEUE,&c::QueueRequest::Restore).await?;
-                Ok::<_,Fault>(())
-            }.await;
+                    if record.kind != "session" || !compatible_binding(&record.payload, &identity) {
+                        return Err(Fault::new(
+                            "Unavailable",
+                            "session",
+                            "history cwd or composition differs; reopen with the original binding",
+                        ));
+                    }
+                } else {
+                    session.commit(0, "session", identity).await?;
+                }
+                let _: Vec<c::QueueEntry> = session
+                    .service(0, c::QUEUE, &c::QueueRequest::Restore)
+                    .await?;
+                Ok::<_, Fault>(())
+            }
+            .await;
             if let Err(error) = setup {
                 let _ = session.shutdown().await;
                 return Err(error);

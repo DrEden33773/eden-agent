@@ -156,7 +156,9 @@ mod tests {
         let barrier = tokio::spawn(async move { finalizing.finish().await });
         tokio::select! {
             result = entered_rx => result.unwrap(),
-            _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => panic!("cleanup was never entered"),
+            _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
+                panic!("cleanup was never entered");
+            }
         }
         assert!(
             !barrier.is_finished(),

@@ -61,7 +61,8 @@ impl Store {
                         .is_some_and(|record| record.schema_version == 1)
                     {
                         return Err(fault(
-                            "legacy history is read-only; explicit migration to a new v2 file is required",
+                            "legacy history is read-only; explicit migration \
+                             to a new v2 file is required",
                         ));
                     }
                     if records
@@ -377,7 +378,9 @@ mod tests {
     fn legacy_writer_requires_explicit_copy_and_preserves_source() {
         let path =
             std::env::temp_dir().join(format!("eden-store-legacy-{}.jsonl", std::process::id()));
-        let bytes = b"{\"schema_version\":1,\"session_id\":7,\"sequence\":1,\"run_id\":1,\"kind\":\"user\",\"payload\":{}}\n";
+        let bytes = b"{\"schema_version\":1,\"session_id\":7,\"sequence\":1,\
+                     \"run_id\":1,\"kind\":\"user\",\
+         \"payload\":{}}\n";
         std::fs::write(&path, bytes).unwrap();
         let result = Store::default().handle(StoreRequest::Open {
             path: Some(path.to_string_lossy().into()),

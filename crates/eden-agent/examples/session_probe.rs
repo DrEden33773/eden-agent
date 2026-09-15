@@ -40,7 +40,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(std::fs::read(options.history.unwrap())?, bytes);
         println!(
             "{}",
-            json!({"stale_preview_rejected":true,"source_preserved":true,"destination_absent":true})
+            json!({
+                "stale_preview_rejected": true,
+                "source_preserved": true,
+                "destination_absent": true
+            })
         );
         return Ok(());
     }
@@ -72,7 +76,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     session.shutdown().await?;
     println!(
         "{}",
-        json!({"session_id":id,"state_committed":true,"records":records.len(),"version":version})
+        json!({
+            "session_id": id,
+            "state_committed": true,
+            "records": records.len(),
+            "version": version
+        })
     );
     Ok(())
 }

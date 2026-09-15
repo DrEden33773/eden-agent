@@ -4,10 +4,11 @@ The public repository owns its development tools and hooks. It does not use depe
 
 ## Setup
 
-Install Node.js 22+ and pnpm 10.32.1, then run these commands in each clone:
+Install Node.js 22+, pnpm 10.32.1, Python 3.12+ and uv 0.9.7, then run these commands in each clone:
 
 ```sh
 pnpm install --frozen-lockfile
+uv sync --locked
 pnpm hooks:install
 ```
 
@@ -17,9 +18,11 @@ The explicit installer sets this repository's local `core.hooksPath` to `.githoo
 
 | Check | Hook | Explicit repair |
 | --- | --- | --- |
-| `pnpm markdown:check` | pre-commit, when Markdown or its root configuration changes | `pnpm markdown:fix` |
+| `pnpm markdown:check` | pre-commit and pre-push, when Markdown or its root configuration changes | `pnpm markdown:fix` |
 | `pnpm rust:check` | pre-commit, when Rust sources, manifests or Rust configuration change | `pnpm rust:fmt` |
 | `pnpm clippy:check` | pre-push, when the pushed changes affect Rust | `pnpm clippy:fix` |
+| `pnpm python:check` | pre-commit and pre-push, when Python/configuration changes | `pnpm python:format`; fix lint/types explicitly |
+| `pnpm js:check` | pre-commit and pre-push, when mjs/configuration changes | `pnpm js:fix` |
 
 The shared Rust commands cover the root Cargo workspace and every independent project directly under `tests/contract-authors/*` with a Cargo.toml. Clippy checks all targets with the lockfile fixed and warnings denied. Build artifacts share a target directory. Fix commands change the working tree; review the diff and stage the intended changes yourself. Clippy's normal restrictions on dirty/staged trees remain in effect; if appropriate for your reviewed changes, pass `--allow-dirty` or `--allow-staged` explicitly to `pnpm clippy:fix`. Hooks never supply these flags or run fixes.
 
@@ -27,12 +30,24 @@ Markdown uses default markdownlint rules, disables MD013, and limits duplicate-h
 
 ## Snapshot behavior
 
-Pre-commit materializes the actual index contents into a temporary directory and runs checks there, using staged manifests and lint configuration. An unstaged fix cannot conceal a staged problem; an unstaged draft cannot invalidate an otherwise valid commit. Intent-to-add entries from `git add -N` are omitted because they are not part of the commit. Deleting Markdown still checks the remaining staged documents. Unresolved entries and tracked non-file entries are rejected with a diagnostic rather than silently producing an incomplete snapshot.
+Pre-commit materializes the actual index contents into a temporary directory and runs checks there, using staged manifests and lint configuration. An unstaged fix cannot conceal a staged problem; an unstaged draft cannot invalidate an otherwise valid commit. Intent-to-add entries from `git add -N` are omitted because they are not part of the commit. Deleting Markdown still checks the remaining staged documents. Gitlinks are not traversed. Unresolved entries and tracked non-file entries other than gitlinks are rejected with a diagnostic rather than silently producing an incomplete snapshot.
 
-Pre-push reads the refs and object IDs supplied by Git. It runs Clippy on each distinct pushed commit that needs a Rust check, including a branch that is not checked out. Existing remote refs are compared to their pushed tips; a new ref, or a remote object unavailable locally, gets a full Rust check. Ref deletions do not compile anything. Uncommitted files and the current index do not affect the checked commit. Hook snapshots do not inherit repository-local Git environment variables into Cargo or build scripts.
+Pre-push reads the refs and object IDs supplied by Git. It checks affected Python, JavaScript and Markdown, and runs Clippy on each distinct pushed commit that needs a Rust check, including a branch that is not checked out. Existing remote refs are compared to their pushed tips; a new ref, or a remote object unavailable locally, gets a full Rust check. Ref deletions do not compile anything. Uncommitted files and the current index do not affect the checked commit. Hook snapshots do not inherit repository-local Git environment variables into Cargo or build scripts.
 
-Checks write only temporary snapshots and build outputs (`target/hooks` for hooks); they do not format sources, stage files, stash changes or switch the contributor's checkout. Required tools must be available locally. Missing Markdown dependencies produce a setup command rather than an automatic installation.
+Checks write only temporary snapshots and build outputs (`target/hooks` for hooks); they do not format sources, stage files, stash changes or switch the contributor's checkout. Required tools must be available locally. Missing dependencies produce a setup command rather than an automatic installation. Python tools run from the clone-local `.venv`; their installed versions must match the snapshot’s exact development dependencies. Ruff caches and Python bytecode writes are disabled during checks. Changes to the check runner or hook entry points trigger all check families.
 
 ## CI and tests
 
-The native matrix runs the same Markdown, formatting and Clippy commands on Linux, Windows and macOS, plus `pnpm hooks:test` for real Git commit/push regression scenarios. Local hooks provide early feedback; the required Quality check remains the merge gate even when a local hook was not installed or was bypassed.
+The native matrix runs the same Markdown, Python, JavaScript, formatting and Clippy commands on Linux, Windows and macOS, plus `pnpm hooks:test` for real Git commit/push regression scenarios. Local hooks provide early feedback; the required Quality check remains the merge gate even when a local hook was not installed or was bypassed.
+
+## Python and JavaScript policy
+
+`pyproject.toml` and `uv.lock` pin Ruff 0.14.3 and basedpyright 1.40.1. Ruff formats at 100 columns and checks E4/E7/E9/F/I/UP/B. Basedpyright uses `standard`, Python 3.12 and `All` platforms, with warnings failing the command. Type annotations describe subprocess text results, filesystem paths, HTTP callbacks, dynamic module interfaces and JSON boundaries. There is no blanket diagnostic suppression or baseline file. Commands may also be run separately with `python:format:check`, `python:lint` and `python:types`.
+
+Biome 2.5.3 is pinned in pnpm and applies its recommended lint preset, formatting and import organization to mjs. Build outputs, dependencies and local virtual environments are excluded from checks. `.vscode/settings.json` selects Ruff, Biome and rust-analyzer for format-on-save; install the recommended extensions to use those editor integrations.
+
+## Rustfmt limitations
+
+`rustfmt.toml` explicitly sets edition/style edition 2024 and a 100-column target. All commands continue using the pinned stable Rust toolchain. A passing `cargo fmt --check` is not a strict line-length guarantee: rustfmt may leave an enclosing closure or block untouched when an unbreakable macro string overflows, as tracked in [rustfmt #6870](https://github.com/rust-lang/rustfmt/issues/6870). Editor format-on-save can encounter the same limitation.
+
+Split long strings with Rust backslash-newline continuations where their contents must stay identical, and lay out complex macro arguments over multiple lines. Re-run `pnpm rust:fmt` and inspect the affected block, then run `pnpm rust:check`. Long literals in fixtures and protocol messages need the same attention as ordinary code; changing formatter width or switching to nightly is not required.

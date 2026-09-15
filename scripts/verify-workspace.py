@@ -9,7 +9,6 @@ import json
 import os
 import pathlib
 import platform
-import re
 import runpy
 import shutil
 import ssl
@@ -19,7 +18,11 @@ import tempfile
 import threading
 from typing import Any
 
-from install import ROOT, Composition, Package, install, library, package, target
+from http_fixture import FixtureHTTPServer
+from install import ROOT, Composition, Package, library, package, target
+from verification import author_artifact, author_sources, prepare
+from verification import installed as prepared_install
+from verification import openssl as resolve_openssl
 
 helpers = runpy.run_path(str(ROOT / "scripts/verify-context.py"))
 run = helpers["run"]
@@ -31,21 +34,7 @@ records = helpers["records"]
 
 
 def author_packages(destination: pathlib.Path, scratch: pathlib.Path) -> list[Package]:
-    sdk = scratch / "sdk"
-    for name in ["eden-protocol", "eden-plugin-sdk"]:
-        shutil.copytree(ROOT / "crates" / name, sdk / "crates" / name)
-    manifest = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
-    manifest = re.sub(r"^members = .*$", 'members = ["crates/*"]', manifest, flags=re.M)
-    manifest = (
-        "\n".join(
-            line
-            for line in manifest.splitlines()
-            if not line.startswith(("exclude =", "eden-kernel =", "eden-agent ="))
-        )
-        + "\n"
-    )
-    (sdk / "Cargo.toml").write_text(manifest, encoding="utf-8")
-    shutil.copy2(ROOT / "rust-toolchain.toml", scratch / "rust-toolchain.toml")
+    author_sources(scratch, ["service-a", "service-b"])
     output = []
     services = {
         "service-a": ["example.compute.v1", "eden.resource-source.v1", "eden.instance-stop.v1"],
@@ -58,22 +47,10 @@ def author_packages(destination: pathlib.Path, scratch: pathlib.Path) -> list[Pa
         ],
     }
     for name, contracts in services.items():
-        author = scratch / "authors" / name
-        shutil.copytree(
-            ROOT / "tests/contract-authors" / name, author, ignore=shutil.ignore_patterns("target")
-        )
-        cargo = author / "Cargo.toml"
-        cargo.write_text(
-            cargo.read_text(encoding="utf-8").replace(
-                "../../../crates/eden-plugin-sdk", "../../sdk/crates/eden-plugin-sdk"
-            ),
-            encoding="utf-8",
-        )
-        run(["cargo", "build", "--locked", "--target-dir", scratch / "author-target"], author)
         artifact = library("author_" + name.replace("-", "_"))
         folder = destination / "plugins" / name
         folder.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(scratch / "author-target/debug" / artifact, folder / artifact)
+        shutil.copy2(author_artifact(name), folder / artifact)
         selected = package(name, contracts, str(folder / artifact), target())
         if name == "service-b":
             selected["requires"] = ["example.compute.v1"]
@@ -104,17 +81,7 @@ def stopped(pid: int) -> bool:
 
 def tls_fixture(root: pathlib.Path) -> pathlib.Path:
     """Generate disposable keys at execution time; no private key is committed."""
-    openssl = shutil.which("openssl")
-    if openssl is None and sys.platform == "win32":
-        for candidate in [
-            pathlib.Path("C:/Program Files/Git/usr/bin/openssl.exe"),
-            pathlib.Path("C:/Program Files/Git/mingw64/bin/openssl.exe"),
-        ]:
-            if candidate.is_file():
-                openssl = str(candidate)
-                break
-    if openssl is None:
-        raise RuntimeError("OpenSSL CLI is required for the verifier's isolated TLS fixture")
+    openssl = resolve_openssl()
     root.mkdir()
     config = root / "cert.cnf"
     config.write_text(
@@ -259,13 +226,12 @@ def default_search_loop(
 
 def main() -> None:
     os.environ["EDEN_CONTEXT_KEY"] = "context-verifier-key"
-    run(["cargo", "build", "--workspace", "--locked"], ROOT)
-    run(["cargo", "build", "-p", "eden-agent", "--example", "workspace_probe", "--locked"], ROOT)
-    destination = install(ROOT / "artifacts/workspace-install")
+    resolve_openssl()
+    prepare()
+    destination = prepared_install(ROOT / "artifacts/workspace-install")
     suffix = ".exe" if sys.platform == "win32" else ""
     host = destination / "bin" / ("eden" + suffix)
     probe = destination / "bin" / ("workspace_probe" + suffix)
-    shutil.copy2(ROOT / "target/debug/examples" / probe.name, probe)
     fixed_host = hashlib.sha256(host.read_bytes()).hexdigest()
     base: Composition = json.loads((destination / "composition.json").read_text(encoding="utf-8"))
     results: dict[str, Any] = {}
@@ -750,7 +716,7 @@ def main() -> None:
                 self.end_headers()
                 self.wfile.write(payload)
 
-        tls = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ArchiveHandler)
+        tls = FixtureHTTPServer(("127.0.0.1", 0), ArchiveHandler)
         certs = tls_fixture(scratch / "tls")
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(certs / "localhost-cert.pem", certs / "localhost-key.pem")

@@ -24,6 +24,12 @@ fn file(directory: &Path, cwd: &Path) -> PathBuf {
         Sha256::digest(cwd.to_string_lossy().as_bytes())
     ))
 }
+fn lock_error(error: std::fs::TryLockError) -> String {
+    match error {
+        std::fs::TryLockError::WouldBlock => "search history busy: another lock is held".into(),
+        std::fs::TryLockError::Error(error) => format!("search history lock failed: {error}"),
+    }
+}
 pub fn record(
     directory: &Path,
     cwd: &Path,
@@ -33,12 +39,12 @@ pub fn record(
     std::fs::create_dir_all(directory).map_err(|e| e.to_string())?;
     let mut output = std::fs::OpenOptions::new()
         .create(true)
+        // Windows cannot lock an append-only handle; retain append semantics with read access.
+        .read(true)
         .append(true)
         .open(file(directory, cwd))
         .map_err(|e| e.to_string())?;
-    output
-        .try_lock()
-        .map_err(|e| format!("search history busy: {e}"))?;
+    output.try_lock().map_err(lock_error)?;
     let access = Access {
         path: path.into(),
         query,
@@ -56,9 +62,7 @@ pub fn scores(directory: &Path, cwd: &Path, query: &str) -> Result<BTreeMap<Path
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
         Err(error) => return Err(error.to_string()),
     };
-    input
-        .try_lock_shared()
-        .map_err(|e| format!("search history busy: {e}"))?;
+    input.try_lock_shared().map_err(lock_error)?;
     let mut scores = BTreeMap::new();
     let time = now();
     for line in std::io::BufReader::new(&input).lines() {
@@ -74,4 +78,59 @@ pub fn scores(directory: &Path, cwd: &Path, query: &str) -> Result<BTreeMap<Path
         *scores.entry(access.path).or_default() += weight;
     }
     Ok(scores)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_lock_excludes_readers_and_writers_then_releases_for_append() {
+        struct Directory(PathBuf);
+        impl Drop for Directory {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let directory = Directory(std::env::temp_dir().join(format!(
+            "eden-search-history-lock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )));
+        std::fs::create_dir(&directory.0).unwrap();
+        let cwd = std::fs::canonicalize(&directory.0).unwrap();
+        let first = cwd.join("first.txt");
+        let second = cwd.join("second.txt");
+        record(&directory.0, &cwd, &first, None).unwrap();
+        let history_path = file(&directory.0, &cwd);
+        let before = std::fs::read(&history_path).unwrap();
+        let owner = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&history_path)
+            .unwrap();
+        owner.try_lock().unwrap();
+        assert!(
+            record(&directory.0, &cwd, &second, Some("needle".into()))
+                .unwrap_err()
+                .starts_with("search history busy:")
+        );
+        assert!(
+            scores(&directory.0, &cwd, "needle")
+                .unwrap_err()
+                .starts_with("search history busy:")
+        );
+        drop(owner);
+        assert_eq!(std::fs::read(&history_path).unwrap(), before);
+        record(&directory.0, &cwd, &second, Some("needle".into())).unwrap();
+        let after = std::fs::read_to_string(&history_path).unwrap();
+        assert!(after.as_bytes().starts_with(&before));
+        assert_eq!(after.lines().count(), 2);
+        let ranked = scores(&directory.0, &cwd, "needle").unwrap();
+        assert_eq!(ranked.len(), 2);
+        assert!(ranked[&second] > ranked[&first]);
+    }
 }

@@ -8,7 +8,6 @@ import json
 import os
 import pathlib
 import platform
-import shutil
 import socket
 import subprocess
 import sys
@@ -16,7 +15,8 @@ import tempfile
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol, cast
 
-from install import ROOT, Composition, Package, install, target
+from install import ROOT, Composition, Package, target
+from verification import installed, prepare
 
 
 class CodingServer(Protocol):
@@ -160,26 +160,13 @@ def broken_stdout(
 
 def main() -> None:
     os.environ["EDEN_VERIFY_KEY"] = "controlled-verifier-key"
-    run(["cargo", "build", "--workspace", "--locked"], ROOT)
-    run(
-        [
-            "cargo",
-            "build",
-            "-p",
-            "eden-agent",
-            "--example",
-            "session_probe",
-            "--locked",
-        ],
-        ROOT,
-    )
+    prepare()
     artifacts = ROOT / "artifacts"
     artifacts.mkdir(exist_ok=True)
-    destination = install(artifacts / "session-install")
+    destination = installed(artifacts / "session-install")
     suffix = ".exe" if sys.platform == "win32" else ""
     host = destination / "bin" / ("eden" + suffix)
     probe = destination / "bin" / ("session_probe" + suffix)
-    shutil.copy2(ROOT / "target/debug/examples" / probe.name, probe)
     host_hash = digest(host)
     composition = json.loads((destination / "composition.json").read_text(encoding="utf-8"))
     results: dict[str, Any] = {}

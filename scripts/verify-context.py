@@ -9,7 +9,6 @@ import json
 import os
 import pathlib
 import platform
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -17,23 +16,16 @@ import threading
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from install import ROOT, Composition, install, target
+from http_fixture import FixtureHTTPServer
+from install import ROOT, Composition, target
+from verification import installed, prepare
+from verification import run as measured_run
 
 
 def run(
     args: Sequence[str | pathlib.Path], cwd: pathlib.Path, check: bool = True
 ) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(
-        [str(arg) for arg in args],
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        timeout=180,
-    )
-    if check and result.returncode:
-        raise AssertionError(f"{args}: {result.returncode}\n{result.stdout}\n{result.stderr}")
-    return result
+    return measured_run(args, cwd, check=check, timeout=180)
 
 
 def write(path: pathlib.Path, value: object) -> None:
@@ -145,8 +137,7 @@ class Server:
                 except BaseException as error:
                     owner.errors.append(repr(error))
 
-        self.http = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.http.daemon_threads = True
+        self.http = FixtureHTTPServer(("127.0.0.1", 0), Handler)
         self.address = f"127.0.0.1:{self.http.server_port}"
         self.thread = threading.Thread(target=self.http.serve_forever, daemon=True)
         self.thread.start()
@@ -187,26 +178,13 @@ def configure(
 
 def main() -> None:
     os.environ["EDEN_CONTEXT_KEY"] = "context-verifier-key"
-    run(["cargo", "build", "--workspace", "--locked"], ROOT)
-    run(
-        [
-            "cargo",
-            "build",
-            "-p",
-            "eden-agent",
-            "--example",
-            "context_probe",
-            "--locked",
-        ],
-        ROOT,
-    )
+    prepare()
     artifacts = ROOT / "artifacts"
     artifacts.mkdir(exist_ok=True)
-    destination = install(artifacts / "context-install")
+    destination = installed(artifacts / "context-install")
     suffix = ".exe" if sys.platform == "win32" else ""
     host = destination / "bin" / ("eden" + suffix)
     probe = destination / "bin" / ("context_probe" + suffix)
-    shutil.copy2(ROOT / "target/debug/examples" / probe.name, probe)
     fixed_host = host.read_bytes()
     composition = json.loads((destination / "composition.json").read_text(encoding="utf-8"))
     results: dict[str, Any] = {}

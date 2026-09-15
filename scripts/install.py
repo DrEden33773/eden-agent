@@ -3,10 +3,12 @@
 
 import argparse
 import json
+import os
 import pathlib
 import shutil
 import subprocess
 import sys
+from functools import cache
 from typing import Any, NotRequired, TypedDict
 
 from license_bundle import bundle
@@ -39,9 +41,15 @@ CONTRACT = "eden-native-0.1.0"
 ROLES = ["eden.agent-loop.v1", "eden.context.v1", "eden.provider.v1", "eden.tool.v1"]
 
 
+@cache
 def target() -> str:
     text = subprocess.check_output(["rustc", "-vV"], cwd=ROOT, text=True)
     return next(line.split(": ", 1)[1] for line in text.splitlines() if line.startswith("host:"))
+
+
+def build_target() -> pathlib.Path:
+    path = pathlib.Path(os.environ.get("CARGO_TARGET_DIR", "target"))
+    return (ROOT / path).resolve()
 
 
 def library(name: str) -> str:
@@ -68,7 +76,11 @@ def package(
 
 
 def install(
-    destination: pathlib.Path | str, profile: str = "debug", controlled: bool = False
+    destination: pathlib.Path | str,
+    profile: str = "debug",
+    controlled: bool = False,
+    *,
+    license_directory: pathlib.Path | None = None,
 ) -> pathlib.Path:
     destination = pathlib.Path(destination).resolve()
     (destination / "bin").mkdir(parents=True, exist_ok=True)
@@ -76,12 +88,12 @@ def install(
     plugin_dir.mkdir(parents=True, exist_ok=True)
     suffix = ".exe" if sys.platform == "win32" else ""
     shutil.copy2(
-        ROOT / "target" / profile / ("eden" + suffix),
+        build_target() / profile / ("eden" + suffix),
         destination / "bin" / ("eden" + suffix),
     )
     name = library("eden_standard")
     if controlled:
-        shutil.copy2(ROOT / "target" / profile / name, plugin_dir / name)
+        shutil.copy2(build_target() / profile / name, plugin_dir / name)
     for doc in ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"]:
         shutil.copy2(ROOT / doc, destination / doc)
     composition: Composition = {
@@ -127,7 +139,7 @@ def install(
             lib = library("eden_" + pkg.replace("-", "_"))
             relative = f"plugins/{pkg}/0.1.0/{lib}"
             (destination / relative).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(ROOT / "target" / profile / lib, destination / relative)
+            shutil.copy2(build_target() / profile / lib, destination / relative)
             config = None
             if pkg == "coding-tools":
                 config = {
@@ -156,13 +168,16 @@ def install(
             )
     if not controlled:
         shutil.copy2(
-            ROOT / "target" / profile / ("eden-search-worker" + suffix),
+            build_target() / profile / ("eden-search-worker" + suffix),
             destination / "bin" / ("eden-search-worker" + suffix),
         )
     (destination / "composition.json").write_text(
         json.dumps(composition, indent=2) + "\n", encoding="utf-8"
     )
-    bundle(ROOT, destination, target())
+    if license_directory is None:
+        bundle(ROOT, destination, target())
+    else:
+        shutil.copytree(license_directory, destination / "third-party-licenses", dirs_exist_ok=True)
     return destination
 
 

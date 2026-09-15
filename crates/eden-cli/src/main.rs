@@ -30,6 +30,14 @@ fn startup() -> Result<i32, Box<dyn std::error::Error>> {
     runtime.block_on(run(prepared.args))
 }
 async fn run(args: Vec<String>) -> Result<i32, Box<dyn std::error::Error>> {
+    if args.first().is_some_and(|arg| {
+        matches!(
+            arg.as_str(),
+            "trust" | "resources" | "commands" | "command" | "package"
+        )
+    }) {
+        return eden_cli::workspace_commands::run(&args).await;
+    }
     if args
         .first()
         .is_some_and(|arg| matches!(arg.as_str(), "history" | "session"))
@@ -46,6 +54,7 @@ async fn run(args: Vec<String>) -> Result<i32, Box<dyn std::error::Error>> {
     let mut memory = false;
     let mut attachments = vec![];
     let mut inspect = None;
+    let mut workspace_options = eden_agent::WorkspaceOptions::default();
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -59,6 +68,51 @@ async fn run(args: Vec<String>) -> Result<i32, Box<dyn std::error::Error>> {
                 cwd_explicit = true;
             }
             "--continue" => resume = true,
+            "--trust-project" => workspace_options.project_trust = Some(true),
+            "--no-trust-project" => workspace_options.project_trust = Some(false),
+            "--global-dir" => {
+                workspace_options.global_dir =
+                    PathBuf::from(args.next().ok_or("--global-dir needs a directory")?)
+            }
+            "--tools" | "--exclude-tools" => {
+                let key = if arg == "--tools" {
+                    "tools"
+                } else {
+                    "exclude_tools"
+                };
+                workspace_options.overrides[key] = serde_json::json!(
+                    args.next()
+                        .ok_or("tool option needs comma-separated names")?
+                        .split(',')
+                        .filter(|name| !name.is_empty())
+                        .collect::<Vec<_>>()
+                );
+            }
+            "--skill-path" | "--template-path" => {
+                let key = if arg == "--skill-path" {
+                    "skills"
+                } else {
+                    "templates"
+                };
+                if workspace_options.overrides.get(key).is_none() {
+                    workspace_options.overrides[key] = serde_json::json!([]);
+                }
+                workspace_options.overrides[key]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!(
+                        args.next().ok_or("resource path is required")?
+                    ));
+            }
+            "--read-only" => workspace_options.overrides["read_only"] = serde_json::json!(true),
+            "--no-context" | "--no-skills" | "--no-templates" => {
+                let key = match arg.as_str() {
+                    "--no-context" => "discover_context",
+                    "--no-skills" => "discover_skills",
+                    _ => "discover_templates",
+                };
+                workspace_options.overrides[key] = serde_json::json!(false);
+            }
             "--session" | "--resume" => {
                 history = Some(PathBuf::from(
                     args.next().ok_or("session option needs a path")?,
@@ -79,7 +133,13 @@ async fn run(args: Vec<String>) -> Result<i32, Box<dyn std::error::Error>> {
             }
             "--help" => {
                 println!(
-                    "eden [--env-file PATH] [--composition PATH] [--cwd DIR] [--session \
+                    "eden trust allow|deny|inspect PATH [--global-dir DIR]\n\
+                    eden resources list [--cwd DIR]\n\
+                    eden commands\n\
+                    eden command NAME JSON\n\
+                    eden package install SOURCE [--build]\n\
+                    eden session switch PATH --composition COMPOSITION\n\
+                    Resource options: --global-dir DIR --trust-project --no-trust-project --no-context --no-skills --no-templates --skill-path PATH --template-path PATH\nTools: --tools NAMES --exclude-tools NAMES --read-only\n\neden [--env-file PATH] [--composition PATH] [--cwd DIR] [--session \
                      PATH|--no-session] [--print|--json] [--attach TEXT|--image IMAGE|--file \
                      PDF] PROMPT\neden --history PATH\neden history inspect|export PATH \
                      [DEST]\neden session info|tree|compact|continue PATH\neden session \
@@ -197,7 +257,12 @@ async fn run(args: Vec<String>) -> Result<i32, Box<dyn std::error::Error>> {
     if let Some(path) = &history {
         eprintln!("Session: {}", path.display());
     }
-    let session = Session::open_with(composition, SessionOptions { cwd, history }).await?;
+    let session = Session::open_with_workspace(
+        composition,
+        SessionOptions { cwd, history },
+        workspace_options,
+    )
+    .await?;
     let result = async {
         let run = if resume {
             session.resume()?

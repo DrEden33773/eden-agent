@@ -19,6 +19,8 @@ pub struct NativeInstance {
     gate: Mutex<Gate>,
     drained: Notify,
     stop_lock: tokio::sync::Mutex<()>,
+    has_finalizer: bool,
+    stop_result: Mutex<Option<Result<(), Fault>>>,
 }
 fn failure(message: impl Into<String>) -> Fault {
     Fault::new("Unavailable", "loader", message)
@@ -104,6 +106,12 @@ impl NativeInstance {
             }),
             drained: Notify::new(),
             stop_lock: tokio::sync::Mutex::new(()),
+            has_finalizer: manifest
+                .descriptor
+                .provides
+                .iter()
+                .any(|role| role == eden_protocol::INSTANCE_STOP),
+            stop_result: Mutex::new(None),
         }))
     }
     /// Stop admitting immediately; actual resource shutdown is awaited separately.
@@ -122,12 +130,24 @@ impl NativeInstance {
     /// Calls retain their own worker even when the caller drops its receiver.
     pub async fn call(self: &Arc<Self>, request: Request, cancel: Cancellation) -> Terminal {
         let instance = self.clone();
-        match tokio::spawn(async move { instance.invoke(request, cancel).await }).await {
+        match tokio::spawn(async move { instance.invoke(request, cancel, false).await }).await {
             Ok(terminal) => terminal,
             Err(error) => Terminal::failed(failure(error.to_string())),
         }
     }
-    async fn invoke(self: Arc<Self>, request: Request, cancel: Cancellation) -> Terminal {
+    async fn invoke(
+        self: Arc<Self>,
+        request: Request,
+        cancel: Cancellation,
+        finalizer: bool,
+    ) -> Terminal {
+        if !finalizer && request.contract == eden_protocol::INSTANCE_STOP {
+            return Terminal::failed(Fault::new(
+                "Unavailable",
+                "instance",
+                "instance finalization is reserved for host shutdown",
+            ));
+        }
         let bytes = match serde_json::to_vec(&request) {
             Ok(bytes) => bytes,
             Err(e) => return Terminal::failed(failure(e.to_string())),
@@ -135,7 +155,7 @@ impl NativeInstance {
         let (sender, receiver) = oneshot::channel();
         let (handle, operation) = {
             let mut gate = self.gate.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(handle) = gate.handle.filter(|_| gate.open) else {
+            let Some(handle) = gate.handle.filter(|_| gate.open || finalizer) else {
                 return Terminal::failed(Fault::new(
                     "Unavailable",
                     "instance",
@@ -182,9 +202,17 @@ impl NativeInstance {
             Err(e) => Terminal::failed(failure(e.to_string())),
         }
     }
-    pub(crate) async fn stop(&self) {
-        self.close();
+    pub(crate) async fn stop(self: &Arc<Self>) -> Result<(), Fault> {
         let _owner = self.stop_lock.lock().await;
+        if let Some(result) = self
+            .stop_result
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            return result;
+        }
+        self.close();
         loop {
             let notified = self.drained.notified();
             tokio::pin!(notified);
@@ -194,6 +222,24 @@ impl NativeInstance {
             }
             notified.await;
         }
+        let mut result = if self.has_finalizer {
+            self.clone()
+                .invoke(
+                    Request {
+                        session_id: 0,
+                        run_id: 0,
+                        contract: eden_protocol::INSTANCE_STOP.into(),
+                        payload: serde_json::Value::Null,
+                    },
+                    Cancellation::default(),
+                    true,
+                )
+                .await
+                .into_result()
+                .map(|_| ())
+        } else {
+            Ok(())
+        };
         let handle = self
             .gate
             .lock()
@@ -202,13 +248,115 @@ impl NativeInstance {
             .take();
         if let Some(handle) = handle {
             let api = self.api;
-            let _ = tokio::task::spawn_blocking(move || {
+            let destroyed = tokio::task::spawn_blocking(move || {
                 // SAFETY: Admission is closed, all operations released, and this is the sole destroy owner.
                 unsafe {
                     (api.destroy)(handle);
                 }
             })
             .await;
+            if let Err(error) = destroyed {
+                result = Err(Fault::new("CleanupFailure", "destroy", error.to_string()));
+            }
         }
+        *self.stop_result.lock().unwrap_or_else(|e| e.into_inner()) = Some(result.clone());
+        result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static FINALIZERS: AtomicUsize = AtomicUsize::new(0);
+    static DESTROYED: AtomicUsize = AtomicUsize::new(0);
+    unsafe extern "C" fn describe(_: Reply) {}
+    unsafe extern "C" fn create(_: HostApi, _: Bytes, _: Reply) -> usize {
+        1
+    }
+    unsafe extern "C" fn start(_: usize, bytes: Bytes, reply: Reply) -> u64 {
+        // SAFETY: NativeInstance keeps the serialized request live throughout start.
+        let request: Request = unsafe { bytes.decode() }.unwrap();
+        assert_eq!(request.contract, eden_protocol::INSTANCE_STOP);
+        FINALIZERS.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: This mock consumes the accepted receiver exactly once.
+        unsafe {
+            reply.send(&Terminal::failed(Fault::new(
+                "CleanupFailure",
+                "fixture",
+                "observable stop failure",
+            )));
+        }
+        1
+    }
+    unsafe extern "C" fn cancel(_: usize, _: u64) {}
+    unsafe extern "C" fn release(_: usize, _: u64) {}
+    unsafe extern "C" fn destroy(_: usize) {
+        DESTROYED.fetch_add(1, Ordering::SeqCst);
+    }
+    static API: Api = Api {
+        header: Header {
+            magic: [0; 8],
+            abi: 1,
+            size: 0,
+            sdk: [0; 32],
+            target: [0; 64],
+        },
+        describe,
+        create,
+        start,
+        cancel,
+        release,
+        destroy,
+    };
+    #[tokio::test]
+    async fn stop_finalizes_once_reports_failure_and_keeps_admission_closed() {
+        let instance = Arc::new(NativeInstance {
+            api: &API,
+            gate: Mutex::new(Gate {
+                handle: Some(1),
+                open: true,
+                active: 0,
+                operations: Default::default(),
+            }),
+            drained: Notify::new(),
+            stop_lock: tokio::sync::Mutex::new(()),
+            has_finalizer: true,
+            stop_result: Mutex::new(None),
+        });
+        assert_eq!(
+            instance
+                .call(
+                    Request {
+                        session_id: 1,
+                        run_id: 1,
+                        contract: eden_protocol::INSTANCE_STOP.into(),
+                        payload: serde_json::Value::Null
+                    },
+                    Cancellation::default()
+                )
+                .await
+                .into_result()
+                .unwrap_err()
+                .code,
+            "Unavailable"
+        );
+        assert_eq!(FINALIZERS.load(Ordering::SeqCst), 0);
+        assert_eq!(instance.stop().await.unwrap_err().code, "CleanupFailure");
+        assert_eq!(instance.stop().await.unwrap_err().code, "CleanupFailure");
+        assert_eq!(FINALIZERS.load(Ordering::SeqCst), 1);
+        assert_eq!(DESTROYED.load(Ordering::SeqCst), 1);
+        let terminal = instance
+            .call(
+                Request {
+                    session_id: 1,
+                    run_id: 1,
+                    contract: eden_protocol::INSTANCE_STOP.into(),
+                    payload: serde_json::Value::Null,
+                },
+                Cancellation::default(),
+            )
+            .await;
+        assert_eq!(terminal.into_result().unwrap_err().code, "Unavailable");
     }
 }

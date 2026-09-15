@@ -19,6 +19,14 @@ use std::{
 
 /// Validate all composition metadata before executing any library code.
 pub fn preflight(composition: &Composition) -> Result<(), Fault> {
+    if composition.roles.contains_key(p::INSTANCE_STOP) {
+        return Err(Fault::new(
+            "InvalidInput",
+            "manifest",
+            "instance finalization cannot be selected as a public service",
+        ));
+    }
+
     let mut packages = BTreeMap::new();
     for package in &composition.packages {
         if package.host != p::CONTRACT || package.sdk != p::CONTRACT || package.target != TARGET {
@@ -80,6 +88,17 @@ pub fn preflight(composition: &Composition) -> Result<(), Fault> {
                 "composition",
                 format!("{package} does not provide {role}"),
             ));
+        }
+    }
+    for package in &composition.packages {
+        for required in &package.requires {
+            if !composition.roles.contains_key(required) {
+                return Err(Fault::new(
+                    "MissingDependency",
+                    &package.descriptor.package,
+                    format!("required contract is not selected: {required}"),
+                ));
+            }
         }
     }
     Ok(())
@@ -158,7 +177,7 @@ impl Plugin for Adapter {
                     instance.close();
                 }
                 for instance in cleanup.0.values() {
-                    instance.stop().await;
+                    let _ = instance.stop().await;
                 }
             })
             .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -287,10 +306,29 @@ pub struct Kernel {
 }
 impl Kernel {
     pub async fn load(path: &Path, session_id: u64, events: Arc<Events>) -> Result<Self, Fault> {
-        let path = path.to_owned();
+        let bytes = std::fs::read(path)
+            .map_err(|e| Fault::new("InvalidInput", "composition", e.to_string()))?;
+        let composition: Composition = serde_json::from_slice(&bytes)
+            .map_err(|e| Fault::new("InvalidInput", "composition", e.to_string()))?;
+        Self::load_resolved(
+            composition,
+            path.parent().unwrap_or(Path::new(".")),
+            session_id,
+            events,
+        )
+        .await
+    }
+    /// Load an explicitly resolved and authorized composition; this never discovers or installs code.
+    pub async fn load_resolved(
+        composition: Composition,
+        base: &Path,
+        session_id: u64,
+        events: Arc<Events>,
+    ) -> Result<Self, Fault> {
+        let base = base.to_owned();
         let (sender, receiver) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            let result = Self::load_owned(&path, session_id, events).await;
+            let result = Self::load_owned(composition, &base, session_id, events).await;
             // Delivery's Drop rolls back if the caller leaves at any point before taking ownership.
             let _ = sender.send(Delivery(Some(result)));
         });
@@ -302,13 +340,13 @@ impl Kernel {
             .take()
             .ok_or_else(|| Fault::new("Unavailable", "initialize", "missing delivery"))?
     }
-    async fn load_owned(path: &Path, session_id: u64, events: Arc<Events>) -> Result<Self, Fault> {
-        let bytes = std::fs::read(path)
-            .map_err(|e| Fault::new("InvalidInput", "composition", e.to_string()))?;
-        let composition: Composition = serde_json::from_slice(&bytes)
-            .map_err(|e| Fault::new("InvalidInput", "composition", e.to_string()))?;
+    async fn load_owned(
+        composition: Composition,
+        base: &Path,
+        session_id: u64,
+        events: Arc<Events>,
+    ) -> Result<Self, Fault> {
         preflight(&composition)?;
-        let base = path.parent().unwrap_or(Path::new("."));
         // Resolve all paths before executing the first native library.
         let paths: Vec<_> = composition
             .packages
@@ -357,7 +395,7 @@ impl Kernel {
                 Err(error) => {
                     router.open.store(false, Ordering::Release);
                     for instance in packages.values() {
-                        instance.stop().await;
+                        let _ = instance.stop().await;
                     }
                     routers()
                         .lock()
@@ -384,7 +422,7 @@ impl Kernel {
             Ok(fork) => fork,
             Err(error) => {
                 for instance in &instances {
-                    instance.stop().await;
+                    let _ = instance.stop().await;
                 }
                 routers()
                     .lock()
@@ -432,9 +470,13 @@ impl Kernel {
             cancel.cancel();
         }
         let disposed = self.fork.dispose().await;
-        // Include explicitly loaded packages that were not selected for a role.
+        // Include explicitly loaded packages that were not selected for a role;
+        // instance finalizer failures survive repeated stop calls by the adapter.
+        let mut cleanup = None;
         for instance in &self.instances {
-            instance.stop().await;
+            if let Err(error) = instance.stop().await {
+                cleanup.get_or_insert(error);
+            }
         }
         let workers = std::mem::take(
             &mut *self
@@ -450,6 +492,9 @@ impl Kernel {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&self.token);
+        if let Some(error) = cleanup {
+            return Err(error);
+        }
         disposed.map_err(|e| Fault::new("CleanupFailure", "cordis", e.to_string()))
     }
 }

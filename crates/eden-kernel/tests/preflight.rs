@@ -17,6 +17,7 @@ fn manifest() -> Composition {
             target: TARGET.into(),
             library: "missing-library".into(),
             config: serde_json::Value::Null,
+            requires: vec![],
         }],
         roles: roles
             .iter()
@@ -32,4 +33,33 @@ fn incompatible_package_is_rejected_before_library_loading() {
         preflight(&composition).unwrap_err().code,
         "IncompatibleContract"
     );
+}
+
+#[test]
+fn unknown_domain_requirements_are_checked_without_host_domain_types() {
+    let mut composition = manifest();
+    composition.packages[0].requires = vec!["example.weather.v2".into()];
+    assert_eq!(
+        preflight(&composition).unwrap_err().code,
+        "MissingDependency"
+    );
+    composition.packages[0]
+        .descriptor
+        .provides
+        .push("example.weather.v1".into());
+    composition
+        .roles
+        .insert("example.weather.v1".into(), "standard".into());
+    assert_eq!(
+        preflight(&composition).unwrap_err().code,
+        "MissingDependency"
+    );
+    composition.packages[0]
+        .descriptor
+        .provides
+        .push("example.weather.v2".into());
+    composition
+        .roles
+        .insert("example.weather.v2".into(), "standard".into());
+    preflight(&composition).unwrap();
 }

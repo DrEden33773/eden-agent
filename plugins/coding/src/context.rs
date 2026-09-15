@@ -537,23 +537,40 @@ pub(crate) async fn context(
             projected = project_records(&history.records)?;
         }
     }
+    let mut system = format!(
+        "You are eden, a coding assistant. Work in {}. Use the available tools to inspect, \
+         change and verify the project. Report observed results accurately. Tool failures \
+         are evidence to address; do not claim unexecuted checks passed.",
+        input.cwd
+    );
+    if let Some(resources) = &input.resources {
+        if let Some(replacement) = &resources.system {
+            system.clone_from(replacement);
+        }
+        system.push_str("\n\n");
+        system.push_str(&resources.append_system);
+        system.push_str(&resources.instructions);
+        for skill in resources
+            .skills
+            .iter()
+            .filter(|skill| skill.model_invocable)
+        {
+            system.push_str(&format!(
+                "\nAvailable skill {}: {}. Use the skill tool to load its instructions on demand.",
+                skill.name, skill.description
+            ));
+        }
+    }
     let mut items = vec![Item::Message {
         role: "system".into(),
-        content: vec![Block::Text {
-            text: format!(
-                "You are eden, a coding assistant. Work in {}. Use read, write, edit and bash to \
-                 inspect, change and verify the project. Report observed results accurately. \
-                 Tool failures are evidence to address; do not claim unexecuted checks passed.",
-                input.cwd
-            ),
-        }],
+        content: vec![Block::Text { text: system }],
     }];
     items.extend(projected);
     items.extend(extension_items);
     Ok(ModelInput {
         max_output_tokens: None,
         items,
-        tools: tools(),
+        tools: input.tools.unwrap_or_else(tools),
     })
 }
 

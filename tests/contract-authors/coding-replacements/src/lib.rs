@@ -361,6 +361,25 @@ struct Storage {
 impl Storage {
     fn request(&mut self, request: StoreRequest) -> Result<StoreReply, Fault> {
         match request {
+            StoreRequest::RestoreMemory {
+                session_id,
+                records,
+            } => {
+                if self.open {
+                    return Err(fault("already open"));
+                }
+                eden_plugin_sdk::protocol::history::validate_records(&records)?;
+                if records
+                    .iter()
+                    .any(|record| record.schema_version != 2 || record.session_id != session_id)
+                {
+                    return Err(fault("memory restore identity mismatch"));
+                }
+                self.records = records;
+                self.id = session_id;
+                self.open = true;
+                self.failed = false;
+            }
             StoreRequest::Open { path, session_id } => {
                 if self.open {
                     return Err(fault("already open"));

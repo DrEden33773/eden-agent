@@ -591,7 +591,7 @@ mod tests {
     }
     #[test]
     fn manual_compaction_of_short_transcript_keeps_every_original_message() {
-        let mut path = vec![
+        let path = vec![
             record(
                 1,
                 "message",
@@ -609,15 +609,14 @@ mod tests {
             ),
         ];
         let original = project_records(&path).unwrap();
+        // The caller commits a compaction only for a positive cut, so the
+        // falsifiable claim here is that this transcript has no compactable
+        // prefix at all. A cut of zero is what keeps every recent message.
         let cut = compaction_cut(&path, "compact", &Settings::default()).unwrap();
-        if cut > 0 {
-            let first_kept = path.get(cut).map_or(0, |r| r.sequence);
-            path.push(record(
-                3,
-                "compaction",
-                json!({"summary":"summary","first_kept":first_kept}),
-            ));
-        }
+        assert_eq!(
+            cut, 0,
+            "a short transcript must have no compactable prefix, not one that replaces recent messages"
+        );
         let projected = project_records(&path).unwrap();
         for item in original {
             assert!(
@@ -625,6 +624,36 @@ mod tests {
                 "manual compaction lost recent original item"
             );
         }
+    }
+    #[test]
+    fn summarized_attachment_is_not_projected_back_to_the_provider() {
+        let path = vec![
+            record(
+                1,
+                "message",
+                json!(Item::Message {
+                    role: "user".into(),
+                    content: vec![
+                        Block::Image {
+                            media_type: "image/png".into(),
+                            data: "summarizedattachmentbytes".into(),
+                        },
+                        Block::Text {
+                            text: "old attached goal".into(),
+                        },
+                    ],
+                }),
+            ),
+            record(2, "message", json!(text_item("recent work".into()))),
+            record(3, "compaction", json!({"summary":"summary","first_kept":2})),
+        ];
+        let projected = project_records(&path).unwrap();
+        let text = serde_json::to_string(&projected).unwrap();
+        assert!(
+            !text.contains("summarizedattachmentbytes"),
+            "an attachment replaced by the summary must not be sent again"
+        );
+        assert!(text.contains("recent work"), "{text}");
     }
     #[test]
     fn invalid_compaction_cut_cannot_silently_hide_conversation() {

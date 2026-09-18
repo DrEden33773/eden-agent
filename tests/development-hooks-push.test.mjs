@@ -64,6 +64,44 @@ test("standalone author crates participate in formatting and Clippy hooks", (t) 
   assert.match(result.stdout + result.stderr, /unused variable/);
 });
 
+test("pre-push checks every independent author manifest, including the last one", (t) => {
+  const root = fixture(t);
+  const authors = ["author-a", "author-b", "author-c", "author-d"];
+  for (const name of authors) {
+    const author = join(root, "tests", "contract-authors", name);
+    mkdirSync(join(author, "src"), { recursive: true });
+    writeFileSync(
+      join(author, "Cargo.toml"),
+      `[package]\nname = "${name}"\nversion = "0.1.0"\nedition = "2024"\n[workspace]\n`,
+    );
+    writeFileSync(
+      join(author, "Cargo.lock"),
+      `version = 4\n\n[[package]]\nname = "${name}"\nversion = "0.1.0"\n`,
+    );
+    // The last manifest carries the lint error, so a traversal that stops after
+    // any earlier author accepts a push it must reject.
+    writeFileSync(
+      join(author, "src/lib.rs"),
+      name === authors.at(-1)
+        ? "pub fn value() -> u32 {\n    let unused = 4;\n    4\n}\n"
+        : "pub fn value() -> u32 {\n    1\n}\n",
+    );
+  }
+  git(root, "add", "tests");
+  git(root, "commit", "-m", "four independent authors");
+  const remote = mkdtempSync(join(tmpdir(), "eden-hooks-remote-"));
+  t.after(() => rmSync(remote, { recursive: true, force: true }));
+  git(remote, "init", "--bare");
+  const result = command(root, "git", ["push", remote, "main:refs/heads/topic"]);
+  const output = result.stdout + result.stderr;
+  assert.notEqual(result.status, 0, "push accepted an unchecked independent author");
+  for (const name of authors) {
+    assert.match(output, new RegExp(`clippy: tests/contract-authors/${name}/Cargo.toml`));
+  }
+  assert.match(output, /unused variable/);
+  assert.equal(git(remote, "for-each-ref", "--format=%(refname)", "refs/heads/topic"), "");
+});
+
 test("pre-push accepts committed code despite dirty staged and worktree files, and skips deletions", (t) => {
   const root = fixture(t);
   const remote = mkdtempSync(join(tmpdir(), "eden-hooks-remote-"));

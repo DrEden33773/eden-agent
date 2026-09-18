@@ -6,8 +6,8 @@
 //! cleanup failure.
 #![cfg(unix)]
 
-use std::path::Path;
-use std::time::Duration;
+use std::{path::Path, time::Duration};
+use tokio::io::AsyncReadExt;
 
 /// Pids whose pgid equals `group` and that can still run, read straight from
 /// `/proc` so the test observes liveness independently of the implementation.
@@ -91,50 +91,157 @@ async fn spawn(command: &str) -> (tokio::process::Child, crate::Tree, i32) {
     .await
     .expect("spawn shell");
     let group = child.id().expect("shell pid") as i32;
-    let _ = child.stdout.take();
-    let _ = child.stderr.take();
+    // The product drains both streams. Keep that reader alive here as well: a
+    // shell diagnostic about a signalled descendant must not kill the leader
+    // itself with SIGPIPE and turn a cleanup assertion into a stream artifact.
+    if let Some(stdout) = child.stdout.take() {
+        tokio::spawn(drain(stdout));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        tokio::spawn(drain(stderr));
+    }
     (child, tree, group)
+}
+
+/// Read a shell stream to its end so its writer never lacks a reader.
+async fn drain(mut stream: impl tokio::io::AsyncRead + Unpin) {
+    let mut sink = Vec::new();
+    let _ = stream.read_to_end(&mut sink).await;
+}
+
+/// A probe process that joined the stopped group, killed when the test ends.
+///
+/// The joiner outlives the group on purpose, so every exit path, including a
+/// panic, must reap it instead of leaving a process behind for its lifetime.
+struct Joiner(std::process::Child);
+impl Joiner {
+    fn spawn(group: i32) -> Self {
+        use std::os::unix::process::CommandExt;
+        Self(
+            std::process::Command::new("sleep")
+                .arg("60")
+                .process_group(group)
+                .spawn()
+                .expect("a process can join the group of an unreaped leader"),
+        )
+    }
+    fn id(&self) -> u32 {
+        self.0.id()
+    }
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.0.try_wait()
+    }
+}
+impl Drop for Joiner {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// A file marker removed when the test ends either way.
+///
+/// The shell creates one marker after it really forked its descendant and then
+/// blocks on another until the test releases it. The leader therefore stays
+/// alive, with a live descendant, while the completion-path cleanup below runs:
+/// a cleanup that signalled the leader instead of only its descendants would
+/// kill it and the shell would report no exit code at all.
+struct Marker(std::path::PathBuf);
+impl Marker {
+    fn new(label: &str) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        Self(std::env::temp_dir().join(format!(
+            "eden-process-{label}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        )))
+    }
+    /// Shell fragment that creates this marker.
+    fn create(&self) -> String {
+        format!("echo ready > '{}'", self.0.display())
+    }
+    /// Shell fragment that blocks until [`Marker::open`] runs.
+    fn block(&self) -> String {
+        format!("while [ ! -e '{}' ]; do sleep 0.05; done", self.0.display())
+    }
+    fn open(&self) {
+        std::fs::write(&self.0, b"released\n").expect("release the leader");
+    }
+    /// Wait until the shell reports that its descendant exists.
+    async fn created(&self) {
+        for _ in 0..300 {
+            if self.0.exists() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("{} was not created within the deadline", self.0.display());
+    }
+}
+impl Drop for Marker {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 /// The completion-path action must not change the leader's own exit status.
 ///
-/// A live descendant keeps the group alive after the leader is reaped, which is
-/// exactly the state in which the old group-wide signal ran. The leader's own
-/// reported status must survive it and must survive the settle barrier.
+/// A live descendant keeps the group alive while the leader is still running,
+/// which is exactly the state in which the old group-wide signal ran. The
+/// leader's own reported status must survive cleanup, because `status.code()`
+/// cannot change after the fact: only killing the leader would remove the code.
 #[tokio::test]
 async fn descendant_cleanup_preserves_the_leaders_own_exit_status() {
-    let (mut child, tree, group) = spawn("sleep 300 & exit 7").await;
+    let ready = Marker::new("leader-exit-status");
+    let release = Marker::new("leader-exit-status-release");
+    let command = format!(
+        "sleep 300 & {}; {}; exit 7",
+        ready.create(),
+        release.block()
+    );
+    let (mut child, tree, group) = spawn(&command).await;
+    ready.created().await;
+    tree.cleanup_descendants()
+        .expect("cleanup descendants while the leader is alive");
+    release.open();
     let status = wait_for_shell(&mut child, "leader").await;
     assert_eq!(
         status.code(),
         Some(7),
-        "leader did not report its exit code"
+        "completion cleanup signalled the leader instead of its descendants only"
     );
     let stop = crate::Stop::complete(&status);
     assert_eq!(stop.exit_code, Some(7));
     assert_eq!(stop.termination, None);
-    // The descendant usually still holds the group once the leader is reaped,
-    // so cleanup has real work to do. `sleep` may also be scheduled after the
-    // leader exited, which is the same race the group tolerates.
-    tree.cleanup_descendants().expect("cleanup descendants");
     within("settle", tree.settle()).await.expect("settle");
     assert_group_stopped(group, "descendants survived the barrier");
-    // Re-reading the same status must still report the leader's own code.
-    assert_eq!(status.code(), Some(7));
 }
 
 /// The completion-path action leaves the leader alone, so repeating it is safe
 /// and never converts a completed command into a signalled one.
 #[tokio::test]
 async fn descendant_cleanup_is_repeatable_and_leader_safe() {
-    let (mut child, tree, group) = spawn("sleep 300 & exit 0").await;
-    let status = wait_for_shell(&mut child, "leader").await;
-    assert_eq!(status.code(), Some(0));
-    for _ in 0..3 {
-        tree.cleanup_descendants().expect("cleanup descendants");
+    let ready = Marker::new("repeatable-cleanup");
+    let release = Marker::new("repeatable-cleanup-release");
+    let command = format!(
+        "sleep 300 & {}; {}; exit 0",
+        ready.create(),
+        release.block()
+    );
+    let (mut child, tree, group) = spawn(&command).await;
+    ready.created().await;
+    for round in 0..3 {
+        tree.cleanup_descendants()
+            .unwrap_or_else(|error| panic!("round {round} cleanup: {}", error.message));
     }
+    release.open();
+    let status = wait_for_shell(&mut child, "leader").await;
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "repeated completion cleanup signalled the leader instead of its descendants only"
+    );
     within("settle", tree.settle()).await.expect("settle");
-    assert_eq!(status.code(), Some(0));
     assert_group_stopped(group, "descendants survived cleanup");
 }
 
@@ -185,12 +292,37 @@ async fn group_termination_stops_the_leader_and_descendants() {
 
 /// A hard group stop is idempotent, so a repeated call cannot signal a recycled
 /// group id belonging to an unrelated process.
+///
+/// After the first stop the unreaped leader keeps this group id alive, so a new
+/// unrelated process can really join it. That member is what a second, unguarded
+/// group signal would kill; only the recorded stop keeps it untouched.
 #[tokio::test]
 async fn group_termination_is_idempotent() {
     let (mut child, tree, group) = spawn("sleep 300 & wait").await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     tree.terminate_group().expect("first terminate");
+    let mut joiner = Joiner::spawn(group);
+    // SAFETY: getpgid only queries a numeric process id.
+    let joiner_group = unsafe { libc::getpgid(joiner.id() as i32) };
+    assert_eq!(
+        joiner_group, group,
+        "the probe process must really be a member of the stopped group"
+    );
     tree.terminate_group().expect("second terminate");
+    // Poll instead of sleeping once: a leaked signal would kill the probe
+    // immediately, and a probe that survives the whole window is the evidence.
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+    loop {
+        if let Some(status) = joiner.try_wait().expect("probe process") {
+            panic!(
+                "repeated group stop signalled a process that joined after the first stop: {status}"
+            );
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     let _ = wait_for_shell(&mut child, "stopped leader").await;
     within("settle", tree.settle()).await.expect("settle");
     assert_group_stopped(group, "group survived repeated termination");

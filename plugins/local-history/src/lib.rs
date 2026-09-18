@@ -263,39 +263,76 @@ fn acquire_lock(path: &std::path::Path) -> Result<File, Fault> {
     Ok(lock)
 }
 
-fn publish_new(path: &std::path::Path, bytes: &[u8]) -> Result<(), Fault> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
-    let parent = path
-        .parent()
-        .ok_or_else(|| fault("destination parent unavailable"))?;
-    let (temporary, mut file) = loop {
-        let temporary = parent.join(format!(
-            ".eden-history-{}-{}.tmp",
-            std::process::id(),
-            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-        ));
-        match OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary)
-        {
-            Ok(file) => break (temporary, file),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(io(error)),
+/// A synced private staging file whose final public name is still absent.
+///
+/// Drop removes the staging file on write and publication failures, including
+/// an unwinding panic, so a failed create cannot leave private temporary
+/// history beside the public file.
+struct PreparedHistory {
+    path: std::path::PathBuf,
+    cleanup: bool,
+}
+impl PreparedHistory {
+    fn write(destination: &std::path::Path, bytes: &[u8]) -> Result<Self, Fault> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+        let parent = destination
+            .parent()
+            .ok_or_else(|| fault("destination parent unavailable"))?;
+        let (prepared, mut file) = loop {
+            let path = parent.join(format!(
+                ".eden-history-{}-{}.tmp",
+                std::process::id(),
+                NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+            ));
+            match OpenOptions::new().create_new(true).write(true).open(&path) {
+                Ok(file) => {
+                    break (
+                        Self {
+                            path,
+                            cleanup: true,
+                        },
+                        file,
+                    );
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(io(error)),
+            }
+        };
+        let write = file.write_all(bytes).and_then(|_| file.sync_all());
+        drop(file);
+        write.map_err(io)?;
+        Ok(prepared)
+    }
+    fn publish(mut self, destination: &std::path::Path) -> Result<(), Fault> {
+        // A hard link exposes the complete synced bytes atomically and refuses
+        // an existing destination, which create must never replace.
+        std::fs::hard_link(&self.path, destination).map_err(io)?;
+        std::fs::remove_file(&self.path).map_err(io)?;
+        self.cleanup = false;
+        Ok(())
+    }
+}
+impl Drop for PreparedHistory {
+    fn drop(&mut self) {
+        if self.cleanup {
+            let _ = std::fs::remove_file(&self.path);
         }
-    };
-    let write = file.write_all(bytes).and_then(|_| file.sync_all());
-    drop(file);
-    let result = write.and_then(|_| std::fs::hard_link(&temporary, path));
-    let cleanup = std::fs::remove_file(&temporary);
-    result.map_err(io)?;
-    cleanup.map_err(io)?;
+    }
+}
+
+fn publish_new(path: &std::path::Path, bytes: &[u8]) -> Result<(), Fault> {
+    PreparedHistory::write(path, bytes)?.publish(path)?;
     // Persist the new directory entry where directory sync is available.
     #[cfg(unix)]
-    File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(io)?;
+    {
+        let parent = path
+            .parent()
+            .ok_or_else(|| fault("destination parent unavailable"))?;
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(io)?;
+    }
     Ok(())
 }
 
@@ -510,7 +547,37 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         assert!(Store::default().handle(request()).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        // A publication that cannot claim the public name must leave no staging
+        // file behind. The refused create above returns before staging runs, so
+        // the collision itself is exercised directly here.
+        let prepared = PreparedHistory::write(&path, b"staged\n").unwrap();
+        let staging = prepared.path.clone();
+        assert!(prepared.publish(&path).is_err());
+        assert!(
+            !staging.exists(),
+            "failed publication must remove its staging file"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
         clean(&path);
+    }
+    #[test]
+    fn abandoned_staging_history_is_removed_without_a_public_file() {
+        let directory =
+            std::env::temp_dir().join(format!("eden-store-drop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("history.jsonl");
+        let prepared = PreparedHistory::write(&path, b"staged\n").unwrap();
+        let staging = prepared.path.clone();
+        assert!(staging.is_file() && !path.exists());
+        drop(prepared);
+        assert!(
+            !staging.exists(),
+            "abandoned staging must not survive as private history"
+        );
+        assert!(!path.exists());
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+        std::fs::remove_dir_all(directory).unwrap();
     }
     fn clean(path: &std::path::Path) {
         let mut lock = path.as_os_str().to_owned();

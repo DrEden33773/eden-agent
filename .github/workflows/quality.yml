@@ -258,6 +258,9 @@ jobs:
       - name: Core and native process tests
         if: ${{ !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: node scripts/ci-run.mjs core cargo test --workspace --locked --no-fail-fast
+      - name: Independent author tests
+        if: ${{ !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        run: node scripts/ci-run.mjs authors pnpm rust:test:authors
       - name: Installed suites, independent authors and distribution
         if: ${{ !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: node scripts/ci-run.mjs installed python scripts/verify-all.py --workers 2 --output artifacts/verification

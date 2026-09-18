@@ -583,11 +583,14 @@ mod tests {
             }),
         }];
         let projected = project_records(&records).unwrap();
-        assert!(matches!(
-            &projected[0],
-            Item::Message { content, .. }
-                if matches!(&content[0], Block::Text { text } if text.contains("unknown"))
-        ));
+        let Item::Message { content, .. } = &projected[0] else {
+            panic!("an interrupted intent must project as context, not as work");
+        };
+        let Block::Text { text } = &content[0] else {
+            panic!("the reopened context must be text");
+        };
+        assert!(text.contains("effects are unknown"), "{text}");
+        assert!(text.contains("It was not replayed."), "{text}");
     }
 }
 

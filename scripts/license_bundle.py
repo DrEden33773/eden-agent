@@ -26,9 +26,9 @@ class Fallback:
 
 
 FALLBACKS = {
-    ("cordis-core", "0.1.3"): Fallback(
-        ("third-party/cordis-core-0.1.3-LICENSE",),
-        "https://github.com/dshbox/cordis-rs/blob/fba0506191bfbc678d3646f338e42a94e0f6057b/LICENSE",
+    ("cordis-core", "0.2.10"): Fallback(
+        ("third-party/cordis-core-0.2.10-LICENSE",),
+        "https://github.com/dshbox/cordis-rs/blob/ba4babd73996b0c8821128e5a561e407ae2682b7/LICENSE",
     ),
     **dict.fromkeys(
         ((name, "0.10.6") for name in ("fff-search", "fff-grep", "fff-query-parser")),

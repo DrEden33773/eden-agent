@@ -4,9 +4,9 @@ The product is Apache-2.0. Dependencies retain their own licenses. Cargo.lock re
 
 ## Cordis
 
-Cordis core is distributed under MIT. Cargo.lock selects crates.io package `cordis-core 0.1.3`, published from revision `fba0506191bfbc678d3646f338e42a94e0f6057b`.
+Cordis core is distributed under MIT. Cargo.lock selects crates.io package `cordis-core 0.2.10`, published from revision `ba4babd73996b0c8821128e5a561e407ae2682b7`.
 
-The crates.io archive for 0.1.3 omits its license file. An unmodified copy is kept in `third-party/cordis-core-0.1.3-LICENSE` and packaged under `third-party-licenses/cordis-core-0.1.3/`, sourced from the [published revision's upstream LICENSE](https://github.com/dshbox/cordis-rs/blob/fba0506191bfbc678d3646f338e42a94e0f6057b/LICENSE). The packaging fallback applies only to this package version.
+The crates.io archive for 0.2.10 omits its license file. An unmodified copy is kept in `third-party/cordis-core-0.2.10-LICENSE` and packaged under `third-party-licenses/cordis-core-0.2.10/`, sourced from the [published revision's upstream LICENSE](https://github.com/dshbox/cordis-rs/blob/ba4babd73996b0c8821128e5a561e407ae2682b7/LICENSE). The packaging fallback applies only to this package version.
 
 ## FFF search and native dependencies
 

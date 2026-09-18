@@ -47,7 +47,7 @@ jobs:
   cache-state:
     name: Build cache state (${{ matrix.os }})
     needs: prove
-    if: ${{ github.event_name == 'push' && needs.prove.outputs.verified == 'true' }}
+    if: ${{ !cancelled() && github.event_name == 'push' && needs.prove.outputs.verified == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -133,7 +133,7 @@ jobs:
   verdict:
     name: Decide whether the heavy jobs run
     needs: [prove, cache-state]
-    if: ${{ always() && github.event_name == 'push' }}
+    if: ${{ !cancelled() && github.event_name == 'push' }}
     runs-on: ubuntu-24.04
     outputs:
       heavy: ${{ steps.decide.outputs.heavy }}
@@ -154,7 +154,9 @@ jobs:
   lint:
     name: Static checks and scope
     needs: [prove, verdict]
-    if: ${{ github.event_name != 'push' || needs.verdict.outputs.heavy != 'false' }}
+    # A skipped proof or verdict must not skip the heavy jobs: `!cancelled()`
+    # keeps this job eligible when a needed job was skipped for a non-push event.
+    if: ${{ !cancelled() && (github.event_name != 'push' || needs.verdict.outputs.heavy != 'false') }}
     runs-on: ubuntu-24.04
     outputs:
       native: ${{ steps.scope.outputs.native }}

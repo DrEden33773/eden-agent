@@ -45,7 +45,11 @@ export function resolveHead(number, root = process.cwd()) {
 }
 
 /// Compare a landed commit's tree with the merge of the reviewed head.
-export function proof({ commit, message, head, root = process.cwd() }) {
+///
+/// `previous` is the tip the push started from. A squash merge is one commit,
+/// so that tip must be the landed commit's only parent; a push that carried
+/// more than one commit cannot be proven this way.
+export function proof({ commit, message, head, previous, root = process.cwd() }) {
   if (!COMMIT.test(commit ?? "")) return reject("no exact main commit to prove");
   if (pullRequestFromSubject(message ?? "") === null)
     return reject("commit subject carries no pull request number");
@@ -54,6 +58,11 @@ export function proof({ commit, message, head, root = process.cwd() }) {
   if (parents.length !== 2)
     return reject(`${commit} has ${parents.length - 1} parents, not a squash commit`);
   const [base] = parents.slice(1);
+  if (previous !== base)
+    return reject(
+      `push started from ${previous || "an unknown commit"}, not from the landed parent ${base}`,
+      { base, head },
+    );
   const landed = git(["rev-parse", `${commit}^{tree}`], root).stdout;
   const merged = git(["merge-tree", "--write-tree", base, head], root);
   const [tree = ""] = merged.stdout.split("\n");
@@ -75,34 +84,36 @@ export function proof({ commit, message, head, root = process.cwd() }) {
 }
 
 /// Prove the landed main commit named by the workflow environment.
-export function proveLanded({ commit, message, root = process.cwd() }) {
+export function proveLanded({ commit, message, previous, root = process.cwd() }) {
   const number = pullRequestFromSubject(message ?? "");
   if (number === null || !COMMIT.test(commit ?? ""))
-    return proof({ commit, message, head: "", root });
+    return proof({ commit, message, head: "", previous, root });
   let head;
   try {
     head = resolveHead(number, root);
   } catch (error) {
-    return reject(error.message, { pull_request: number });
+    // The reason is a GitHub output value, so it must stay on one line.
+    return reject(error.message.replaceAll(/\s+/g, " ").trim(), { pull_request: number });
   }
-  return { pull_request: number, ...proof({ commit, message, head, root }) };
+  return { pull_request: number, ...proof({ commit, message, head, previous, root }) };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const commit = process.env.PROOF_COMMIT ?? "";
   const message = git(["show", "-s", "--format=%B", commit], process.cwd()).stdout;
   const receipt = {
-    comparison: "landed tree equals the merge of the reviewed pull request head",
+    comparison:
+      "landed tree equals the merge of the head currently published at refs/pull/<n>/head",
     not_a_verification: "tree equivalence is not a re-run of the checks that passed on the merge",
-    ...proveLanded({ commit, message }),
+    ...proveLanded({ commit, message, previous: process.env.PROOF_PREVIOUS }),
   };
   mkdirSync("artifacts/ci", { recursive: true });
   writeFileSync("artifacts/ci/tree-proof.json", `${JSON.stringify(receipt, null, 2)}\n`);
   if (process.env.GITHUB_OUTPUT) {
-    appendFileSync(
-      process.env.GITHUB_OUTPUT,
-      `verified=${receipt.verified}\nreason=${receipt.reason}\n`,
-    );
+    // A failure reason can embed multi-line git output, which the runner rejects
+    // as an output value; the receipt keeps the original text.
+    const reason = receipt.reason.replaceAll(/\s+/g, " ").trim();
+    appendFileSync(process.env.GITHUB_OUTPUT, `verified=${receipt.verified}\nreason=${reason}\n`);
   }
   console.log(JSON.stringify(receipt));
 }

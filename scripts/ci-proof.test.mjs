@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { proof, proveLanded, pullRequestFromSubject, resolveHead } from "./ci-proof.mjs";
+import { fileURLToPath } from "node:url";
+import { proof, pullRequestFromSubject, resolveHead } from "./ci-proof.mjs";
 
 function git(cwd, ...args) {
   const result = spawnSync("git", args, { cwd, encoding: "utf8" });
@@ -47,6 +48,7 @@ test("a squashed commit proves equal to the merge of its reviewed head", () => {
       {
         verified: true,
         reason: "tree equals the verified merge",
+        previous: base,
         base,
         head,
         landed_tree: merged,
@@ -136,24 +138,30 @@ test("subjects without a reference and non-squash commits are not proven", () =>
 
 test("an unreachable head is reported on a single output line", () => {
   const root = mkdtempSync(join(tmpdir(), "eden-ci-proof-"));
+  const output = join(root, "github-output.txt");
   try {
     git(root, "init", "-q", "-b", "main");
     git(root, "config", "user.name", "CI proof fixture");
     git(root, "config", "user.email", "fixture@example.invalid");
     writeFileSync(join(root, "README.md"), "fixture\n");
-    const base = commit(root, "base");
+    const base = commit(root, "Feature (#21)");
     git(root, "remote", "add", "origin", join(root, "absent-remote"));
-    const result = proveLanded({
-      commit: base,
-      message: "Feature (#21)",
-      previous: base,
-      root,
-    });
-    assert.equal(result.verified, false);
-    // The runner rejects a multi-line output value, so the reason must not
-    // contain the newlines git puts in its failure text.
-    assert.doesNotMatch(result.reason, /\n/);
-    assert.match(result.reason, /pull\/21\/head/);
+    const result = spawnSync(
+      process.execPath,
+      [fileURLToPath(new URL("./ci-proof.mjs", import.meta.url))],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: { ...process.env, PROOF_COMMIT: base, PROOF_PREVIOUS: base, GITHUB_OUTPUT: output },
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    // The runner rejects a multi-line output value, so the two lines the step
+    // writes must be the complete output even though git's failure text is not.
+    const lines = readFileSync(output, "utf8").trimEnd().split("\n");
+    assert.equal(lines.length, 2);
+    assert.equal(lines[0], "verified=false");
+    assert.match(lines[1], /^reason=cannot fetch .*pull\/21\/head/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

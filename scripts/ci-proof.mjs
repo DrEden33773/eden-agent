@@ -76,6 +76,7 @@ export function proof({ commit, message, head, previous, root = process.cwd() })
     verified: tree === landed,
     reason:
       tree === landed ? "tree equals the verified merge" : "tree differs from the verified merge",
+    previous,
     base,
     head,
     landed_tree: landed,
@@ -92,8 +93,7 @@ export function proveLanded({ commit, message, previous, root = process.cwd() })
   try {
     head = resolveHead(number, root);
   } catch (error) {
-    // The reason is a GitHub output value, so it must stay on one line.
-    return reject(error.message.replaceAll(/\s+/g, " ").trim(), { pull_request: number });
+    return reject(error.message, { pull_request: number });
   }
   return { pull_request: number, ...proof({ commit, message, head, previous, root }) };
 }
@@ -111,7 +111,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   writeFileSync("artifacts/ci/tree-proof.json", `${JSON.stringify(receipt, null, 2)}\n`);
   if (process.env.GITHUB_OUTPUT) {
     // A failure reason can embed multi-line git output, which the runner rejects
-    // as an output value; the receipt keeps the original text.
+    // as an output value. The receipt keeps the original text.
     const reason = receipt.reason.replaceAll(/\s+/g, " ").trim();
     appendFileSync(process.env.GITHUB_OUTPUT, `verified=${receipt.verified}\nreason=${reason}\n`);
   }

@@ -37,33 +37,42 @@ pub async fn command(
         Ok(String::from_utf8_lossy(&output).into_owned())
     }
     let wait = async {
-        let (status, cancelled) = tokio::select! {
-                status=child.wait()=>(status,
-                false),
-                _=cancel.cancelled()=>{
-                tree.terminate()?;
-                (child.wait().await,
-                true)
-        }
+        // Same contract as the shell tool: completion reads the leader's own
+        // status and then only clears descendants that outlived it, while
+        // cancellation stops the whole domain and records that decision
+        // explicitly.
+        let (stop, status, cancelled) = tokio::select! {
+            status = child.wait() => {
+                let status = status.map_err(io)?;
+                let stop = eden_process::Stop::complete(&status);
+                tree.cleanup_descendants()?;
+                (stop, status, false)
+            }
+            _ = cancel.cancelled() => {
+                tree.terminate_group()?;
+                let status = child.wait().await.map_err(io)?;
+                (eden_process::Stop::stopped(&status), status, true)
+            }
         };
-        tree.terminate()?;
         tree.settle().await?;
-        Ok::<_, Fault>((status.map_err(io)?, cancelled))
+        Ok::<_, Fault>((stop, status, cancelled))
     };
-    let (status, stdout, stderr) = tokio::join!(wait, capture(stdout), capture(stderr));
-    let (status, cancelled) = status?;
+    let (waited, stdout, stderr) = tokio::join!(wait, capture(stdout), capture(stderr));
+    let (_stop, status, cancelled) = waited?;
     let stdout = stdout?;
     let stderr = stderr?;
     if cancelled {
         return Err(error("Cancelled", "package command stopped"));
     }
-    if !status.success() {
-        return Err(error(
-            "BuildFailure",
-            format!("{executable} exited {status}: {stdout}\n{stderr}"),
-        ));
+    if status.success() {
+        return Ok(stdout);
     }
-    Ok(stdout)
+    // A cancelled command is reported above; this branch keeps the outcome
+    // text every other unsuccessful status already produced.
+    Err(error(
+        "BuildFailure",
+        format!("{executable} exited {status}: {stdout}\n{stderr}"),
+    ))
 }
 pub async fn prepare(
     source: &Source,

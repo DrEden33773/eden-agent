@@ -387,24 +387,40 @@ async fn shell_command(
         .take()
         .ok_or_else(|| fault("ToolFailure", "stderr pipe missing"))?;
     let wait = async {
-        let (status, cancelled) = tokio::select! {
-            status = child.wait() => (status, false),
+        // Two clearly separated outcomes. Completion reads the leader's own
+        // terminal status and then only clears descendants that outlived it;
+        // cancellation stops the whole domain and reports that decision
+        // explicitly. Neither path lets cleanup rewrite the leader's status.
+        let (stop, status, cancelled) = tokio::select! {
+            status = child.wait() => {
+                let status =
+                    status.map_err(|error| fault("ToolFailure", error.to_string()))?;
+                let stop = eden_process::Stop::complete(&status);
+                // Foreground completion cannot leave background children
+                // holding pipes or continuing file writes after the tool result
+                // has been committed. The leader is already reaped, and this
+                // action never signals it again.
+                tree.cleanup_descendants()?;
+                (stop, status, false)
+            }
             _ = cancellation.cancelled() => {
-                tree.terminate()?;
-                (child.wait().await, true)
+                tree.terminate_group()?;
+                let status = child
+                    .wait()
+                    .await
+                    .map_err(|error| fault("ToolFailure", error.to_string()))?;
+                // The caller's decision is recorded explicitly, so an absent
+                // exit code can no longer be read as a signal death. A status
+                // the command had already produced is still kept below.
+                let stop = eden_process::Stop::stopped(&status);
+                (stop, status, true)
             }
         };
-        // Foreground completion cannot leave background children holding pipes
-        // or continuing file writes after the tool result has been committed.
-        tree.terminate()?;
         tree.settle().await?;
-        Ok::<_, Fault>((
-            status.map_err(|error| fault("ToolFailure", error.to_string()))?,
-            cancelled,
-        ))
+        Ok::<_, Fault>((stop, status, cancelled))
     };
     let (waited, stdout, stderr) = tokio::join!(wait, capture(stdout), capture(stderr));
-    let (status, cancelled) = waited?;
+    let (stop, status, cancelled) = waited?;
     let (stdout, out_truncated) = stdout.map_err(file_error)?;
     let (stderr, err_truncated) = stderr.map_err(file_error)?;
     let mut text = String::from_utf8_lossy(&stdout).into_owned();
@@ -412,13 +428,15 @@ async fn shell_command(
         text.push_str("\n[stderr]\n");
         text.push_str(&String::from_utf8_lossy(&stderr));
     }
-    let mut result = output(text, status.code(), out_truncated || err_truncated);
+    let mut result = output(text, stop.exit_code, out_truncated || err_truncated);
     result.error = if cancelled {
         Some(fault(
             "Cancelled",
             "shell command cancelled; process tree stopped",
         ))
     } else if !status.success() {
+        // The rendered status names the exit code or the stopping signal, so
+        // this stays the exact outcome text callers already saw.
         Some(fault("ShellExit", format!("shell exited with {status}")))
     } else {
         None

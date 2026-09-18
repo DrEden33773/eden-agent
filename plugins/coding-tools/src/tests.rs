@@ -248,6 +248,38 @@ fn assert_closed(result: std::io::Result<usize>) {
     }
 }
 
+/// Prove the owned connection is closed using a nonblocking OS read.
+///
+/// `into_std` preserves the fd's nonblocking flag, so a single read can report
+/// `WouldBlock` merely because the peer's FIN has not arrived yet. `WouldBlock`
+/// is therefore retried until the deadline; any other outcome is judged once.
+/// A premature tool result would keep the connection open for the full deadline
+/// and still fail, so this cannot mask one.
+#[cfg(unix)]
+fn assert_closed_now(mut socket: std::net::TcpStream) {
+    use std::io::{ErrorKind, Read};
+    socket
+        .set_nonblocking(true)
+        .expect("set socket nonblocking");
+    let mut byte = [0u8; 1];
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match socket.read(&mut byte) {
+            Ok(0) => return,
+            Ok(read) => panic!("owned connection still delivered {read} byte(s)"),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "owned connection did not close before the deadline"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            Err(error) => panic!("owned connection did not close: {error:?}"),
+        }
+    }
+}
+
 // The shell and its background child inherit the socket; closure proves resource
 // release. Process settlement is enforced by the group/job exit barriers.
 #[tokio::test]
@@ -386,11 +418,7 @@ async fn cancelled_descendant_with_closed_stdio_has_exited_before_result() {
         .unwrap()
         .unwrap();
     assert_eq!(result.error.unwrap().code, "Cancelled");
-    // Use the socket's nonblocking OS read directly: waiting here would let a
-    // premature tool result hide behind a later descendant exit.
-    let socket = socket.into_std().unwrap();
-    use std::io::Read;
-    assert_eq!((&socket).read(&mut byte).unwrap(), 0);
+    assert_closed_now(socket.into_std().unwrap());
 }
 
 #[cfg(unix)]
@@ -426,7 +454,5 @@ async fn foreground_exit_waits_for_descendant_that_closed_stdio() {
         .unwrap();
     assert_eq!(result.exit_code, Some(0));
     assert!(result.error.is_none(), "{result:?}");
-    let socket = socket.into_std().unwrap();
-    use std::io::Read;
-    assert_eq!((&socket).read(&mut byte).unwrap(), 0);
+    assert_closed_now(socket.into_std().unwrap());
 }

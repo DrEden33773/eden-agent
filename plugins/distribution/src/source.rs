@@ -37,30 +37,39 @@ pub async fn command(
         Ok(String::from_utf8_lossy(&output).into_owned())
     }
     let wait = async {
-        let (status, cancelled) = tokio::select! {
-                status=child.wait()=>(status,
-                false),
-                _=cancel.cancelled()=>{
-                tree.terminate()?;
-                (child.wait().await,
-                true)
-        }
+        // Same contract as the shell tool: completion reads the leader's own
+        // status and then only clears descendants that outlived it, while
+        // cancellation stops the whole domain and reports that decision.
+        let (stop, cancelled) = tokio::select! {
+            status = child.wait() => {
+                let status = status.map_err(io)?;
+                let stop = eden_process::Stop::complete(&status);
+                tree.cleanup_descendants()?;
+                (stop, false)
+            }
+            _ = cancel.cancelled() => {
+                tree.terminate_group()?;
+                child.wait().await.map_err(io)?;
+                (eden_process::Stop::stopped(), true)
+            }
         };
-        tree.terminate()?;
         tree.settle().await?;
-        Ok::<_, Fault>((status.map_err(io)?, cancelled))
+        Ok::<_, Fault>((stop, cancelled))
     };
-    let (status, stdout, stderr) = tokio::join!(wait, capture(stdout), capture(stderr));
-    let (status, cancelled) = status?;
+    let (stop, stdout, stderr) = tokio::join!(wait, capture(stdout), capture(stderr));
+    let (stop, cancelled) = stop?;
     let stdout = stdout?;
     let stderr = stderr?;
     if cancelled {
         return Err(error("Cancelled", "package command stopped"));
     }
-    if !status.success() {
+    if stop.exit_code != Some(0) {
         return Err(error(
             "BuildFailure",
-            format!("{executable} exited {status}: {stdout}\n{stderr}"),
+            format!(
+                "{executable} exited {:?}: {stdout}\n{stderr}",
+                stop.exit_code
+            ),
         ));
     }
     Ok(stdout)

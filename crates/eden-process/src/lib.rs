@@ -1,4 +1,26 @@
 //! Platform process ownership. Every shell starts inside its cleanup domain.
+//!
+//! # Exit-status contract
+//!
+//! The process handed back is the *foreground leader* of an owned cleanup
+//! domain: on Unix its own process group, on Windows a job object. Only the
+//! leader's own exit status is ever reported to callers.
+//!
+//! Cleanup never rewrites that status:
+//!
+//! - [`Tree::cleanup_descendants`] is the completion-path action. It signals
+//!   descendants that are still alive and deliberately excludes the leader, so
+//!   finishing a command can never turn the leader's real exit code into a
+//!   signal death.
+//! - [`Tree::terminate_group`] is the cancellation-path action. It stops the
+//!   whole domain, leader included, and exists only because a cancelled command
+//!   may still be running. Callers reach it after deciding that the command
+//!   must not continue, and report that decision explicitly through
+//!   [`Stop::termination`] instead of inferring it from a missing exit code.
+//!
+//! A member that exits while cleanup enumerates it is a normal race, not a
+//! failure: enumeration reports the surviving members and never fails because
+//! one of them finished first.
 fn fault(code: &str, message: impl Into<String>) -> Fault {
     Fault::new(code, "process", message)
 }
@@ -7,6 +29,45 @@ mod unix_exit;
 use eden_plugin_sdk::protocol::Fault;
 use std::{path::Path, process::Stdio};
 use tokio::process::{Child, Command};
+
+/// Who asked for a termination, so callers classify an outcome explicitly
+/// instead of guessing from a missing exit code.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Termination {
+    /// The tool's caller cancelled the operation.
+    Requested,
+}
+
+/// Why a process domain stopped.
+///
+/// `exit_code` is `Some` exactly when the leader itself exited normally.
+/// `termination` is `Some` exactly when this module stopped the domain because
+/// a caller asked for it. A leader that died by signal with no requested
+/// termination was stopped by something outside this module and is reported as
+/// that, rather than being folded into normal completion or our own cleanup.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Stop {
+    pub exit_code: Option<i32>,
+    pub termination: Option<Termination>,
+}
+
+impl Stop {
+    /// Classify a completion-path status: only the leader decided it.
+    pub fn complete(status: &std::process::ExitStatus) -> Self {
+        Self {
+            exit_code: status.code(),
+            termination: None,
+        }
+    }
+    /// Classify a status observed after a requested termination. The exit code
+    /// belongs to our own stop, so none is claimed and none is inferred.
+    pub fn stopped() -> Self {
+        Self {
+            exit_code: None,
+            termination: Some(Termination::Requested),
+        }
+    }
+}
 
 pub async fn spawn(shell: &str, args: &[&str], cwd: &Path) -> Result<(Child, Tree), Fault> {
     #[cfg(windows)]
@@ -77,27 +138,30 @@ pub use platform::Tree;
 #[cfg(unix)]
 mod platform {
     use super::*;
-    use crate::unix_exit::{Observer, observe};
+    use crate::unix_exit::observe;
     pub struct Tree {
-        pid: i32,
-        terminated: std::sync::atomic::AtomicBool,
-        observers: std::sync::Mutex<Vec<Observer>>,
+        /// Process group id, which equals the leader's pid because the shell is
+        /// created with `process_group(0)`.
+        group: i32,
+        /// Set once the whole group has been stopped, so a repeated hard stop
+        /// cannot signal an unrelated recycled id a second time.
+        stopped: std::sync::atomic::AtomicBool,
     }
     pub(crate) fn configure(command: &mut Command) {
         command.process_group(0);
     }
     pub(crate) fn attach(child: &Child) -> Result<Tree, Fault> {
-        let pid = child
+        let group = child
             .id()
             .and_then(|pid| i32::try_from(pid).ok())
             .ok_or_else(|| fault("ToolFailure", "shell process id unavailable"))?;
         Ok(Tree {
-            pid,
-            terminated: std::sync::atomic::AtomicBool::new(false),
-            observers: std::sync::Mutex::new(Vec::new()),
+            group,
+            stopped: std::sync::atomic::AtomicBool::new(false),
         })
     }
-    fn signal(group: i32) -> Result<(), Fault> {
+    /// Signal every live member of the owned group, leader included.
+    fn signal_group(group: i32) -> Result<(), Fault> {
         // SAFETY: The child was created as its own group leader. A negative PID
         // targets that owned group; SIGKILL has no borrowed memory.
         if unsafe { libc::kill(-group, libc::SIGKILL) } == 0 {
@@ -113,46 +177,73 @@ mod platform {
             ))
         }
     }
+    /// Signal the listed survivors individually. The leader is never in this
+    /// list, so no signal used for completion can reach a status already read.
+    fn signal_members(survivors: &[i32]) -> Result<(), Fault> {
+        for member in survivors {
+            // SAFETY: A positive PID targets exactly that process. A member
+            // that exited since it was observed yields ESRCH, which is the
+            // expected race and means it is no longer a survivor.
+            if unsafe { libc::kill(*member, libc::SIGKILL) } == 0 {
+                continue;
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                continue;
+            }
+            return Err(fault(
+                "CleanupFailure",
+                format!("cannot stop shell descendant {member}: {error}"),
+            ));
+        }
+        Ok(())
+    }
+    /// Live group members other than the leader.
+    fn descendants(group: i32) -> Result<Vec<i32>, Fault> {
+        Ok(observe(group)?
+            .into_iter()
+            .map(|member| member.pid())
+            .filter(|pid| *pid != group)
+            .collect())
+    }
     impl Tree {
-        pub fn terminate(&self) -> Result<(), Fault> {
-            if self.terminated.load(std::sync::atomic::Ordering::Relaxed) {
+        /// Stop the whole owned group, leader included.
+        ///
+        /// This is the cancellation-path action and the only method that may
+        /// signal the leader. Callers reach it only after deciding that the
+        /// command must not continue.
+        pub fn terminate_group(&self) -> Result<(), Fault> {
+            if self.stopped.load(std::sync::atomic::Ordering::Relaxed) {
                 return Ok(());
             }
-            // Register exit interest before sending a signal. Even observation
-            // failure must still attempt to stop the owned process group.
-            let observers = observe(self.pid);
-            let stopped = signal(self.pid);
+            let stopped = signal_group(self.group);
             if stopped.is_ok() {
-                self.terminated
+                self.stopped
                     .store(true, std::sync::atomic::Ordering::Relaxed);
             }
-            *self
-                .observers
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner()) = observers?;
             stopped
         }
+        /// Stop descendants that outlived the leader.
+        ///
+        /// This is the completion-path action. The leader is excluded, so a
+        /// command that already reported its own exit code keeps that code.
+        pub fn cleanup_descendants(&self) -> Result<(), Fault> {
+            signal_members(&descendants(self.group)?)
+        }
+        /// Wait until no member of the owned group is left alive.
         pub async fn settle(&self) -> Result<(), Fault> {
-            let group = self.pid;
-            let mut observers = std::mem::take(
-                &mut *self
-                    .observers
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner()),
-            );
+            let group = self.group;
             tokio::task::spawn_blocking(move || {
                 loop {
-                    for observer in observers {
-                        observer.wait()?;
-                    }
-                    // A descendant can fork while the original snapshot is
-                    // taken. Observe remaining live members after exit events,
-                    // signal that batch, and wait for their own exit events.
-                    observers = observe(group)?;
-                    if observers.is_empty() {
+                    let survivors = observe(group)?;
+                    if survivors.is_empty() {
                         return Ok(());
                     }
-                    signal(group)?;
+                    for member in survivors {
+                        // A member can exit between the snapshot and this wait.
+                        // That race is completion, not failure.
+                        member.wait()?;
+                    }
                 }
             })
             .await
@@ -161,8 +252,10 @@ mod platform {
     }
     impl Drop for Tree {
         fn drop(&mut self) {
-            if !self.terminated.load(std::sync::atomic::Ordering::Relaxed) {
-                let _ = signal(self.pid);
+            // The owner abandoned this tree, so the whole domain, leader
+            // included, must go.
+            if !self.stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = signal_group(self.group);
             }
         }
     }
@@ -191,16 +284,21 @@ mod platform {
                 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_BASIC_PROCESS_ID_LIST,
                 JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicProcessIdList,
                 JobObjectExtendedLimitInformation, QueryInformationJobObject,
-                SetInformationJobObject, TerminateJobObject,
+                SetInformationJobObject,
             },
             Threading::{
                 CREATE_SUSPENDED, INFINITE, OpenProcess, OpenThread,
-                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, ResumeThread,
-                THREAD_SUSPEND_RESUME, WaitForSingleObject,
+                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+                ResumeThread, THREAD_SUSPEND_RESUME, TerminateProcess, WaitForSingleObject,
             },
         },
     };
-    pub struct Tree(Arc<OwnedHandle>);
+    pub struct Tree {
+        job: Arc<OwnedHandle>,
+        /// The shell itself. Descendant cleanup excludes it so completing a
+        /// command can never rewrite the leader's own exit code.
+        leader: u32,
+    }
     fn win_error(action: &str) -> Fault {
         fault(
             "CleanupFailure",
@@ -247,11 +345,14 @@ mod platform {
         if unsafe { AssignProcessToJobObject(job.as_raw_handle(), process) } == 0 {
             return Err(win_error("assign suspended shell to job"));
         }
-        let tree = Tree(Arc::new(job));
-        let pid = child
+        let leader = child
             .id()
             .ok_or_else(|| fault("ToolFailure", "shell process id unavailable"))?;
-        resume_main_thread(pid)?;
+        let tree = Tree {
+            job: Arc::new(job),
+            leader,
+        };
+        resume_main_thread(leader)?;
         Ok(tree)
     }
     fn resume_main_thread(pid: u32) -> Result<(), Fault> {
@@ -326,66 +427,110 @@ mod platform {
             storage.resize(capacity.max(storage.len() * 2), 0);
         }
     }
-    impl Tree {
-        pub fn terminate(&self) -> Result<(), Fault> {
-            // SAFETY: This job contains only the shell and its descendants.
-            if unsafe { TerminateJobObject(self.0.as_raw_handle(), 1) } == 0 {
-                Err(win_error("terminate shell job"))
-            } else {
-                Ok(())
+    /// Open a job member, treating "already gone" as the normal exit race
+    /// rather than a cleanup failure.
+    fn open_member(pid: u32) -> Result<Option<OwnedHandle>, Fault> {
+        // SAFETY: OpenProcess returns an owned handle or null.
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_TERMINATE | PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                0,
+                pid,
+            )
+        };
+        if handle.is_null() {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
+                return Ok(None);
+            }
+            return Err(win_error("open shell job member"));
+        }
+        // SAFETY: The successful call transferred one unique live handle.
+        Ok(Some(unsafe { OwnedHandle::from_raw_handle(handle.cast()) }))
+    }
+    fn in_job(job: &OwnedHandle, process: &OwnedHandle) -> Result<bool, Fault> {
+        let mut member = 0;
+        // SAFETY: Both handles are live; the output is writable.
+        if unsafe { IsProcessInJob(process.as_raw_handle(), job.as_raw_handle(), &mut member) } == 0
+        {
+            return Err(win_error("verify shell job member"));
+        }
+        Ok(member != 0)
+    }
+    /// Terminate job members one at a time, optionally skipping the leader.
+    ///
+    /// `TerminateJobObject` is deliberately not used: it overwrites the exit
+    /// code of every member, including the leader, with the value passed to it,
+    /// which is exactly the class of status rewrite this contract forbids.
+    fn stop_members(tree: &Tree, include_leader: bool) -> Result<(), Fault> {
+        for pid in members(&tree.job)? {
+            let pid = u32::try_from(pid)
+                .map_err(|_| fault("CleanupFailure", "invalid shell process id"))?;
+            if !include_leader && pid == tree.leader {
+                continue;
+            }
+            // A member that exited between enumeration and open is the normal
+            // race and needs no signal.
+            let Some(process) = open_member(pid)? else {
+                continue;
+            };
+            if !in_job(&tree.job, &process)? {
+                continue;
+            }
+            // SAFETY: The handle has PROCESS_TERMINATE access and belongs to
+            // this job, which contains only the shell and its descendants.
+            if unsafe { TerminateProcess(process.as_raw_handle(), 1) } == 0 {
+                return Err(win_error("terminate shell job member"));
             }
         }
+        Ok(())
+    }
+    impl Tree {
+        /// Stop every member of the job, leader included.
+        ///
+        /// This is the cancellation-path action and the only method that may
+        /// stop the leader.
+        pub fn terminate_group(&self) -> Result<(), Fault> {
+            stop_members(self, true)
+        }
+        /// Stop job members other than the leader.
+        ///
+        /// This is the completion-path action. The leader is excluded, so a
+        /// command that already reported its own exit code keeps that code.
+        pub fn cleanup_descendants(&self) -> Result<(), Fault> {
+            stop_members(self, false)
+        }
         pub async fn settle(&self) -> Result<(), Fault> {
-            let job = self.0.clone();
+            let job = self.job.clone();
             tokio::task::spawn_blocking(move || {
                 // Completion-port exit messages are not guaranteed by Win32.
                 // Wait for live member handles, then confirm empty membership.
                 loop {
                     let pids = members(&job)?;
-                    if pids.is_empty() {
-                        return Ok(());
-                    }
+                    let mut waited = false;
                     for pid in pids {
                         let pid = u32::try_from(pid)
                             .map_err(|_| fault("CleanupFailure", "invalid shell process id"))?;
-                        // SAFETY: OpenProcess returns an owned handle; a stale id
-                        // is checked against this job before any wait occurs.
-                        let handle = unsafe {
-                            OpenProcess(
-                                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
-                                0,
-                                pid,
-                            )
+                        let Some(process) = open_member(pid)? else {
+                            continue;
                         };
-                        if handle.is_null()
-                            && std::io::Error::last_os_error().raw_os_error()
-                                == Some(ERROR_INVALID_PARAMETER as i32)
-                        {
+                        if !in_job(&job, &process)? {
                             continue;
                         }
-                        let process = owned(handle, "open exiting shell job member")?;
-                        let mut in_job = 0;
-                        // SAFETY: Both handles are live; in_job is writable.
-                        if unsafe {
-                            IsProcessInJob(
-                                process.as_raw_handle(),
-                                job.as_raw_handle(),
-                                &mut in_job,
-                            )
-                        } == 0
-                        {
-                            return Err(win_error("verify shell job member"));
-                        }
-                        if in_job == 0 {
-                            continue;
-                        }
-                        // SAFETY: The owned process has SYNCHRONIZE access and
-                        // termination was requested for every member beforehand.
+                        // SAFETY: The owned process has SYNCHRONIZE access and a
+                        // stop was requested for every member beforehand. A
+                        // leader whose stop was requested may still be
+                        // observable here; its status was classified before this
+                        // barrier, so waiting on it cannot change that report.
                         if unsafe { WaitForSingleObject(process.as_raw_handle(), INFINITE) }
                             != WAIT_OBJECT_0
                         {
                             return Err(win_error("wait for shell job member exit"));
                         }
+                        waited = true;
+                    }
+                    if !waited {
+                        return Ok(());
                     }
                 }
             })
@@ -395,7 +540,12 @@ mod platform {
     }
     impl Drop for Tree {
         fn drop(&mut self) {
-            let _ = self.terminate();
+            // The owner abandoned this tree, so the whole job, leader included,
+            // must go. KILL_ON_JOB_CLOSE also covers a failed stop here.
+            let _ = self.terminate_group();
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

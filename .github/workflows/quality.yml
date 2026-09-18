@@ -265,7 +265,9 @@ jobs:
   native:
     name: Native (${{ matrix.os }})
     needs: lint
-    if: needs.lint.outputs.native == 'true'
+    # The skipped proof and verdict are ancestors of this job. A status function
+    # keeps the skip from propagating, and the scope output still decides.
+    if: ${{ !cancelled() && needs.lint.result == 'success' && needs.lint.outputs.native == 'true' }}
     strategy:
       fail-fast: false
       matrix:

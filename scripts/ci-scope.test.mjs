@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { changedPaths, qualityPass, scopeFor } from "./ci-scope.mjs";
+import { changedPaths, HEAVY_OSES, heavyRequired, qualityPass, scopeFor } from "./ci-scope.mjs";
 
 test("only explicitly recognized prose PRs omit native jobs", () => {
   assert.equal(scopeFor("pull_request", ["README.md", "docs/a/b.md"]).native, false);
@@ -58,4 +58,60 @@ test("Quality rejects failed, cancelled, missing and unexpectedly skipped requir
     assert.equal(qualityPass({ lint: status, required: "false", native: "skipped" }), false);
   }
   assert.equal(qualityPass({ lint: "success", native: "skipped" }), false);
+});
+
+test("a main push accepts the proof only when it replaced a warm heavy run", () => {
+  const proven = {
+    event: "push",
+    proof: "success",
+    verified: "true",
+    heavy: "false",
+    lint: "skipped",
+    native: "skipped",
+  };
+  assert.equal(qualityPass(proven), true);
+  // The proof is not evidence for a run that skipped without it, or that ran
+  // part of the heavy work anyway.
+  assert.equal(qualityPass({ ...proven, proof: "failure" }), false);
+  assert.equal(qualityPass({ ...proven, proof: "skipped" }), false);
+  assert.equal(qualityPass({ ...proven, verified: "false" }), false);
+  assert.equal(qualityPass({ ...proven, lint: "success" }), false);
+  assert.equal(qualityPass({ ...proven, native: "success" }), false);
+  // A heavy run is its own evidence, including when the proof could not be made.
+  for (const proof of ["success", "failure", "cancelled", undefined]) {
+    assert.equal(
+      qualityPass({ event: "push", proof, heavy: "true", lint: "success", native: "success" }),
+      true,
+    );
+    assert.equal(
+      qualityPass({ event: "push", proof, heavy: "true", lint: "success", native: "skipped" }),
+      false,
+    );
+    assert.equal(
+      qualityPass({ event: "push", proof, heavy: "true", lint: "skipped", native: "skipped" }),
+      false,
+    );
+  }
+  // A missing verdict runs the heavy jobs, so it can never pass on the proof.
+  assert.equal(
+    qualityPass({
+      event: "push",
+      proof: "success",
+      verified: "true",
+      lint: "skipped",
+      native: "skipped",
+    }),
+    false,
+  );
+});
+
+test("the heavy jobs are required whenever a runner cache is cold or missing", () => {
+  const warm = new Map(HEAVY_OSES.map((os) => [os, true]));
+  assert.equal(heavyRequired(warm), false);
+  assert.equal(heavyRequired(new Map()), true);
+  for (const os of HEAVY_OSES) {
+    for (const value of [false, undefined]) {
+      assert.equal(heavyRequired(new Map(warm).set(os, value)), true);
+    }
+  }
 });

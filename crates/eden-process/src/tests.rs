@@ -55,6 +55,8 @@ fn assert_group_stopped(group: i32, context: &str) {
     assert!(remaining.is_empty(), "{context}: {remaining:?}");
 }
 
+/// Everywhere else there is no `/proc`, so the barrier is checked by the
+/// absence of a hang rather than by re-reading group membership.
 #[cfg(not(target_os = "linux"))]
 fn assert_group_stopped(_group: i32, _context: &str) {}
 
@@ -114,13 +116,9 @@ async fn descendant_cleanup_preserves_the_leaders_own_exit_status() {
     // The descendant usually still holds the group once the leader is reaped,
     // so cleanup has real work to do. `sleep` may also be scheduled after the
     // leader exited, which is the same race the group tolerates.
-    let before = live_group_members(group);
     tree.cleanup_descendants().expect("cleanup descendants");
     within("settle", tree.settle()).await.expect("settle");
-    assert_group_stopped(
-        group,
-        &format!("descendants survived the barrier (before={before:?})"),
-    );
+    assert_group_stopped(group, "descendants survived the barrier");
     // Re-reading the same status must still report the leader's own code.
     assert_eq!(status.code(), Some(7));
 }

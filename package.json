@@ -12,6 +12,7 @@
     "markdown:fix": "node scripts/checks.mjs markdown-fix",
     "rust:check": "node scripts/checks.mjs fmt",
     "rust:fmt": "node scripts/checks.mjs format",
+    "rust:test:authors": "node scripts/checks.mjs test",
     "clippy:check": "node scripts/checks.mjs clippy",
     "clippy:fix": "node scripts/checks.mjs clippy-fix",
     "python:format": "node scripts/checks.mjs python-format",

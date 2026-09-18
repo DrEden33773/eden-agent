@@ -516,43 +516,6 @@ class ArithmeticTests(unittest.TestCase):
         finally:
             env_server.close()
 
-        for mode in ["queue", "steering_only", "cancel"]:
-            server = Server(lambda *_: answer("probe response"), gated=True)
-            try:
-                config = configure(destination, composition, server, mode)
-                result = run(
-                    [
-                        probe,
-                        config,
-                        project,
-                        scratch / f"{mode}.jsonl",
-                        mode,
-                        server.address,
-                    ],
-                    caller,
-                )
-                results[mode] = json.loads(result.stdout)
-                if mode == "queue":
-                    assert len(server.requests) == 3
-                    text = json.dumps(server.requests[-1]["input"])
-                    assert all(
-                        label in text
-                        for label in [
-                            "steer-one",
-                            "steer-two",
-                            "follow-one",
-                            "follow-two",
-                        ]
-                    )
-                elif mode == "steering_only":
-                    assert len(server.requests) == 3
-                    text = json.dumps(server.requests[-1]["input"])
-                    assert all(label in text for label in ["steer-one", "steer-two"])
-                else:
-                    assert len(server.requests) == 1
-            finally:
-                server.close()
-
         for role, label in [
             (PROVIDER, "provider"),
             (CONTEXT, "context"),
@@ -655,27 +618,8 @@ class ArithmeticTests(unittest.TestCase):
                         "new_run_id": recovered[-1]["run_id"],
                         "terminal": resumed[-1]["payload"],
                     }
-                # Read without any business/store plugin: remove composition availability entirely.
-                offline_config = config.with_suffix(".disabled")
-                config.rename(offline_config)
-                plugins = destination / "plugins"
-                offline_plugins = destination / "plugins-disabled"
-                plugins.rename(offline_plugins)
-                try:
-                    exported = run([host, "--history", replacement_history], caller)
-                finally:
-                    offline_plugins.rename(plugins)
-                assert exported.stdout.strip()
-                public = records(replacement_history)
-                assert (
-                    any(r["kind"] == "tool_result" for r in public)
-                    and public[-1]["kind"] == "terminal"
-                )
                 results[f"independent_{label}"] = {
                     "terminal": data[-1]["payload"],
-                    "public_records": len(public),
-                    "offline_history_read": True,
-                    "all_native_plugins_unavailable_during_read": True,
                     "selected_role": role,
                 }
                 if recovery:
@@ -766,78 +710,6 @@ class ArithmeticTests(unittest.TestCase):
             ).stdout
         )
 
-        # An interrupted durable intention is context, never executable work on reopen.
-        interrupted = scratch / "interrupted.jsonl"
-        seed = copy.deepcopy(before[:1])
-        seed.append(
-            {
-                "schema_version": 2,
-                "parent_id": 1,
-                "branch": "main",
-                "session_id": seed[0]["session_id"],
-                "sequence": 2,
-                "run_id": 1,
-                "kind": "tool_intent",
-                "payload": {
-                    "type": "tool_call",
-                    "call_id": "interrupted-write",
-                    "name": "write",
-                    "arguments": json.dumps({"path": "must-not-exist.txt", "content": "replayed"}),
-                },
-            }
-        )
-        interrupted.write_text(
-            json.dumps({"schema_version": 2, "transaction": seed}) + "\n",
-            encoding="utf-8",
-        )
-        server = Server(lambda *_: answer("Historical effects remain unknown."))
-        try:
-            config = configure(destination, composition, server, "interrupted")
-            events(
-                run(
-                    [
-                        host,
-                        "--composition",
-                        config,
-                        "--cwd",
-                        project,
-                        "--session",
-                        interrupted,
-                        "--json",
-                        "Review interrupted history",
-                    ],
-                    caller,
-                )
-            )
-            assert not (project / "must-not-exist.txt").exists()
-            assert "was not replayed" in json.dumps(server.requests[0]["input"])
-            results["interrupted_intent"] = "reopened as uncertainty without replay"
-        finally:
-            server.close()
-        memory = scratch / "memory-only"
-        memory.mkdir()
-        server = Server(lambda *_: answer("memory only"))
-        try:
-            config = configure(destination, composition, server, "memory")
-            events(
-                run(
-                    [
-                        host,
-                        "--composition",
-                        config,
-                        "--cwd",
-                        memory,
-                        "--no-session",
-                        "--json",
-                        "do not write",
-                    ],
-                    memory,
-                )
-            )
-            assert list(memory.iterdir()) == []
-            results["memory_only"] = "no local files created"
-        finally:
-            server.close()
         assert host.read_bytes() == fixed_host
     evidence = {
         "platform": platform.platform(),

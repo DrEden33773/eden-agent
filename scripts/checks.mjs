@@ -103,34 +103,54 @@ for dependency in config["dependency-groups"]["dev"]:
     );
     return;
   }
-  if (!["fmt", "format", "clippy", "clippy-fix"].includes(kind))
+  if (!["fmt", "format", "clippy", "clippy-fix", "test"].includes(kind))
     throw new Error(`Unknown check: ${kind}`);
   const rustEnv = { ...env, CARGO_TARGET_DIR: env.CARGO_TARGET_DIR || join(root, "target") };
-  for (const manifest of manifests(root)) {
+  // `cargo test --workspace` covers the root workspace, so the test kind runs
+  // only the independent author projects that workspace excludes.
+  const selected =
+    kind === "test"
+      ? manifests(root).filter((manifest) => manifest !== "Cargo.toml")
+      : manifests(root);
+  const failures = [];
+  for (const manifest of selected) {
     console.log(`${kind}: ${manifest}`);
     const args =
-      kind === "fmt" || kind === "format"
-        ? [
-            "fmt",
-            "--manifest-path",
-            manifest,
-            "--all",
-            ...(kind === "fmt" ? ["--", "--check"] : []),
-          ]
-        : [
-            "clippy",
-            "--manifest-path",
-            manifest,
-            "--workspace",
-            "--all-targets",
-            "--locked",
-            ...(kind === "clippy-fix" ? ["--fix", ...extra] : []),
-            "--",
-            "-D",
-            "warnings",
-          ];
-    run("cargo", args, root, rustEnv);
+      kind === "test"
+        ? ["test", "--manifest-path", manifest, "--locked", "--no-fail-fast"]
+        : kind === "fmt" || kind === "format"
+          ? [
+              "fmt",
+              "--manifest-path",
+              manifest,
+              "--all",
+              ...(kind === "fmt" ? ["--", "--check"] : []),
+            ]
+          : [
+              "clippy",
+              "--manifest-path",
+              manifest,
+              "--workspace",
+              "--all-targets",
+              "--locked",
+              ...(kind === "clippy-fix" ? ["--fix", ...extra] : []),
+              "--",
+              "-D",
+              "warnings",
+            ];
+    try {
+      run("cargo", args, root, rustEnv);
+    } catch (error) {
+      // Each author project is its own workspace, so one failure must not hide
+      // the results of the projects that would have run after it.
+      if (kind !== "test") throw error;
+      failures.push(error.message);
+    }
   }
+  if (failures.length)
+    throw new Error(
+      `${failures.length} independent author projects failed:\n${failures.join("\n")}`,
+    );
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {

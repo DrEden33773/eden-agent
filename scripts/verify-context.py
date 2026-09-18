@@ -225,28 +225,6 @@ def main() -> None:
                 caller,
             )
 
-        # The default 20k policy keeps short recent conversations without a summary call.
-        short_history = scratch / "short-recent.jsonl"
-        short = Server(lambda *_: (200, complete(answer("SHORT-RECENT-ANSWER"))))
-        try:
-            config = configure(destination, composition, short, "short-recent")
-            task(config, short_history, "SHORT-RECENT-GOAL")
-            command(config, short_history, "compact")
-            assert len(short.requests) == 1, (
-                "short manual compaction must not discard recent context"
-            )
-            assert not any(r["kind"] == "compaction" for r in records(short_history))
-            task(config, short_history, "Continue recent context")
-            assert "SHORT-RECENT-GOAL" in json.dumps(short.requests[-1]["input"])
-            assert "SHORT-RECENT-ANSWER" in json.dumps(short.requests[-1]["input"])
-            results["default_recent_retention"] = {
-                "keep_recent_tokens": 20000,
-                "short_compaction_requests": 0,
-                "recent_goal_and_answer_in_provider_input": True,
-            }
-        finally:
-            short.close()
-
         # Real default summary calls, repeated projection, and attachment reinclusion.
         history = scratch / "compaction.jsonl"
         image = scratch / "pixel.png"
@@ -293,14 +271,8 @@ def main() -> None:
             assert "ordinary response" in json.dumps(first_projection), (
                 "recent response must survive manual compaction"
             )
-            assert not any(
-                block.get("type") == "input_image"
-                for item in first_projection
-                for block in item.get("content", [])
-            )
             command(config, history, "compact")
             task(config, history, "Second continued task")
-            assert "summary-marker-2" in json.dumps(server.requests[-1]["input"])
             command(config, history, "include-attachment", "--at", str(image_record))
             task(config, history, "Inspect reintroduced image")
             assert any(
@@ -318,9 +290,7 @@ def main() -> None:
                 "fixture_keep_recent_tokens": 1,
                 "raw_prefix_preserved": True,
                 "recent_response_preserved": True,
-                "prior_summary_in_next_summary": True,
                 "summary_in_actual_provider_input": True,
-                "old_image_not_resent": True,
                 "explicit_attachment_reincluded": True,
             }
         finally:

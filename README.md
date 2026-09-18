@@ -38,6 +38,7 @@ pnpm markdown:check
 pnpm rust:check
 pnpm clippy:check
 cargo test --workspace --locked
+pnpm rust:test:authors
 python3 scripts/verify.py
 python3 scripts/verify-coding.py
 ```

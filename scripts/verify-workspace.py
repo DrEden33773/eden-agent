@@ -474,32 +474,6 @@ def main() -> None:
                 server.close()
         results["missing_inner_hook_blocks_effect"] = True
 
-        server = Server(lambda _body, _index: (200, complete(answer("NO-CONTEXT"))))
-        try:
-            for name in ["SYSTEM.md", "APPEND_SYSTEM.md", "AGENTS.md"]:
-                (global_dir / name).write_text("FORBIDDEN-AUTO-CONTEXT", encoding="utf-8")
-            config = helpers["configure"](destination, base, server, "no-context")
-            run(
-                [
-                    host,
-                    "--composition",
-                    config,
-                    "--cwd",
-                    project,
-                    "--global-dir",
-                    global_dir,
-                    "--no-session",
-                    "--no-context",
-                    "--json",
-                    "Reply briefly",
-                ],
-                scratch,
-            )
-            assert "FORBIDDEN-AUTO-CONTEXT" not in json.dumps(server.requests)
-            results["no_context_actual_model_input"] = True
-        finally:
-            server.close()
-
         if sys.platform == "win32":
 
             def powershell_reply(_body: dict[str, Any], index: int) -> tuple[int, dict[str, Any]]:

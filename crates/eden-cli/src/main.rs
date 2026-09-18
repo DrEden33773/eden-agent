@@ -106,11 +106,7 @@ async fn run(args: Vec<String>) -> Result<i32, Box<dyn std::error::Error>> {
             }
             "--read-only" => workspace_options.overrides["read_only"] = serde_json::json!(true),
             "--no-context" | "--no-skills" | "--no-templates" => {
-                let key = match arg.as_str() {
-                    "--no-context" => "discover_context",
-                    "--no-skills" => "discover_skills",
-                    _ => "discover_templates",
-                };
+                let key = discovery_override(&arg).expect("handled discovery flag");
                 workspace_options.overrides[key] = serde_json::json!(false);
             }
             "--session" | "--resume" => {
@@ -305,5 +301,34 @@ async fn run(args: Vec<String>) -> Result<i32, Box<dyn std::error::Error>> {
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(Box::new(error)),
         (Ok(code), Ok(())) => Ok(code),
+    }
+}
+
+/// Settings key disabled by an explicit automatic-discovery flag.
+///
+/// The CLI writes these overrides into the workspace options, and the resource
+/// source reads them as its `discover_*` settings, so the flag name and the
+/// setting name must stay in step.
+fn discovery_override(flag: &str) -> Option<&'static str> {
+    match flag {
+        "--no-context" => Some("discover_context"),
+        "--no-skills" => Some("discover_skills"),
+        "--no-templates" => Some("discover_templates"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::discovery_override;
+    #[test]
+    fn discovery_flags_disable_their_own_setting() {
+        assert_eq!(discovery_override("--no-context"), Some("discover_context"));
+        assert_eq!(discovery_override("--no-skills"), Some("discover_skills"));
+        assert_eq!(
+            discovery_override("--no-templates"),
+            Some("discover_templates")
+        );
+        assert_eq!(discovery_override("--no-session"), None);
     }
 }

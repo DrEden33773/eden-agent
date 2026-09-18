@@ -40,11 +40,16 @@ pub enum Termination {
 
 /// Why a process domain stopped.
 ///
-/// `exit_code` is `Some` exactly when the leader itself exited normally.
 /// `termination` is `Some` exactly when this module stopped the domain because
-/// a caller asked for it. A leader that died by signal with no requested
-/// termination was stopped by something outside this module and is reported as
-/// that, rather than being folded into normal completion or our own cleanup.
+/// a caller asked for it, and `exit_code` then holds whatever status the leader
+/// really reached: an exit code if the command finished before the stop landed,
+/// or `None` if our own signal ended it.
+///
+/// `exit_code` is `None` together with `termination: None` only when the leader
+/// died by signal without any requested termination, which means something
+/// outside this module stopped it. That is the one case callers can read as an
+/// unexplained signal death; `None` on its own never implies one, because a
+/// failure before the leader started also reports no exit code.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Stop {
     pub exit_code: Option<i32>,
@@ -59,11 +64,16 @@ impl Stop {
             termination: None,
         }
     }
-    /// Classify a status observed after a requested termination. The exit code
-    /// belongs to our own stop, so none is claimed and none is inferred.
-    pub fn stopped() -> Self {
+    /// Classify a status observed after a requested termination.
+    ///
+    /// `termination` is always recorded. The observed status is kept as well:
+    /// if the command exited on its own before the stop reached it, that exit
+    /// code is a real result and discarding it would report a completed command
+    /// as having no exit code. An absent code after a requested stop is our own
+    /// signal and is explained by `termination`.
+    pub fn stopped(status: &std::process::ExitStatus) -> Self {
         Self {
-            exit_code: None,
+            exit_code: status.code(),
             termination: Some(Termination::Requested),
         }
     }
@@ -230,7 +240,15 @@ mod platform {
         pub fn cleanup_descendants(&self) -> Result<(), Fault> {
             signal_members(&descendants(self.group)?)
         }
-        /// Wait until no member of the owned group is left alive.
+        /// Stop every surviving member of the owned group, then wait until the
+        /// group is empty.
+        ///
+        /// A descendant can fork while a snapshot is being taken, so a single
+        /// enumeration is not a guarantee: each pass signals exactly the
+        /// members it observed and waits for them, and a pass that observes a
+        /// new member signals that one too. The pidfd opened at observation
+        /// time is what receives the signal, so a recycled pid can never be
+        /// signalled by mistake.
         pub async fn settle(&self) -> Result<(), Fault> {
             let group = self.group;
             tokio::task::spawn_blocking(move || {
@@ -238,6 +256,12 @@ mod platform {
                     let survivors = observe(group)?;
                     if survivors.is_empty() {
                         return Ok(());
+                    }
+                    for member in &survivors {
+                        // Signal the descriptor opened for this exact member,
+                        // so a descendant that forked after an earlier pass is
+                        // stopped rather than only waited for.
+                        member.signal()?;
                     }
                     for member in survivors {
                         // A member can exit between the snapshot and this wait.
@@ -500,14 +524,22 @@ mod platform {
         pub fn cleanup_descendants(&self) -> Result<(), Fault> {
             stop_members(self, false)
         }
+        /// Stop every surviving member of the job, then wait until the job is
+        /// empty.
+        ///
+        /// A member can start a new process while membership is enumerated, so
+        /// each pass stops exactly the members it observed and waits for them;
+        /// a pass that observes a new member stops that one too. Completion-port
+        /// exit messages are not guaranteed by Win32, which is why membership
+        /// is re-read instead of waiting for notifications.
         pub async fn settle(&self) -> Result<(), Fault> {
             let job = self.job.clone();
             tokio::task::spawn_blocking(move || {
-                // Completion-port exit messages are not guaranteed by Win32.
-                // Wait for live member handles, then confirm empty membership.
                 loop {
                     let pids = members(&job)?;
-                    let mut waited = false;
+                    if pids.is_empty() {
+                        return Ok(());
+                    }
                     for pid in pids {
                         let pid = u32::try_from(pid)
                             .map_err(|_| fault("CleanupFailure", "invalid shell process id"))?;
@@ -517,20 +549,19 @@ mod platform {
                         if !in_job(&job, &process)? {
                             continue;
                         }
-                        // SAFETY: The owned process has SYNCHRONIZE access and a
-                        // stop was requested for every member beforehand. A
-                        // leader whose stop was requested may still be
-                        // observable here; its status was classified before this
-                        // barrier, so waiting on it cannot change that report.
+                        // SAFETY: The handle has PROCESS_TERMINATE access and
+                        // belongs to this job. A member that already stopped
+                        // returns an error that is ignored, because the goal is
+                        // only that it is not running.
+                        let _ = unsafe { TerminateProcess(process.as_raw_handle(), 1) };
+                        // SAFETY: The owned process has SYNCHRONIZE access. The
+                        // leader's status was classified before this barrier, so
+                        // waiting on it cannot change that report.
                         if unsafe { WaitForSingleObject(process.as_raw_handle(), INFINITE) }
                             != WAIT_OBJECT_0
                         {
                             return Err(win_error("wait for shell job member exit"));
                         }
-                        waited = true;
-                    }
-                    if !waited {
-                        return Ok(());
                     }
                 }
             })

@@ -317,14 +317,6 @@ fn file_path(cwd: &Path, value: &Value) -> Result<PathBuf, Fault> {
     }
     Ok(cwd.join(path))
 }
-/// Human-readable exit outcome for a `ShellExit` fault. The message has never
-/// been part of the tool contract; `exit_code` is the machine-readable field.
-fn describe_exit(exit_code: Option<i32>) -> String {
-    match exit_code {
-        Some(code) => format!("shell exited with exit code {code}"),
-        None => "shell was stopped by a signal".into(),
-    }
-}
 fn fault(code: &str, message: impl Into<String>) -> Fault {
     Fault::new(code, "coding-tools", message)
 }
@@ -399,7 +391,7 @@ async fn shell_command(
         // terminal status and then only clears descendants that outlived it;
         // cancellation stops the whole domain and reports that decision
         // explicitly. Neither path lets cleanup rewrite the leader's status.
-        let (stop, succeeded, cancelled) = tokio::select! {
+        let (stop, status, cancelled) = tokio::select! {
             status = child.wait() => {
                 let status =
                     status.map_err(|error| fault("ToolFailure", error.to_string()))?;
@@ -409,7 +401,7 @@ async fn shell_command(
                 // has been committed. The leader is already reaped, and this
                 // action never signals it again.
                 tree.cleanup_descendants()?;
-                (stop, status.success(), false)
+                (stop, status, false)
             }
             _ = cancellation.cancelled() => {
                 tree.terminate_group()?;
@@ -417,19 +409,18 @@ async fn shell_command(
                     .wait()
                     .await
                     .map_err(|error| fault("ToolFailure", error.to_string()))?;
-                // The leader was stopped on the caller's request, so the
-                // caller's decision, not a command result, is what gets
-                // reported. `Stop::stopped` states that explicitly instead of
-                // leaving "no exit code" to be read as a signal death.
-                let _ = status;
-                (eden_process::Stop::stopped(), false, true)
+                // The caller's decision is recorded explicitly, so an absent
+                // exit code can no longer be read as a signal death. A status
+                // the command had already produced is still kept below.
+                let stop = eden_process::Stop::stopped(&status);
+                (stop, status, true)
             }
         };
         tree.settle().await?;
-        Ok::<_, Fault>((stop, succeeded, cancelled))
+        Ok::<_, Fault>((stop, status, cancelled))
     };
     let (waited, stdout, stderr) = tokio::join!(wait, capture(stdout), capture(stderr));
-    let (stop, succeeded, cancelled) = waited?;
+    let (stop, status, cancelled) = waited?;
     let (stdout, out_truncated) = stdout.map_err(file_error)?;
     let (stderr, err_truncated) = stderr.map_err(file_error)?;
     let mut text = String::from_utf8_lossy(&stdout).into_owned();
@@ -443,8 +434,10 @@ async fn shell_command(
             "Cancelled",
             "shell command cancelled; process tree stopped",
         ))
-    } else if !succeeded {
-        Some(fault("ShellExit", describe_exit(stop.exit_code)))
+    } else if !status.success() {
+        // The rendered status names the exit code or the stopping signal, so
+        // this stays the exact outcome text callers already saw.
+        Some(fault("ShellExit", format!("shell exited with {status}")))
     } else {
         None
     };

@@ -121,6 +121,33 @@ impl Observer {
     pub(super) fn pid(&self) -> i32 {
         self.pid
     }
+    /// Ask this member to stop, through the pidfd opened when it was observed.
+    ///
+    /// Signalling the descriptor rather than the numeric pid removes the
+    /// reuse race entirely: the descriptor keeps referring to the process that
+    /// was observed, even if its pid has since been recycled.
+    pub(super) fn signal(&self) -> Result<(), Fault> {
+        // SAFETY: pidfd_send_signal takes the live descriptor, a signal number
+        // and two null arguments; no memory crosses the syscall.
+        let sent = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                self.exit.as_raw_fd(),
+                libc::SIGKILL,
+                std::ptr::null::<libc::siginfo_t>(),
+                0u32,
+            )
+        };
+        if sent == 0 {
+            return Ok(());
+        }
+        let cause = std::io::Error::last_os_error();
+        // A member that exited first is already stopped, which is the goal.
+        if gone(&cause) {
+            return Ok(());
+        }
+        Err(error("stop shell member", cause))
+    }
     /// Wait for this member's exit event.
     pub(super) fn wait(self) -> Result<(), Fault> {
         pidfd_ready(&self.exit, -1).map(|_| ())
@@ -237,6 +264,22 @@ pub(super) fn observe(group: i32) -> Result<Vec<Observer>, Fault> {
 impl Observer {
     pub(super) fn pid(&self) -> i32 {
         self.pid
+    }
+    /// Ask this member to stop.
+    ///
+    /// macOS has no pidfd equivalent, so this signals the numeric pid. Callers
+    /// only reach it for processes observed inside this owned group.
+    pub(super) fn signal(&self) -> Result<(), Fault> {
+        // SAFETY: A positive pid asks the kernel to signal that process, and
+        // SIGKILL carries no borrowed memory.
+        if unsafe { libc::kill(self.pid, libc::SIGKILL) } == 0 {
+            return Ok(());
+        }
+        let cause = std::io::Error::last_os_error();
+        if gone(&cause) {
+            return Ok(());
+        }
+        Err(error("stop shell member", cause))
     }
     /// Wait for this member's exit event. `EV_ERROR` with a gone-process errno
     /// is the same race as on Linux: the member exited between the snapshot and

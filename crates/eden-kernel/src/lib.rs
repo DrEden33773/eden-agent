@@ -1,7 +1,7 @@
 //! Native loading, explicit role selection and host-owned lifecycle.
 pub mod history;
 mod native;
-use cordis_core::{Context, Fork, Plugin, PreparedPlugin, Service};
+use cordis_core::{Context, FiberHandle, Plugin, PreparedPlugin, Service};
 use eden_plugin_sdk::{
     Cancellation,
     abi::{Bytes, HostApi, Reply, TARGET},
@@ -300,7 +300,7 @@ unsafe extern "C" fn event(context: usize, bytes: Bytes) {
 pub struct Kernel {
     router: Arc<Router>,
     token: usize,
-    fork: Fork,
+    fiber: FiberHandle,
     instances: Vec<Arc<NativeInstance>>,
     composition: Composition,
 }
@@ -424,14 +424,14 @@ impl Kernel {
             .into_iter()
             .filter_map(|(role, name)| packages.get(&name).map(|instance| (role, instance.clone())))
             .collect();
-        let fork = match context
+        let fiber = match context
             .spawn(PreparedPlugin::from_input(
                 Adapter,
                 Arc::new(Services(roles)),
             ))
             .await
         {
-            Ok(fork) => fork,
+            Ok(fiber) => fiber,
             Err(error) => {
                 router.open.store(false, Ordering::Release);
                 let error = rollback_initialization(
@@ -449,7 +449,7 @@ impl Kernel {
         Ok(Self {
             router,
             token,
-            fork,
+            fiber,
             instances,
             composition,
         })
@@ -484,7 +484,7 @@ impl Kernel {
         {
             cancel.cancel();
         }
-        let disposed = self.fork.dispose().await;
+        let disposed = self.fiber.dispose().await;
         // Include explicitly loaded packages that were not selected for a role;
         // instance finalizer failures survive repeated stop calls by the adapter.
         let mut cleanup: Option<Fault> = None;

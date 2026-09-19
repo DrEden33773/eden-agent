@@ -487,6 +487,11 @@ mod platform {
     /// The exit code answers this while a process is still terminating, when its
     /// wait state is not yet signaled: `STILL_ACTIVE` means it really is running,
     /// and anything else means it has already stopped or is on its way out.
+    ///
+    /// A member that deliberately exits with code 259 is indistinguishable from
+    /// a running one here, so that member reports a cleanup failure instead of
+    /// being tolerated. The error is the safe direction: a real failed stop is
+    /// never swallowed.
     fn has_exited(process: &OwnedHandle) -> Result<bool, Fault> {
         let mut code = 0u32;
         // SAFETY: The handle owns PROCESS_QUERY_LIMITED_INFORMATION and the exit

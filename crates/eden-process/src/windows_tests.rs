@@ -282,10 +282,12 @@ async fn completion_cleanup_stops_survivors_of_a_completed_command() {
         .tree
         .cleanup_descendants()
         .expect("cleanup the descendants that outlived the command");
+    // Before the settle barrier: this is what shows that the completion action
+    // itself stopped the descendant rather than the barrier that follows it.
+    wait_until_stopped(descendant, "the descendant outlived the completion path").await;
     within("settle", shell.tree.settle())
         .await
         .expect("settle the completed job");
-    wait_until_stopped(descendant, "the descendant outlived the completion path").await;
 }
 
 /// The cancellation-path action stops the whole job, leader included.
@@ -355,6 +357,12 @@ async fn cleanup_reaches_descendants_started_while_it_enumerates() {
         .tree
         .cleanup_descendants()
         .expect("cleanup descendants of a completed command");
+    // The completion action stops every member it observed, so the barrier below
+    // is not what these children depend on. A descendant the loop starts after
+    // the snapshot is exactly what settle has to keep re-reading for.
+    for pid in &descendants {
+        wait_until_stopped(*pid, "a descendant outlived the completion action").await;
+    }
     within("settle", shell.tree.settle())
         .await
         .expect("settle the job that kept growing");

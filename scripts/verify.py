@@ -14,7 +14,7 @@ import tempfile
 from typing import Any
 
 from install import ROLES, ROOT, library, package, target
-from verification import author_artifact, installed, prepare, run
+from verification import author_artifact, example, installed, prepare, run
 
 
 def write(path: pathlib.Path, value: object) -> None:
@@ -139,7 +139,7 @@ def main() -> None:
         embedded = json.loads(
             run(
                 [
-                    destination / "bin" / ("embedded" + suffix),
+                    example("embedded"),
                     destination / "composition.json",
                 ],
                 caller,
@@ -168,7 +168,7 @@ def main() -> None:
         path = destination / "init-probe.json"
         write(path, initialized)
         results["abandoned_init"] = json.loads(
-            run([destination / "bin" / ("initialization_probe" + suffix), path], caller).stdout
+            run([example("initialization_probe"), path], caller).stdout
         )
         marker = scratch / "destroy-marker"
         initialized["packages"][-1]["config"] = {"marker": str(marker)}
@@ -213,7 +213,7 @@ def main() -> None:
             selected["roles"][ROLES[0]] = "lifecycle"
             path = destination / "lifecycle.json"
             write(path, selected)
-            result = run([destination / "bin" / ("contract_probe" + suffix), path, mode], caller)
+            result = run([example("contract_probe"), path, mode], caller)
             results[mode] = json.loads(result.stdout)
         for field, value, expected_code in [
             ("sdk", "wrong", "IncompatibleContract"),

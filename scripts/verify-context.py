@@ -18,7 +18,7 @@ from typing import Any
 
 from http_fixture import FixtureHTTPServer
 from install import ROOT, Composition, target
-from verification import installed, prepare
+from verification import example, installed, prepare, short_retries
 from verification import run as measured_run
 
 
@@ -171,6 +171,8 @@ def configure(
                 "context_window": window,
                 "max_output_tokens": allowance,
             }
+    # See verify-coding.py: the retry count is asserted, the delay never is.
+    short_retries(selected)
     path = destination / f"{name}.json"
     write(path, selected)
     return path
@@ -184,7 +186,7 @@ def main() -> None:
     destination = installed(artifacts / "context-install")
     suffix = ".exe" if sys.platform == "win32" else ""
     host = destination / "bin" / ("eden" + suffix)
-    probe = destination / "bin" / ("context_probe" + suffix)
+    probe = example("context_probe")
     fixed_host = host.read_bytes()
     composition = json.loads((destination / "composition.json").read_text(encoding="utf-8"))
     results: dict[str, Any] = {}
@@ -224,6 +226,29 @@ def main() -> None:
                 [host, "session", name, history, "--composition", config, *options],
                 caller,
             )
+
+        # A short transcript has no compactable prefix, so a manual compaction must
+        # keep it whole and issue no summary call at all.
+        short_history = scratch / "short-recent.jsonl"
+        short = Server(lambda *_: (200, complete(answer("SHORT-RECENT-ANSWER"))))
+        try:
+            config = configure(destination, composition, short, "short-recent")
+            task(config, short_history, "SHORT-RECENT-GOAL")
+            command(config, short_history, "compact")
+            assert len(short.requests) == 1, (
+                "short manual compaction must not discard recent context"
+            )
+            assert not any(r["kind"] == "compaction" for r in records(short_history))
+            task(config, short_history, "Continue recent context")
+            assert "SHORT-RECENT-GOAL" in json.dumps(short.requests[-1]["input"])
+            assert "SHORT-RECENT-ANSWER" in json.dumps(short.requests[-1]["input"])
+            results["default_recent_retention"] = {
+                "keep_recent_tokens": 20000,
+                "short_compaction_requests": 0,
+                "recent_goal_and_answer_in_provider_input": True,
+            }
+        finally:
+            short.close()
 
         # Real default summary calls, repeated projection, and attachment reinclusion.
         history = scratch / "compaction.jsonl"

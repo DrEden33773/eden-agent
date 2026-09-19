@@ -13,7 +13,7 @@ import tempfile
 from typing import Any, TypedDict
 
 from install import ROOT, target
-from verification import EXAMPLES, digest, run, source_fingerprint, validate_receipt
+from verification import digest, run, source_fingerprint, validate_receipt
 
 
 class FileState(TypedDict):
@@ -87,9 +87,9 @@ def verify_archive(
     validate_receipt(prepared, source_fingerprint())
     suffix = ".exe" if os.name == "nt" else ""
     seed = pathlib.Path(prepared["seeds"]) / "default"
+    # The seed holds exactly what an installation ships, so the distribution
+    # below is compared with it directly; probe binaries never entered it.
     expected = file_state(seed)
-    for example in EXAMPLES:
-        del expected[f"bin/{example}{suffix}"]
     compare_files(file_state(distribution), expected)
     native_target = target()
     with tempfile.TemporaryDirectory(prefix="eden-archive-验收-") as temp:

@@ -13,7 +13,6 @@ from typing import Any
 
 from install import ROOT
 from verification import (
-    EXAMPLES,
     openssl,
     prepare,
     reset_output,
@@ -65,7 +64,9 @@ def execute(name: str, script: str, receipt_file: str, output: pathlib.Path) -> 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--workers", type=int, choices=range(1, 6), default=2)
+    # Four workers leave one core of a four-vCPU runner to the suites themselves,
+    # and the default stays a fixed number so local and CI timings are comparable.
+    parser.add_argument("--workers", type=int, choices=range(1, 6), default=4)
     parser.add_argument("--output", type=pathlib.Path, default=ROOT / "artifacts/verification")
     args = parser.parse_args()
     output = args.output.resolve()
@@ -95,9 +96,6 @@ def main() -> None:
         if distribution.exists():
             shutil.rmtree(distribution)
         shutil.copytree(pathlib.Path(receipt["seeds"]) / "default", distribution)
-        suffix = ".exe" if os.name == "nt" else ""
-        for example in EXAMPLES:
-            (distribution / "bin" / (example + suffix)).unlink()
         report["status"] = "passed"
     except Exception as error:
         report["error"] = str(error)

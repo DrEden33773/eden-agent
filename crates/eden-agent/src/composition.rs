@@ -21,19 +21,23 @@ pub(crate) fn binding(composition: &eden_protocol::Composition, cwd: &str) -> Re
         packages.insert(
             package.descriptor.package.clone(),
             json!({
-            "descriptor":package.descriptor,
-            "target":package.target,
-            "requires":package.requires,
-            "sha256":format!("{:x}",
-            hash.finalize())
+                "descriptor": package.descriptor,
+                "target": package.target,
+                "requires": package.requires,
+                "sha256": format!("{:x}", hash.finalize()),
             }),
         );
     }
-    Ok(
-        json!({"cwd":cwd,"roles":composition.roles,"packages":packages,
-            "library_locations":composition.packages.iter().map(|p| &p.library).collect::<Vec<_>>()
-        }),
-    )
+    Ok(json!({
+        "cwd": cwd,
+        "roles": composition.roles,
+        "packages": packages,
+        "library_locations": composition
+            .packages
+            .iter()
+            .map(|p| &p.library)
+            .collect::<Vec<_>>(),
+    }))
 }
 /// Locations support data-only copy reference tracking, but are not package identity.
 pub(crate) fn equivalent(left: &Value, right: &Value) -> bool {
@@ -105,7 +109,7 @@ impl Session {
         self.0.events.push(
             run_id,
             "composition_unavailable",
-            json!({"reason":"explicit switch stopped the previous generation"}),
+            json!({ "reason": "explicit switch stopped the previous generation" }),
         );
         // Once the old generation stops, finish initialization/cleanup even if
         // the requester cancels; no abandoned initializer can escape ownership.
@@ -179,6 +183,6 @@ impl Session {
         }
         self.0.kernel.install(kernel);
         self.0.events.push(run_id, "composition_switched", locked);
-        Ok(json!({"available":true,"composition":path}))
+        Ok(json!({ "available": true, "composition": path }))
     }
 }

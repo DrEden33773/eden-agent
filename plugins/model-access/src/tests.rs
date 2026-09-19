@@ -44,11 +44,8 @@ fn complete(output: Value) -> String {
         "response": {
             "status": "completed",
             "output": output,
-            "usage": {
-                "input_tokens": 12,
-                "output_tokens": 5
-            }
-        }
+            "usage": { "input_tokens": 12, "output_tokens": 5 },
+        },
     }))
 }
 async fn server(status: &str, body: String) -> (String, tokio::task::JoinHandle<(String, Value)>) {
@@ -92,45 +89,40 @@ async fn streams_unicode_and_complete_multiple_calls_and_projects_all_input() {
         "type": "reasoning",
         "id": "rs_1",
         "summary": [],
-        "encrypted_content": "opaque"
+        "encrypted_content": "opaque",
     });
     let body = event(json!({
         "type": "response.output_text.delta",
         "delta": "你好🙂",
-        "item_id": "msg_1"
+        "item_id": "msg_1",
     })) + &event(json!({
         "type": "response.function_call_arguments.delta",
         "delta": "{\"path\":",
         "item_id": "fc_1",
-        "output_index": 1
+        "output_index": 1,
     })) + &event(json!({
         "type": "response.function_call_arguments.delta",
         "delta": "\"a\"}",
         "item_id": "fc_1",
-        "output_index": 1
+        "output_index": 1,
     })) + &complete(json!([
         reasoning,
         {
             "type": "message",
             "role": "assistant",
-            "content": [
-                {
-                    "type": "output_text",
-                    "text": "你好🙂"
-                }
-            ]
+            "content": [{ "type": "output_text", "text": "你好🙂" }],
         },
         {
             "type": "function_call",
             "call_id": "c1",
             "name": "read",
-            "arguments": "{\"path\":\"a\"}"
+            "arguments": "{\"path\":\"a\"}",
         },
         {
             "type": "function_call",
             "call_id": "c2",
             "name": "read",
-            "arguments": "{\"path\":\"b\"}"
+            "arguments": "{\"path\":\"b\"}",
         }
     ]));
     let (endpoint, server) = server("200 OK", body).await;
@@ -184,14 +176,8 @@ async fn streams_unicode_and_complete_multiple_calls_and_projects_all_input() {
             description: "read a file".into(),
             parameters: json!({
                 "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string"
-                    }
-                },
-                "required": [
-                    "path"
-                ]
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"],
             }),
         }],
     };
@@ -241,17 +227,14 @@ async fn streams_unicode_and_complete_multiple_calls_and_projects_all_input() {
     assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
     assert_eq!(
         body["input"][0]["content"][1],
-        json!({
-            "type": "input_image",
-            "image_url": "data:image/png;base64,YWJj"
-        })
+        json!({ "type": "input_image", "image_url": "data:image/png;base64,YWJj" })
     );
     assert_eq!(
         body["input"][0]["content"][2],
         json!({
             "type": "input_file",
             "filename": "a.pdf",
-            "file_data": "data:application/pdf;base64,ZGVm"
+            "file_data": "data:application/pdf;base64,ZGVm",
         })
     );
     assert_eq!(body["input"][1]["content"][0]["type"], "output_text");
@@ -265,29 +248,18 @@ async fn streams_unicode_and_complete_multiple_calls_and_projects_all_input() {
 #[tokio::test]
 async fn partial_and_failed_streams_never_become_success_or_leak_server_secrets() {
     for body in [
-        event(json!({"type":"error","message":"test-secret"})),
+        event(json!({ "type": "error", "message": "test-secret" })),
         event(json!({
             "type": "response.failed",
-            "response": {
-                "error": {
-                    "message": "test-secret"
-                }
-            }
+            "response": { "error": { "message": "test-secret" } },
         })),
-        event(json!({
-            "type": "response.incomplete",
-            "response": {
-                "status": "incomplete"
-            }
-        })),
-        complete(json!([
-            {
-                "type": "function_call",
-                "call_id": "c",
-                "name": "read",
-                "arguments": "{"
-            }
-        ])),
+        event(json!({ "type": "response.incomplete", "response": { "status": "incomplete" } })),
+        complete(json!([{
+            "type": "function_call",
+            "call_id": "c",
+            "name": "read",
+            "arguments": "{",
+        }])),
         "data: broken\r\n\r\n".into(),
     ] {
         let (endpoint, server) = server("200 OK", body).await;
@@ -393,7 +365,7 @@ fn sse_preserves_utf8_crlf_multiline_data_and_ignores_comments_at_every_split() 
         events.extend(decoder.push(&body.as_bytes()[split..]).unwrap());
         assert_eq!(
             events,
-            vec![json!({"type":"response.output_text.delta","delta":"你好🙂"})]
+            vec![json!({ "type": "response.output_text.delta", "delta": "你好🙂" })]
         );
     }
     let mut decoder = Sse::default();
@@ -410,15 +382,11 @@ fn sse_rejects_invalid_utf8_and_output_rejects_duplicate_or_partial_calls() {
         Sse::default().push(b"data: \xff\n\n").unwrap_err().code,
         "ProviderFailure"
     );
-    let call = json!({
-        "type": "function_call",
-        "call_id": "c",
-        "name": "read",
-        "arguments": "{}"
-    });
+    let call =
+        json!({ "type": "function_call", "call_id": "c", "name": "read", "arguments": "{}" });
     assert!(
         wire::completed(
-            &json!({"status":"completed","output":[call,call]}),
+            &json!({ "status": "completed", "output": [call, call] }),
             Profile::Openai
         )
         .is_err()
@@ -427,15 +395,13 @@ fn sse_rejects_invalid_utf8_and_output_rejects_duplicate_or_partial_calls() {
         wire::completed(
             &json!({
                 "status": "completed",
-                "output": [
-                    {
-                        "type": "function_call",
-                        "status": "in_progress",
-                        "call_id": "c",
-                        "name": "read",
-                        "arguments": "{}"
-                    }
-                ]
+                "output": [{
+                    "type": "function_call",
+                    "status": "in_progress",
+                    "call_id": "c",
+                    "name": "read",
+                    "arguments": "{}",
+                }],
             }),
             Profile::Openai
         )
@@ -450,13 +416,8 @@ async fn output_item_done_is_not_response_completion() {
         "item": {
             "type": "message",
             "role": "assistant",
-            "content": [
-                {
-                    "type": "output_text",
-                    "text": "apparently done"
-                }
-            ]
-        }
+            "content": [{ "type": "output_text", "text": "apparently done" }],
+        },
     })) + "data: [DONE]\n\n";
     let (endpoint, server) = server("200 OK", body).await;
     assert!(
@@ -509,7 +470,7 @@ fn profiles_resolve_explicit_config_before_environment_without_implicit_model() 
             "endpoint": "http://localhost/responses",
             "api_key_env": "LOCAL_KEY",
             "max_output_tokens": 12345,
-            "reasoning_effort": "low"
+            "reasoning_effort": "low",
         }),
         &[
             ("EDEN_RESPONSES_PROFILE", "invalid"),
@@ -528,7 +489,13 @@ fn profiles_resolve_explicit_config_before_environment_without_implicit_model() 
     assert_eq!(body["reasoning"]["effort"], "low");
     assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
     assert_eq!(body["store"], false);
-    assert!(configured(json!({"profile":"deepseek"}), &[("OPENAI_API_KEY", "key")]).is_err());
+    assert!(
+        configured(
+            json!({ "profile": "deepseek" }),
+            &[("OPENAI_API_KEY", "key")]
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -550,7 +517,7 @@ fn legacy_defaults_and_invalid_settings_remain_explicit() {
         assert!(configured(json!({}), &env).is_err());
     }
     let settings = configured(
-        json!({"profile":"deepseek"}),
+        json!({ "profile": "deepseek" }),
         &[
             ("OPENAI_MODEL", "deepseek-flash"),
             ("OPENAI_API_KEY", "key"),
@@ -570,34 +537,25 @@ async fn deepseek_reasoning_and_tool_result_roundtrip_preserves_images_and_full_
         "type": "reasoning",
         "id": "rs_deepseek",
         "summary": [],
-        "content": [
-            {
-                "type": "reasoning_text",
-                "text": "inspect the source"
-            }
-        ]
+        "content": [{ "type": "reasoning_text", "text": "inspect the source" }],
     });
     let body = event(json!({
         "type": "response.reasoning_text.delta",
         "delta": "inspect",
         "item_id": "rs_deepseek",
-        "output_index": 0
+        "output_index": 0,
     })) + &complete(json!([
         reasoning,
         {
             "type": "function_call",
             "call_id": "read_1",
             "name": "read",
-            "arguments": "{\"path\":\"main.rs\"}"
+            "arguments": "{\"path\":\"main.rs\"}",
         }
     ]));
     let (endpoint, first_server) = server("200 OK", body).await;
     let settings = configured(
-        json!({
-            "profile": "deepseek",
-            "model": "deepseek-flash",
-            "endpoint": endpoint
-        }),
+        json!({ "profile": "deepseek", "model": "deepseek-flash", "endpoint": endpoint }),
         &[("OPENAI_API_KEY", "deepseek-key")],
     )
     .unwrap();
@@ -613,7 +571,7 @@ async fn deepseek_reasoning_and_tool_result_roundtrip_preserves_images_and_full_
         tools: vec![ToolDefinition {
             name: "read".into(),
             description: "read source".into(),
-            parameters: json!({"type":"object","properties":{"path":{"type":"string"}}}),
+            parameters: json!({ "type": "object", "properties": { "path": { "type": "string" } } }),
         }],
     };
     let mut emitted = Vec::new();
@@ -663,18 +621,11 @@ async fn deepseek_reasoning_and_tool_result_roundtrip_preserves_images_and_full_
     });
     let (endpoint, second_server) = server(
         "200 OK",
-        complete(json!([
-            {
-                "type": "message",
-                "role": "assistant",
-                "content": [
-                    {
-                        "type": "output_text",
-                        "text": "done"
-                    }
-                ]
-            }
-        ])),
+        complete(json!([{
+            "type": "message",
+            "role": "assistant",
+            "content": [{ "type": "output_text", "text": "done" }],
+        }])),
     )
     .await;
     let reply = request(
@@ -698,7 +649,7 @@ async fn deepseek_reasoning_and_tool_result_roundtrip_preserves_images_and_full_
     let mut legacy = input();
     legacy.items.push(Item::ProviderState {
         provider: "openai-responses".into(),
-        value: json!({"type":"reasoning","encrypted_content":"opaque"}),
+        value: json!({ "type": "reasoning", "encrypted_content": "opaque" }),
     });
     assert!(wire::project(&legacy, "deepseek-flash", &settings.options).is_err());
 }
@@ -706,11 +657,7 @@ async fn deepseek_reasoning_and_tool_result_roundtrip_preserves_images_and_full_
 #[tokio::test]
 async fn deepseek_file_input_is_rejected_before_endpoint_or_network_access() {
     let settings = configured(
-        json!({
-            "profile": "deepseek",
-            "model": "deepseek-flash",
-            "endpoint": "invalid URL"
-        }),
+        json!({ "profile": "deepseek", "model": "deepseek-flash", "endpoint": "invalid URL" }),
         &[("OPENAI_API_KEY", "key")],
     )
     .unwrap();
@@ -743,11 +690,7 @@ async fn deepseek_file_input_is_rejected_before_endpoint_or_network_access() {
 async fn deepseek_http_error_returns_first_failure_without_retrying() {
     let (endpoint, server) = server("429 Too Many Requests", "private error detail".into()).await;
     let settings = configured(
-        json!({
-            "profile": "deepseek",
-            "model": "deepseek-flash",
-            "endpoint": endpoint
-        }),
+        json!({ "profile": "deepseek", "model": "deepseek-flash", "endpoint": endpoint }),
         &[("OPENAI_API_KEY", "key")],
     )
     .unwrap();
@@ -789,7 +732,7 @@ fn request_output_override_is_bounded_and_zero_is_rejected() {
 
 #[test]
 fn model_limits_do_not_read_credentials_or_require_a_model() {
-    let config: Config = serde_json::from_value(json!({"profile":"deepseek"})).unwrap();
+    let config: Config = serde_json::from_value(json!({ "profile": "deepseek" })).unwrap();
     let limits = config
         .limits_with(|key| {
             assert_ne!(key, "OPENAI_API_KEY");
@@ -798,8 +741,11 @@ fn model_limits_do_not_read_credentials_or_require_a_model() {
         .unwrap();
     assert_eq!(limits.context_window, 1_048_576);
     assert_eq!(limits.max_output_tokens, 393216);
-    let config: Config =
-        serde_json::from_value(json!({"context_window":90000,"max_output_tokens":8000})).unwrap();
+    let config: Config = serde_json::from_value(json!({
+        "context_window": 90000,
+        "max_output_tokens": 8000,
+    }))
+    .unwrap();
     let limits = config.limits_with(|_| None).unwrap();
     assert_eq!(limits.context_window, 90000);
     assert_eq!(limits.max_output_tokens, 8000);
@@ -811,7 +757,7 @@ fn model_limits_do_not_read_credentials_or_require_a_model() {
         0
     );
     assert!(descriptor().provides.iter().any(|role| role == MODEL_INFO));
-    assert!(create(json!({"profile":"deepseek"})).is_ok());
+    assert!(create(json!({ "profile": "deepseek" })).is_ok());
 }
 
 #[tokio::test]
@@ -851,7 +797,7 @@ async fn provider_failures_classify_without_exposing_private_details() {
     ] {
         let (endpoint, server) = server(
             status,
-            json!({"error":{"code":code,"message":"test-secret"}}).to_string(),
+            json!({ "error": { "code": code, "message": "test-secret" } }).to_string(),
         )
         .await;
         let fault = request(
@@ -874,18 +820,15 @@ async fn provider_failures_classify_without_exposing_private_details() {
 async fn dropped_stream_is_retryable_and_incomplete_output_never_returns_calls() {
     for (body, expected) in [
         (
-            event(json!({"type":"response.output_text.delta","delta":"partial"})),
+            event(json!({ "type": "response.output_text.delta", "delta": "partial" })),
             "RetryableProviderFailure",
         ),
         (
             event(json!({
                 "type": "response.failed",
                 "response": {
-                    "error": {
-                        "code": "context_length_exceeded",
-                        "message": "test-secret"
-                    }
-                }
+                    "error": { "code": "context_length_exceeded", "message": "test-secret" },
+                },
             })),
             "ContextOverflow",
         ),
@@ -894,21 +837,15 @@ async fn dropped_stream_is_retryable_and_incomplete_output_never_returns_calls()
                 "type": "response.incomplete",
                 "response": {
                     "status": "incomplete",
-                    "incomplete_details": {
-                        "reason": "max_output_tokens"
-                    },
-                    "usage": {
-                        "output_tokens": 100
-                    },
-                    "output": [
-                        {
-                            "type": "function_call",
-                            "call_id": "c1",
-                            "name": "write",
-                            "arguments": "{}"
-                        }
-                    ]
-                }
+                    "incomplete_details": { "reason": "max_output_tokens" },
+                    "usage": { "output_tokens": 100 },
+                    "output": [{
+                        "type": "function_call",
+                        "call_id": "c1",
+                        "name": "write",
+                        "arguments": "{}",
+                    }],
+                },
             })),
             "RecoverableLength",
         ),
@@ -917,13 +854,9 @@ async fn dropped_stream_is_retryable_and_incomplete_output_never_returns_calls()
                 "type": "response.incomplete",
                 "response": {
                     "status": "incomplete",
-                    "incomplete_details": {
-                        "reason": "max_output_tokens"
-                    },
-                    "usage": {
-                        "output_tokens": 1000
-                    }
-                }
+                    "incomplete_details": { "reason": "max_output_tokens" },
+                    "usage": { "output_tokens": 1000 },
+                },
             })),
             "ProviderFailure",
         ),
@@ -954,13 +887,9 @@ async fn incomplete_summary_is_terminal_even_when_usage_is_below_its_allowance()
     let body = event(json!({
         "type": "response.incomplete",
         "response": {
-            "incomplete_details": {
-                "reason": "max_output_tokens"
-            },
-            "usage": {
-                "output_tokens": 10
-            }
-        }
+            "incomplete_details": { "reason": "max_output_tokens" },
+            "usage": { "output_tokens": 10 },
+        },
     }));
     let (endpoint, server) = server("200 OK", body).await;
     let mut input = input();
@@ -1026,12 +955,7 @@ fn explicit_context_errors_and_quota_messages_are_classified_without_echoing_the
     ] {
         let fault = wire::provider_fault(
             Some(status),
-            &json!({
-                "error": {
-                    "type": "invalid_request_error",
-                    "message": message
-                }
-            }),
+            &json!({ "error": { "type": "invalid_request_error", "message": message } }),
         );
         assert_eq!(fault.code, expected);
         assert!(!fault.to_string().contains("test-secret"));

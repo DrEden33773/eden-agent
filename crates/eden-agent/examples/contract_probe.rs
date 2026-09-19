@@ -38,7 +38,7 @@ async fn probe(path: &Path, mode: &str) -> Result<(), Error> {
         if package["descriptor"]["package"] == "lifecycle" {
             package["config"] = serde_json::json!({
                 "address": listener.local_addr()?.to_string(),
-                "mode": mode
+                "mode": mode,
             });
         }
     }
@@ -157,7 +157,7 @@ async fn probe(path: &Path, mode: &str) -> Result<(), Error> {
                 session_id: session.id(),
                 run_id: run + 1,
                 contract: AGENT_LOOP.into(),
-                payload: serde_json::json!({"prompt": "stale"}),
+                payload: serde_json::json!({ "prompt": "stale" }),
             },
             Cancellation::default(),
         )
@@ -178,7 +178,7 @@ async fn probe(path: &Path, mode: &str) -> Result<(), Error> {
             "root_socket": "eof",
             "child": "joined",
             "stale_handle": "rejected",
-            "other_session": "unaffected"
+            "other_session": "unaffected",
         })
     );
     Ok(())

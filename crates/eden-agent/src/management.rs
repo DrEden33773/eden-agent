@@ -122,9 +122,7 @@ fn copy_records(
                 copy.payload = json!({
                     "type": "message",
                     "role": "user",
-                    "content": copy.payload[
-                        "content"
-                    ]
+                    "content": copy.payload["content"],
                 });
             } else {
                 continue;
@@ -331,7 +329,7 @@ impl Session {
             "sequence": selected_node,
             "source_tip": scan.records.last().unwrap().sequence,
             "operation": options.kind,
-            "source": options.source
+            "source": options.source,
         });
         if matches!(options.kind, CopyKind::Migrate | CopyKind::Upgrade) {
             header.payload["roles"] = json!(selected.roles);
@@ -454,7 +452,8 @@ async fn isolated_service<I: Serialize, O: serde::de::DeserializeOwned + Send + 
         for package in &mut selected.packages {
             if package.descriptor.package == "distribution" {
                 package.config = json!({
-                "root":WorkspaceOptions::default().global_dir.join("distribution")
+                    "root":
+                        WorkspaceOptions::default().global_dir.join("distribution"),
                 });
             }
             if package
@@ -464,14 +463,15 @@ async fn isolated_service<I: Serialize, O: serde::de::DeserializeOwned + Send + 
                 .any(|role| role == eden_protocol::resources::SOURCE)
             {
                 package.config = json!({
-                "cwd":std::env::current_dir().map_err(|e| invalid(e.to_string()))?,
-                "global_dir":WorkspaceOptions::default().global_dir,
-                "trusted":false,
-                "settings":{
-                "discover_context":false,
-                "discover_skills":false,
-                "discover_templates":false
-                }
+                    "cwd":
+                        std::env::current_dir().map_err(|e| invalid(e.to_string()))?,
+                    "global_dir": WorkspaceOptions::default().global_dir,
+                    "trusted": false,
+                    "settings": {
+                        "discover_context": false,
+                        "discover_skills": false,
+                        "discover_templates": false,
+                    },
                 });
             }
         }
@@ -790,7 +790,11 @@ impl Session {
         self.start(true, move |session, run_id, _| async move {
             as_terminal(
                 session
-                    .commit(run_id, "session_metadata", json!({"name":name,"tags":tags}))
+                    .commit(
+                        run_id,
+                        "session_metadata",
+                        json!({ "name": name, "tags": tags }),
+                    )
                     .await
                     .map(|_| json!("Session metadata saved.")),
             )
@@ -855,7 +859,7 @@ impl Session {
                         }),
                     )
                     .await?;
-                Ok(json!({"included_from":record_id}))
+                Ok(json!({ "included_from": record_id }))
             }
             .await;
             as_terminal(result)
@@ -891,24 +895,24 @@ mod tests {
     #[test]
     fn fork_keeps_ancestors_and_rebases_identity() {
         let records = vec![
-            r(1, None, "session", json!({"cwd":"/p"})),
+            r(1, None, "session", json!({ "cwd": "/p" })),
             r(
                 2,
                 Some(1),
                 "message",
-                json!({"type":"message","role":"user","content":[]}),
+                json!({ "type": "message", "role": "user", "content": [] }),
             ),
             r(
                 3,
                 Some(2),
                 "message",
-                json!({"type":"message","role":"assistant","content":[]}),
+                json!({ "type": "message", "role": "assistant", "content": [] }),
             ),
             r(
                 4,
                 Some(2),
                 "message",
-                json!({"type":"message","role":"assistant","content":[]}),
+                json!({ "type": "message", "role": "assistant", "content": [] }),
             ),
         ];
         let copy = copy_records(&records, &CopyKind::Fork, Some(3), 99, false).unwrap();
@@ -923,19 +927,14 @@ mod tests {
             "id": 2,
             "kind": "steering",
             "branch": "main",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "change requested"
-                }
-            ]
+            "content": [{ "type": "text", "text": "change requested" }],
         });
         let records = vec![
             r(1, None, "session", json!({})),
             r(2, Some(1), "queue_accepted", q.clone()),
             r(3, Some(2), "queue_delivered", q),
-            r(4, Some(3), "queue_consumed", json!({"ids":[2]})),
-            r(5, Some(4), "queue_accepted", json!({"id":5})),
+            r(4, Some(3), "queue_consumed", json!({ "ids": [2] })),
+            r(5, Some(4), "queue_accepted", json!({ "id": 5 })),
         ];
         let copy = copy_records(&records, &CopyKind::Clone, None, 99, false).unwrap();
         assert_eq!(copy.len(), 2);
@@ -949,12 +948,7 @@ mod tests {
             "id": 2,
             "kind": "steering",
             "branch": "main",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "one user input"
-                }
-            ]
+            "content": [{ "type": "text", "text": "one user input" }],
         });
         let records = vec![
             r(1, None, "session", json!({})),
@@ -967,7 +961,7 @@ mod tests {
                 7,
                 Some(6),
                 "queue_config",
-                json!({"steering":"all","follow_up":"one"}),
+                json!({ "steering": "all", "follow_up": "one" }),
             ),
         ];
         let copy = copy_records(&records, &CopyKind::Clone, None, 99, false).unwrap();
@@ -985,12 +979,7 @@ mod tests {
         let q = json!({
             "id": 2,
             "kind": "steering",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "legacy instruction"
-                }
-            ]
+            "content": [{ "type": "text", "text": "legacy instruction" }],
         });
         let mut records = vec![
             r(1, None, "session", json!({})),
@@ -1000,9 +989,9 @@ mod tests {
                 4,
                 Some(3),
                 "message",
-                json!({"type":"message","role":"assistant","content":[]}),
+                json!({ "type": "message", "role": "assistant", "content": [] }),
             ),
-            r(5, Some(4), "queue_accepted", json!({"id":5})),
+            r(5, Some(4), "queue_accepted", json!({ "id": 5 })),
         ];
         for record in &mut records {
             record.schema_version = 1;
@@ -1020,7 +1009,7 @@ mod tests {
         let source = directory.join("source.jsonl");
         let composition = directory.join("composition.json");
         let records = vec![
-            r(1, None, "session", json!({"cwd":"/saved"})),
+            r(1, None, "session", json!({ "cwd": "/saved" })),
             r(2, Some(1), "message", json!({})),
             r(3, Some(2), "message", json!({})),
         ];
@@ -1052,14 +1041,14 @@ mod tests {
         let records = vec![
             r(1, None, "session", json!({})),
             r(2, Some(1), "message", json!({})),
-            r(3, Some(2), "queue_accepted", json!({"id":3})),
-            r(4, Some(2), "message", json!({"other_branch":true})),
-            r(5, Some(3), "message", json!({"retained":true})),
+            r(3, Some(2), "queue_accepted", json!({ "id": 3 })),
+            r(4, Some(2), "message", json!({ "other_branch": true })),
+            r(5, Some(3), "message", json!({ "retained": true })),
             r(
                 6,
                 Some(5),
                 "compaction",
-                json!({"first_kept":3,"source_ids":[2]}),
+                json!({ "first_kept": 3, "source_ids": [2] }),
             ),
         ];
         let copy = copy_records(&records, &CopyKind::Clone, None, 99, false).unwrap();
@@ -1071,40 +1060,16 @@ mod tests {
     fn binding_ignores_unused_packages_and_compatible_inventory_changes() {
         let original = json!({
             "cwd": "/p",
-            "roles": {
-                "context": "author"
-            },
+            "roles": { "context": "author" },
             "packages": [
-                {
-                    "package": "author",
-                    "version": "1",
-                    "provides": [
-                        "context"
-                    ]
-                },
-                {
-                    "package": "old-display",
-                    "provides": [
-                        "display"
-                    ]
-                }
-            ]
+                { "package": "author", "version": "1", "provides": ["context"] },
+                { "package": "old-display", "provides": ["display"] }
+            ],
         });
         let updated = json!({
             "cwd": "/p",
-            "roles": {
-                "context": "author"
-            },
-            "packages": [
-                {
-                    "package": "author",
-                    "version": "2",
-                    "provides": [
-                        "context",
-                        "extra"
-                    ]
-                }
-            ]
+            "roles": { "context": "author" },
+            "packages": [{ "package": "author", "version": "2", "provides": ["context", "extra"] }],
         });
         assert!(compatible_binding(&original, &updated));
         let mut relocated = updated;

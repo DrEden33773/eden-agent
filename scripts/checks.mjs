@@ -53,6 +53,23 @@ function withToolchainPath(env, directory) {
 // snapshot is checked once per process rather than once per check call.
 const verifiedPythonRoots = new Set();
 
+// eden-fmt formats the json! and select! bodies rustfmt cannot reach. It is a
+// workspace member, so it is resolved from the tree that owns it rather than
+// from the snapshot being checked: a hook snapshot has no build outputs.
+function edenFmt(toolRoot, env) {
+  const name = process.platform === "win32" ? "eden-fmt.exe" : "eden-fmt";
+  const candidates = [
+    env.EDEN_FMT,
+    env.CARGO_TARGET_DIR ? join(env.CARGO_TARGET_DIR, "debug", name) : "",
+    join(toolRoot, "target", "debug", name),
+    join(toolRoot, "target", "hooks", "debug", name),
+  ].filter(Boolean);
+  const found = candidates.find((candidate) => existsSync(candidate));
+  if (!found)
+    throw new Error("eden-fmt is not built. Run cargo build --locked -p eden-fmt in this clone.");
+  return found;
+}
+
 export function check(
   kind,
   { root = project, toolRoot = project, env = process.env, extra = [] } = {},
@@ -147,6 +164,15 @@ for dependency in config["dependency-groups"]["dev"]:
     kind === "test"
       ? manifests(root).filter((manifest) => manifest !== "Cargo.toml")
       : manifests(root);
+  const formatter = kind === "fmt" || kind === "format" ? edenFmt(toolRoot, env) : "";
+  // Each manifest owns its own tree: the root run leaves the independent
+  // authors to the runs their own manifests get below.
+  const owned = manifests(root).map((other) => dirname(other));
+  const nested = (directory) =>
+    owned
+      .filter((other) => other !== directory)
+      .filter((other) => other.startsWith(directory === "." ? "" : `${directory}/`))
+      .flatMap((other) => ["--skip", other]);
   const failures = [];
   for (const manifest of selected) {
     console.log(`${kind}: ${manifest}`);
@@ -175,6 +201,15 @@ for dependency in config["dependency-groups"]["dev"]:
             ];
     try {
       run(cargo.program, args, root, rustEnv);
+      if (formatter) {
+        const directory = dirname(manifest);
+        run(
+          formatter,
+          [kind === "fmt" ? "check" : "write", directory, ...nested(directory)],
+          root,
+          rustEnv,
+        );
+      }
     } catch (error) {
       // Each author project is its own workspace, so one failure must not hide
       // the results of the projects that would have run after it.

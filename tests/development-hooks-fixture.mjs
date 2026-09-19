@@ -16,6 +16,23 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const source = fileURLToPath(new URL("../", import.meta.url));
+
+// A hook scenario runs in a temporary repository with no build outputs, so the
+// macro formatter is taken from this checkout; it is built once when missing.
+const formatter = join(
+  source,
+  "target",
+  "debug",
+  process.platform === "win32" ? "eden-fmt.exe" : "eden-fmt",
+);
+if (!existsSync(formatter)) {
+  const build = spawnSync("cargo", ["build", "--locked", "-p", "eden-fmt"], {
+    cwd: source,
+    stdio: "inherit",
+  });
+  assert.equal(build.status, 0, "cargo build --locked -p eden-fmt");
+}
+process.env.EDEN_FMT = formatter;
 export function git(root, ...args) {
   return execFileSync("git", args, {
     cwd: root,

@@ -38,6 +38,17 @@ test("pre-commit checks staged Rust and preserves partial staging in both direct
   unchanged(root, "src/lib.rs", good, bad);
 });
 
+test("pre-commit rejects an unformatted json! body in the root workspace", (t) => {
+  const root = fixture(t);
+  const body = 'pub fn value() -> u32 {\n    let v = json!({"a":1});\n    1\n}\n';
+  writeFileSync(join(root, "src/lib.rs"), body);
+  git(root, "add", "src/lib.rs");
+  const result = command(root, "git", ["commit", "-m", "unformatted macro body"]);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stdout + result.stderr, /would be reformatted/);
+  unchanged(root, "src/lib.rs", body, body);
+});
+
 test("pre-commit uses staged lint configuration and checks remaining Markdown on deletion", (t) => {
   const root = fixture(t);
   const normalConfig = readFileSync(join(root, ".markdownlint-cli2.jsonc"), "utf8");

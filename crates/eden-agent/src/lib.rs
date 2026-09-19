@@ -329,7 +329,7 @@ impl Session {
         self.0.events.push(
             run_id,
             "accepted",
-            serde_json::json!({"management":management}),
+            serde_json::json!({ "management": management }),
         );
         let session = self.clone();
         tokio::spawn(async move {
@@ -528,7 +528,7 @@ impl Session {
         self.0.events.push(
             run_id,
             "committed",
-            serde_json::json!({"sequence":receipt.sequence,"kind":kind}),
+            serde_json::json!({ "sequence": receipt.sequence, "kind": kind }),
         );
         Ok(())
     }

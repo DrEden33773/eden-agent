@@ -242,6 +242,8 @@ jobs:
         run: node scripts/ci-run.mjs javascript pnpm js:check
       - name: Markdown
         run: node scripts/ci-run.mjs markdown pnpm markdown:check
+      - name: Build the macro formatter
+        run: node scripts/ci-run.mjs eden-fmt cargo build --locked -p eden-fmt
       - name: Formatting including independent authors
         run: node scripts/ci-run.mjs rust-format pnpm rust:check
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4

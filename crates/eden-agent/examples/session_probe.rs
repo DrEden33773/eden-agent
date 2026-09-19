@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             json!({
                 "stale_preview_rejected": true,
                 "source_preserved": true,
-                "destination_absent": true
+                "destination_absent": true,
             })
         );
         return Ok(());
@@ -55,9 +55,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .cloned()
         .unwrap_or_else(|| "author.counter".into());
     let value = if version == 0 {
-        json!({"value":17,"label":"preserved"})
+        json!({ "value": 17, "label": "preserved" })
     } else {
-        json!({"count":17,"label":"preserved"})
+        json!({ "count": 17, "label": "preserved" })
     };
     let run = session
         .record_state(ExtensionState {
@@ -87,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "state_committed": true,
             "records": records.len(),
             "double_shutdown": true,
-            "version": version
+            "version": version,
         })
     );
     Ok(())

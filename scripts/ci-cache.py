@@ -14,7 +14,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 # The key names one reusable build context, not one commit: a commit in the key
 # made every run a new entry that no later run could hit, which kept the 10 GB
 # cache quota full of entries only their own revision could use.
-CACHE_PREFIX = "cargo-target-v4"
+CACHE_PREFIX = "cargo-target-v5"
 # Retained as history: the recorded v1 entry from run 34955722547 still serves
 # as a restore candidate when the environment matches that run exactly, and the
 # constants below are the evidence of the v1-to-v2 migration. The v2-to-v3 and

@@ -51,8 +51,9 @@ async fn powershell_uses_native_paths_and_explicit_cwd() {
         project.request(
             "powershell",
             json!({
-"command":"[IO.File]::WriteAllText((Join-Path (Get-Location) 'space dir/value.txt'), \
-                'native UTF-8'); Get-Content -LiteralPath 'space dir/value.txt'"}),
+                "command": "[IO.File]::WriteAllText((Join-Path (Get-Location) 'space dir/value.txt'), \
+                'native UTF-8'); Get-Content -LiteralPath 'space dir/value.txt'",
+            }),
         ),
         Scope::default(),
         "pwsh".into(),
@@ -84,9 +85,11 @@ async fn powershell_cancellation_reaps_native_descendant_before_completion() {
     .unwrap();
     let request = project.request(
         "powershell",
-        json!({"command":"$child=Start-Process pwsh -ArgumentList \
+        json!({
+            "command": "$child=Start-Process pwsh -ArgumentList \
                 '-NoProfile','-NonInteractive','-File','child.ps1' -PassThru; Wait-Process \
-                -Id $child.Id"}),
+                -Id $child.Id",
+        }),
     );
     let scope = Scope::default();
     let cancel = scope.cancellation();
@@ -120,7 +123,7 @@ async fn write_edit_and_read_use_explicit_cwd_and_utf8_line_ranges() {
         project
             .run(
                 "write",
-                json!({"path":"nested/example.txt", "content":"一\nsecond\n三\n"})
+                json!({ "path": "nested/example.txt", "content": "一\nsecond\n三\n" })
             )
             .await
             .error
@@ -130,11 +133,7 @@ async fn write_edit_and_read_use_explicit_cwd_and_utf8_line_ranges() {
         project
             .run(
                 "edit",
-                json!({
-                    "path": "nested/example.txt",
-                    "old_text": "second",
-                    "new_text": "二"
-                })
+                json!({ "path": "nested/example.txt", "old_text": "second", "new_text": "二" })
             )
             .await
             .error
@@ -143,7 +142,7 @@ async fn write_edit_and_read_use_explicit_cwd_and_utf8_line_ranges() {
     let result = project
         .run(
             "read",
-            json!({"path":"nested/example.txt", "offset":2,"limit":1}),
+            json!({ "path": "nested/example.txt", "offset": 2, "limit": 1 }),
         )
         .await;
     assert_eq!(result.text, "二\n");
@@ -162,7 +161,7 @@ async fn exact_edit_rejects_zero_multiple_and_empty_matches_without_writing() {
         let result = project
             .run(
                 "edit",
-                json!({"path":"file", "old_text":old, "new_text":"lost"}),
+                json!({ "path": "file", "old_text": old, "new_text": "lost" }),
             )
             .await;
         assert!(result.error.is_some(), "old={old}");
@@ -179,17 +178,17 @@ async fn invalid_encoding_and_ranges_are_explicit_errors() {
     std::fs::write(project.0.join("binary"), [0xff, 0xfe]).unwrap();
     assert!(
         project
-            .run("read", json!({"path":"binary"}))
+            .run("read", json!({ "path": "binary" }))
             .await
             .error
             .is_some()
     );
     std::fs::write(project.0.join("text"), "one\ntwo").unwrap();
     for range in [
-        json!({"offset":0}),
-        json!({"offset":8}),
-        json!({"limit":0}),
-        json!({"offset":-1}),
+        json!({ "offset": 0 }),
+        json!({ "offset": 8 }),
+        json!({ "limit": 0 }),
+        json!({ "offset": -1 }),
     ] {
         let mut args = range;
         args["path"] = json!("text");
@@ -201,11 +200,11 @@ async fn invalid_encoding_and_ranges_are_explicit_errors() {
 async fn long_read_and_shell_output_are_bounded_with_explicit_truncation() {
     let project = Project::new();
     std::fs::write(project.0.join("long"), "界".repeat(50_000)).unwrap();
-    let read = project.run("read", json!({"path":"long"})).await;
+    let read = project.run("read", json!({ "path": "long" })).await;
     assert!(read.truncated);
     assert!(read.text.len() <= 65_536);
     let shell = project
-        .run("bash", json!({"command":"printf '%100000s' x"}))
+        .run("bash", json!({ "command": "printf '%100000s' x" }))
         .await;
     assert!(shell.truncated, "{shell:?}");
     assert!(shell.text.len() <= 65_536);
@@ -219,7 +218,7 @@ async fn shell_reports_nonzero_exit_and_cwd_and_missing_shell() {
     let result = project
         .run(
             "bash",
-            json!({"command":"cat marker; printf error >&2; exit 7"}),
+            json!({ "command": "cat marker; printf error >&2; exit 7" }),
         )
         .await;
     assert_eq!(result.exit_code, Some(7));
@@ -227,7 +226,7 @@ async fn shell_reports_nonzero_exit_and_cwd_and_missing_shell() {
     assert!(result.text.contains("error"));
     assert!(result.error.is_some());
     let missing = execute(
-        project.request("bash", json!({"command":"echo bad"})),
+        project.request("bash", json!({ "command": "echo bad" })),
         Scope::default(),
         project.0.join("absent-shell").to_str().unwrap().into(),
     )
@@ -290,7 +289,7 @@ async fn cancellation_stops_shell_descendants_before_completion() {
     let command = format!("exec 3<>/dev/tcp/127.0.0.1/{port}; sleep 300 & printf R >&3; wait");
     let scope = Scope::default();
     let cancel = scope.cancellation();
-    let request = project.request("bash", json!({"command":command}));
+    let request = project.request("bash", json!({ "command": command }));
     let running = tokio::spawn(execute(request, scope, "bash".into()));
     let (mut socket, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
         .await
@@ -324,7 +323,10 @@ async fn normal_shell_exit_also_cleans_background_descendants() {
     let project = Project::new();
     let result = tokio::time::timeout(
         Duration::from_secs(10),
-        project.run("bash", json!({"command":"sleep 300 & echo ready; exit 0"})),
+        project.run(
+            "bash",
+            json!({ "command": "sleep 300 & echo ready; exit 0" }),
+        ),
     )
     .await
     .unwrap();
@@ -340,7 +342,7 @@ async fn dropping_root_future_keeps_process_cleanup_owned_by_scope() {
     let command = format!("exec 3<>/dev/tcp/127.0.0.1/{port}; sleep 300 & printf R >&3; wait");
     let scope = Scope::default();
     let cancellation = scope.cancellation();
-    let request = project.request("bash", json!({"command":command}));
+    let request = project.request("bash", json!({ "command": command }));
     let running = tokio::spawn(execute(request, scope, "bash".into()));
     let (mut socket, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
         .await
@@ -368,7 +370,7 @@ async fn invalid_cwd_is_rejected_before_file_side_effects() {
     let project = Project::new();
     let mut request = project.request(
         "write",
-        json!({"path":project.0.join("absent"),"content":"wrong"}),
+        json!({ "path": project.0.join("absent"), "content": "wrong" }),
     );
     request.cwd = ".".into();
     assert_eq!(
@@ -396,7 +398,7 @@ async fn cancelled_descendant_with_closed_stdio_has_exited_before_result() {
     let scope = Scope::default();
     let cancellation = scope.cancellation();
     let task = tokio::spawn(execute(
-        project.request("bash", json!({"command":command})),
+        project.request("bash", json!({ "command": command })),
         scope,
         "bash".into(),
     ));
@@ -432,7 +434,7 @@ async fn foreground_exit_waits_for_descendant_that_closed_stdio() {
          ready >ready; exec sleep 300) & read line <ready; exit 0"
     );
     let task = tokio::spawn(execute(
-        project.request("bash", json!({"command":command})),
+        project.request("bash", json!({ "command": command })),
         Scope::default(),
         "bash".into(),
     ));

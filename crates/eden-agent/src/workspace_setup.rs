@@ -11,7 +11,7 @@ pub(crate) fn prepare(
         events.push(
             0,
             "resource_diagnostic",
-            serde_json::json!({"message":diagnostic}),
+            serde_json::json!({ "message": diagnostic }),
         );
     }
     let mut selected: eden_protocol::Composition = serde_json::from_slice(

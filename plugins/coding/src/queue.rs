@@ -65,7 +65,7 @@ pub(crate) async fn queue(
             append(
                 &cx,
                 "queue_config",
-                json!({"steering":steering,"follow_up":follow_up}),
+                json!({ "steering": steering, "follow_up": follow_up }),
             )
             .await?;
             Ok(entries)

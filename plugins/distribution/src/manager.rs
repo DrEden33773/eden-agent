@@ -480,11 +480,7 @@ impl Manager {
             }
             result?;
         }
-        Ok(json!({
-        "path":path,
-        "id":id,
-        "composition":composition
-        }))
+        Ok(json!({ "path": path, "id": id, "composition": composition }))
     }
     pub fn remove(&self, name: &str, version: &str, force: bool) -> Result<Value, Fault> {
         let _lock = self.lock()?;
@@ -539,11 +535,7 @@ impl Manager {
             ));
         }
         std::fs::remove_dir_all(&target).map_err(io)?;
-        Ok(json!({
-        "removed":target,
-        "affected_bindings":references,
-        "history_deleted":false
-        }))
+        Ok(json!({ "removed": target, "affected_bindings": references, "history_deleted": false }))
     }
 }
 #[cfg(test)]
@@ -567,20 +559,20 @@ mod tests {
             std::fs::create_dir_all(&path).unwrap();
             std::fs::write(path.join("plugin.bin"), library).unwrap();
             let bundle = json!({
-                        "manifest":{
-                        "descriptor":{
-                        "package":"example",
-                        "version":version,
-                        "provides":["example.service.v1"]
-            },
-                        "host":eden_plugin_sdk::protocol::CONTRACT,
-                        "sdk":eden_plugin_sdk::protocol::CONTRACT,
-                        "target":eden_plugin_sdk::abi::TARGET,
-                        "library":"plugin.bin",
-                        "config":null
-            },
-                        "dependencies":[],
-                        "build":null
+                "manifest": {
+                    "descriptor": {
+                        "package": "example",
+                        "version": version,
+                        "provides": ["example.service.v1"],
+                    },
+                    "host": eden_plugin_sdk::protocol::CONTRACT,
+                    "sdk": eden_plugin_sdk::protocol::CONTRACT,
+                    "target": eden_plugin_sdk::abi::TARGET,
+                    "library": "plugin.bin",
+                    "config": null,
+                },
+                "dependencies": [],
+                "build": null,
             });
             std::fs::write(
                 path.join("package.json"),
@@ -653,13 +645,8 @@ mod tests {
         let resolved = m
             .resolve(
                 empty.clone(),
-                &json!([{
-                "name":"example",
-                "version":"1.0.0"
-                }]),
-                &json!({
-                "example.service.v1":"example"
-                }),
+                &json!([{ "name": "example", "version": "1.0.0" }]),
+                &json!({ "example.service.v1": "example" }),
             )
             .unwrap();
         let composition = serde_json::from_value(resolved["composition"].clone()).unwrap();
@@ -677,10 +664,7 @@ mod tests {
         assert_eq!(
             m.resolve(
                 empty,
-                &json!([{
-                "name":"example",
-                "version":"1.0.0"
-                }]),
+                &json!([{ "name": "example", "version": "1.0.0" }]),
                 &json!({})
             )
             .unwrap_err()

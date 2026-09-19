@@ -95,13 +95,13 @@ pub async fn run(args: &[String]) -> Result<i32> {
                 std::io::stdout(),
                 "{}",
                 json!({
-                    "session_id": scan.records.first().map(|r|r.session_id),
+                    "session_id": scan.records.first().map(|r| r.session_id),
                     "records": scan.records.len(),
                     "head": state.0,
                     "branch": state.1,
-                    "binding": scan.records.first().map(|r|&r.payload),
+                    "binding": scan.records.first().map(|r| &r.payload),
                     "metadata": metadata,
-                    "diagnostic": scan.diagnostic
+                    "diagnostic": scan.diagnostic,
                 })
             )?;
         } else if command == "tree" {
@@ -113,7 +113,7 @@ pub async fn run(args: &[String]) -> Result<i32> {
                         "id": record.sequence,
                         "parent": record.parent_id,
                         "branch": record.branch,
-                        "kind": record.kind
+                        "kind": record.kind,
                     })
                 )?;
             }
@@ -165,7 +165,7 @@ pub async fn run(args: &[String]) -> Result<i32> {
             writeln!(
                 std::io::stdout(),
                 "{}",
-                json!({"created":Session::apply_copy(plan).await?})
+                json!({ "created": Session::apply_copy(plan).await? })
             )?;
         }
         return Ok(0);

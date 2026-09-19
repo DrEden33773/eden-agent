@@ -89,14 +89,8 @@ mod tests {
         assert_eq!(defaults.summary_allowance(false, 100000), 13107);
         assert_eq!(defaults.summary_allowance(true, 100000), 8192);
         let small = Settings::parse(json!({
-            "compaction": {
-                "enabled": false,
-                "keep_recent_tokens": 1
-            },
-            "retry": {
-                "max_retries": 0,
-                "base_delay_ms": 1
-            }
+            "compaction": { "enabled": false, "keep_recent_tokens": 1 },
+            "retry": { "max_retries": 0, "base_delay_ms": 1 },
         }))
         .unwrap();
         assert!(!small.compaction_enabled);

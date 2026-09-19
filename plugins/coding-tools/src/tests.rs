@@ -82,7 +82,8 @@ async fn powershell_cancellation_reaps_native_descendant_before_completion() {
             concat!(
                 "$client=[Net.Sockets.TcpClient]::new('127.0.0.1',{port}); $stream=$client.GetStream(); ",
                 "$stream.WriteByte(82); $stream.Flush(); Start-Sleep -Seconds 300",
-            )
+            ),
+            port = port,
         ),
     )
     .unwrap();

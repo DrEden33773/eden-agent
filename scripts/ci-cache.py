@@ -11,6 +11,15 @@ from collections.abc import Mapping
 from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+# The key names one reusable build context, not one commit: a commit in the key
+# made every run a new entry that no later run could hit, which kept the 10 GB
+# cache quota full of entries only their own revision could use.
+CACHE_PREFIX = "cargo-target-v3"
+# Retained as history: the recorded v1 entry from run 34955722547 still serves
+# as a restore candidate when the environment matches that run exactly, and the
+# constants below are the evidence of the v1-to-v2 migration. The v2-to-v3
+# change deliberately adds no fallback, so the first v3 run on each runner is
+# cold; that cold run is the v3 baseline rather than an accident.
 LEGACY_SOURCE_COMMIT = "51dffd733890e2cb15b29588cfbb03c0e6bdbeb2"
 LEGACY_CACHE_COMMIT = "99564f5b129d0e393c4565ba4f666210efe078d4"
 LEGACY_BUILD_INPUTS = "294cf63576952c6443b66321011a0c8ad772e140882ab1651669e9946b9ffa75"
@@ -126,15 +135,20 @@ def cache_keys(
         raise ValueError("cache key requires an exact commit ID")
     environment_hash, inputs = identities(files, environment)
     context = digest({"environment": environment_hash, "image": image})
-    prefix = f"cargo-target-v2-{runner_os}-{architecture}-{context}-"
-    restore = [f"{prefix}{inputs}-", prefix]
+    # The exact key is the only input-bound candidate; the prefix below it
+    # restores the newest compatible context and lets Cargo revalidate every
+    # restored output. Nothing here embeds `commit`, so a later revision hits
+    # this entry instead of writing another one.
+    prefix = f"{CACHE_PREFIX}-{runner_os}-{architecture}-{context}-"
+    restore = [prefix]
     legacy = LEGACY_IMAGES.get((runner_os, architecture))
     legacy_key = None
     if legacy and legacy[0] == image and inputs == LEGACY_BUILD_INPUTS:
         legacy_key = f"cargo-target-v1-{runner_os}-{architecture}-{legacy[1]}-{LEGACY_CACHE_COMMIT}"
         restore.append(legacy_key)
     return {
-        "key": f"{prefix}{inputs}-{commit}",
+        "key": f"{prefix}{inputs}",
+        "commit": commit,
         "restore_keys": restore,
         "context": context,
         "build_inputs": inputs,

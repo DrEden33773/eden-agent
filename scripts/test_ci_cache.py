@@ -1,4 +1,4 @@
-"""Build cache identity and one-time legacy migration regressions."""
+"""Build cache identity, one rolling key per context, and legacy migration."""
 
 import importlib
 import pathlib
@@ -46,15 +46,26 @@ class CacheKeyTests(unittest.TestCase):
             workflow.write_text("different logging and step ordering", encoding="utf-8")
             source.write_text("changed source must still be checked by Cargo", encoding="utf-8")
             self.assertEqual(before, self.keys(cache.read_inputs(root)))
-            later = self.keys(cache.read_inputs(root), commit="b" * 40)
-            self.assertNotEqual(before["key"], later["key"])
-            self.assertEqual(before["restore_keys"], later["restore_keys"])
             nested = root / "new-package/Cargo.toml"
             nested.parent.mkdir()
             nested.write_text('[package]\nname = "new-package"\n', encoding="utf-8")
             self.assertNotEqual(
                 before["build_inputs"], self.keys(cache.read_inputs(root))["build_inputs"]
             )
+
+    def test_the_key_names_one_reusable_build_context_not_one_commit(self) -> None:
+        before = self.keys()
+        later = self.keys(commit="b" * 40)
+        self.assertTrue(before["key"].startswith("cargo-target-v3-"))
+        self.assertNotIn(COMMIT, before["key"])
+        # One entry per compatible build context is what makes a later revision
+        # restore it instead of writing an entry only its own revision can use.
+        self.assertEqual(before["key"], later["key"])
+        self.assertEqual(before["restore_keys"], later["restore_keys"])
+        self.assertEqual(before["restore_keys"], [before["key"].rsplit("-", 1)[0] + "-"])
+        # The exact commit is still required and still recorded, just not in the key.
+        self.assertEqual(before["commit"], COMMIT)
+        self.assertEqual(later["commit"], "b" * 40)
 
     def test_environment_changes_keep_separate_contexts(self) -> None:
         before = self.keys()
@@ -78,7 +89,8 @@ class CacheKeyTests(unittest.TestCase):
             self.keys(runner_os="ubuntu-26.04"),
             self.keys(architecture="ARM64"),
         ):
-            self.assertNotEqual(before["restore_keys"][1], changed["restore_keys"][1])
+            self.assertNotEqual(before["restore_keys"][0], changed["restore_keys"][0])
+            self.assertNotEqual(before["key"], changed["key"])
             self.assertIsNone(changed["legacy_candidate"])
         self.assertEqual(before, self.keys(environment={**ENV, "GITHUB_RUN_ID": "next-run"}))
 
@@ -88,10 +100,11 @@ class CacheKeyTests(unittest.TestCase):
             dict(FILES, **{"Cargo.lock": "version = 4\n# changed dependency graph\n"})
         )
         self.assertNotEqual(before["build_inputs"], changed["build_inputs"])
-        self.assertNotEqual(before["restore_keys"][0], changed["restore_keys"][0])
-        self.assertEqual(before["restore_keys"][1], changed["restore_keys"][1])
+        self.assertNotEqual(before["key"], changed["key"])
+        # A lock change reuses the newest entry of the same environment context.
+        self.assertEqual(before["restore_keys"], changed["restore_keys"])
         self.assertIsNone(changed["legacy_candidate"])
-        self.assertEqual(len(changed["restore_keys"]), 2)
+        self.assertEqual(len(changed["restore_keys"]), 1)
 
     def test_legacy_migration_requires_exact_inputs_platform_and_recorded_image(self) -> None:
         fingerprint = cache.identities(FILES, ENV)[1]

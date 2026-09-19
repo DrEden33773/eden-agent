@@ -504,7 +504,17 @@ mod platform {
             // SAFETY: The handle has PROCESS_TERMINATE access and belongs to
             // this job, which contains only the shell and its descendants.
             if unsafe { TerminateProcess(process.as_raw_handle(), 1) } == 0 {
-                return Err(win_error("terminate shell job member"));
+                // Windows refuses to stop a process that already terminated and
+                // reports that as access denied. A member that exited after it
+                // was enumerated is the normal race, exactly as on Unix, so only
+                // a member that is still running is a cleanup failure.
+                // SAFETY: The handle owns SYNCHRONIZE access, and a zero timeout
+                // only reports the current state instead of waiting.
+                let exited =
+                    unsafe { WaitForSingleObject(process.as_raw_handle(), 0) } == WAIT_OBJECT_0;
+                if !exited {
+                    return Err(win_error("terminate shell job member"));
+                }
             }
         }
         Ok(())

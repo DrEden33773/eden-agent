@@ -17,10 +17,12 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 CACHE_PREFIX = "cargo-target-v5"
 # Retained as history: the recorded v1 entry from run 34955722547 still serves
 # as a restore candidate when the environment matches that run exactly, and the
-# constants below are the evidence of the v1-to-v2 migration. The v2-to-v3 and
-# v3-to-v4 changes deliberately add no fallback, so the first run on each new
-# key is cold; that cold run is the baseline of the new key rather than an
-# accident.
+# constants below are the evidence of the v1-to-v2 migration. The v2-to-v3,
+# v3-to-v4 and v4-to-v5 changes deliberately add no fallback, so the first run
+# on each new key is cold; that cold run is the baseline of the new key rather
+# than an accident. v4-to-v5 is what the eden-fmt workspace member costs: it
+# joins the unit graph every runner compiles while the test selection stays
+# unchanged, so the identity moved without a selection change to explain it.
 LEGACY_SOURCE_COMMIT = "51dffd733890e2cb15b29588cfbb03c0e6bdbeb2"
 LEGACY_CACHE_COMMIT = "99564f5b129d0e393c4565ba4f666210efe078d4"
 LEGACY_BUILD_INPUTS = "294cf63576952c6443b66321011a0c8ad772e140882ab1651669e9946b9ffa75"

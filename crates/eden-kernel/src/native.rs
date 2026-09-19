@@ -178,7 +178,9 @@ impl NativeInstance {
             result = &mut receiver => result,
             _ = cancel.cancelled() => {
                 // SAFETY: This call is counted active until release finishes.
-                unsafe { (self.api.cancel)(handle, operation); }
+                unsafe {
+                    (self.api.cancel)(handle, operation);
+                }
                 receiver.await
             }
         }

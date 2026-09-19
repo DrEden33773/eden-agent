@@ -591,7 +591,7 @@ impl Session {
                     biased;
                     _ = cancel.cancelled() => {
                         return Err(Fault::new("Cancelled", "navigation", "cancelled"));
-                    }
+                    },
                     _ = std::future::ready(()) => {}
                 }
                 let _: c::StoreReply = session

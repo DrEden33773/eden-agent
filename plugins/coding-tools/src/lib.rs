@@ -393,8 +393,7 @@ async fn shell_command(
         // explicitly. Neither path lets cleanup rewrite the leader's status.
         let (stop, status, cancelled) = tokio::select! {
             status = child.wait() => {
-                let status =
-                    status.map_err(|error| fault("ToolFailure", error.to_string()))?;
+                let status = status.map_err(|error| fault("ToolFailure", error.to_string()))?;
                 let stop = eden_process::Stop::complete(&status);
                 // Foreground completion cannot leave background children
                 // holding pipes or continuing file writes after the tool result
@@ -402,7 +401,7 @@ async fn shell_command(
                 // action never signals it again.
                 tree.cleanup_descendants()?;
                 (stop, status, false)
-            }
+            },
             _ = cancellation.cancelled() => {
                 tree.terminate_group()?;
                 let status = child

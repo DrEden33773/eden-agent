@@ -93,13 +93,13 @@ impl Session {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = records.clone();
         tokio::select! {
-        biased;
-        _=cancel.cancelled()=>return Err(Fault::new("Cancelled",
-        "composition",
-        "switch cancelled before stopping the current generation")),
-        _=std::future::ready(())=>{
-
-        }
+            biased;
+            _ = cancel.cancelled() => return Err(Fault::new(
+                    "Cancelled",
+                    "composition",
+                    "switch cancelled before stopping the current generation"
+                )),
+            _ = std::future::ready(()) => {}
         }
         if self.0.coding && self.0.kernel.available() {
             self.service::<_, c::StoreReply>(run_id, c::STORE, &c::StoreRequest::Close)

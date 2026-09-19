@@ -148,8 +148,10 @@ async fn provider_retry(
                 tokio::select! {
                     _ = cancellation.cancelled() => {
                         return Err(Fault::new("Cancelled", "coding-loop", "retry cancelled"));
-                    }
-                    _=tokio::time::sleep(std::time::Duration::from_millis(delay_ms))=>{}
+                    },
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(
+                        delay_ms
+                    )) => {}
                 }
             }
         }

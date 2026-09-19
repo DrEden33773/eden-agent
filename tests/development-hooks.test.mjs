@@ -49,6 +49,18 @@ test("pre-commit rejects an unformatted json! body in the root workspace", (t) =
   unchanged(root, "src/lib.rs", body, body);
 });
 
+test("pre-commit rejects an unformatted select! body in the root workspace", (t) => {
+  const root = fixture(t);
+  const body =
+    "pub async fn value() -> u32 {\n    tokio::select! {\n    biased;\n    _=a()=>1,\n    _=b()=>2,\n    }\n}\n";
+  writeFileSync(join(root, "src/lib.rs"), body);
+  git(root, "add", "src/lib.rs");
+  const result = command(root, "git", ["commit", "-m", "unformatted select body"]);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stdout + result.stderr, /would be reformatted/);
+  unchanged(root, "src/lib.rs", body, body);
+});
+
 test("pre-commit uses staged lint configuration and checks remaining Markdown on deletion", (t) => {
   const root = fixture(t);
   const normalConfig = readFileSync(join(root, ".markdownlint-cli2.jsonc"), "utf8");

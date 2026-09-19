@@ -90,7 +90,9 @@ impl CallContext {
                     reply = &mut receiver => reply,
                     _ = cancel.cancelled() => {
                         // SAFETY: The live host owns this request id; cancellation is idempotent.
-                        unsafe { (host.cancel)(host.context, id); }
+                        unsafe {
+                            (host.cancel)(host.context, id);
+                        }
                         receiver.await
                     }
                 };

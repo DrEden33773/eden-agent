@@ -18,20 +18,21 @@ import { fileURLToPath } from "node:url";
 const source = fileURLToPath(new URL("../", import.meta.url));
 
 // A hook scenario runs in a temporary repository with no build outputs, so the
-// macro formatter is taken from this checkout; it is built once when missing.
+// macro formatter is taken from this checkout. It is rebuilt here rather than
+// only when it is missing: a restored build cache can leave a binary from
+// another revision behind, and a scenario must exercise this revision's tool.
 const formatter = join(
   source,
   "target",
   "debug",
   process.platform === "win32" ? "eden-fmt.exe" : "eden-fmt",
 );
-if (!existsSync(formatter)) {
-  const build = spawnSync("cargo", ["build", "--locked", "-p", "eden-fmt"], {
-    cwd: source,
-    stdio: "inherit",
-  });
-  assert.equal(build.status, 0, "cargo build --locked -p eden-fmt");
-}
+const build = spawnSync("cargo", ["build", "--locked", "-p", "eden-fmt"], {
+  cwd: source,
+  stdio: "inherit",
+});
+assert.equal(build.status, 0, "cargo build --locked -p eden-fmt");
+assert.ok(existsSync(formatter), "the macro formatter was built");
 process.env.EDEN_FMT = formatter;
 export function git(root, ...args) {
   return execFileSync("git", args, {

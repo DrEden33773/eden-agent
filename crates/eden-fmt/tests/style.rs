@@ -50,6 +50,61 @@ fn comments_and_a_char_quote_do_not_invent_a_violation() {
     assert!(violations(source).is_empty());
 }
 
+/// The three shapes below defeated the first version of the scanner.
+#[test]
+fn a_non_ascii_source_is_scanned_without_panicking() {
+    let bom = "\u{feff}fn f() {\n    let x = \"ok\";\n}\n";
+    assert!(violations(bom).is_empty());
+    let identified = "fn f() {\n    let café = 1;\n    let x = \"ok\";\n}\n";
+    assert!(violations(identified).is_empty());
+    let continued = "fn f() {\n    let café = 1;\n    let x = \"one \\\n two\";\n}\n";
+    let found = violations(continued);
+    assert_eq!(found.len(), 1, "a continuation after a non-ASCII name");
+    assert_eq!(found[0].line, 3);
+}
+
+#[test]
+fn a_character_literal_does_not_hide_a_later_continuation() {
+    let alpha = "fn f() {\n    let c = 'a';\n    let s = \"one \\\n two\";\n}\n";
+    let escaped = "fn f() {\n    let c = '\\'';\n    let s = \"one \\\n two\";\n}\n";
+    for source in [alpha, escaped] {
+        let found = violations(source);
+        assert_eq!(found.len(), 1, "one continuation in {source:?}");
+        assert_eq!(found[0].line, 3);
+    }
+}
+
+/// A lifetime must still read as one, or the rule would lose the strings after it.
+#[test]
+fn a_lifetime_is_not_a_character_literal() {
+    let source =
+        "fn f<'a>(x: &'a str) -> &'a str {\n    x\n}\nfn g() {\n    let s = \"one \\\n two\";\n}\n";
+    let found = violations(source);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].line, 5);
+}
+
+#[test]
+fn nested_block_comments_are_skipped_whole() {
+    // only a comment: nothing to report, and no false positive from the quote
+    let commented = "/* outer /* inner */ \"fake \\\n still a comment */\nfn f() {}\n";
+    assert!(violations(commented).is_empty());
+    // a real continuation after a nested comment must still be seen
+    let continued = "/* a /* b */ \"c */\nfn f() {\n    let s = \"one \\\n two\";\n}\n";
+    let found = violations(continued);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].line, 3);
+}
+
+#[test]
+fn a_carriage_return_continuation_is_a_continuation() {
+    // rustc accepts a backslash followed by CRLF, so the rule has to as well
+    let source = "fn f() {\n    let s = \"one \\\r\n        two\";\n}\n";
+    let found = violations(source);
+    assert_eq!(found.len(), 1);
+    assert_eq!((found[0].line, found[0].column), (2, 18));
+}
+
 #[test]
 fn an_identifier_that_starts_with_r_or_b_is_not_a_literal() {
     let source = "fn f() {\n    let rust = 1;\n    let both = 2;\n    let s = \"a \\\n b\";\n}\n";

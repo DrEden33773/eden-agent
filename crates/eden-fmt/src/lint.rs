@@ -30,64 +30,84 @@ pub fn violations(source: &str) -> Vec<Violation> {
     let mut found = Vec::new();
     let mut at = 0;
     while at < bytes.len() {
-        let rest = &source[at..];
-        if rest.starts_with("//") {
-            at = rest.find('\n').map_or(bytes.len(), |end| at + end);
-        } else if let Some(body) = rest.strip_prefix("/*") {
-            at = body.find("*/").map_or(bytes.len(), |end| at + 2 + end + 2);
-        } else if rest.starts_with("br") {
+        // The cursor only ever moves onto a character boundary, and a multi-byte
+        // character is skipped whole, so indexing the text below is safe.
+        let byte = bytes[at];
+        if byte == b'/' && bytes.get(at + 1) == Some(&b'/') {
+            let end = source[at..].find('\n');
+            at = end.map_or(bytes.len(), |end| at + end);
+        } else if byte == b'/' && bytes.get(at + 1) == Some(&b'*') {
+            at = block_comment(source, at);
+        } else if byte == b'b' && bytes.get(at + 1) == Some(&b'r') {
             at = match raw_opening(bytes, at + 2) {
                 Some(hashes) => raw_literal(source, at + 2, hashes),
                 None => at + 1,
             };
-        } else if rest.starts_with("b\"") {
+        } else if byte == b'b' && bytes.get(at + 1) == Some(&b'"') {
             at = quoted_literal(source, at + 1, &mut found);
-        } else if rest.starts_with('\'') {
+        } else if byte == b'\'' {
+            // Before the string check: `'"'` opens a character literal, and a
+            // string branch would swallow it and everything after it.
             at = char_literal(bytes, at);
-        } else if rest.starts_with('"') {
+        } else if byte == b'"' {
             at = quoted_literal(source, at, &mut found);
-        } else if rest.starts_with('r') {
+        } else if byte == b'r' {
             at = match raw_opening(bytes, at + 1) {
                 Some(hashes) => raw_literal(source, at + 1, hashes),
                 None => at + 1,
             };
         } else {
-            at += 1;
+            at += source[at..].chars().next().map_or(1, char::len_utf8);
         }
     }
     found
 }
 
-/// Skip a character literal whose opening quote is at `quote`.
-///
-/// A quote can only open one when it is not a lifetime, which the following
-/// character decides: letters start a lifetime such as `'a`, everything else —
-/// including an escaped quote — starts a literal.
-fn char_literal(bytes: &[u8], quote: usize) -> usize {
-    match bytes.get(quote + 1) {
-        None => bytes.len(),
-        Some(b'\\') => {
-            let mut at = quote + 2;
-            while at < bytes.len() {
-                if bytes[at] == b'\'' {
-                    return at + 1;
-                }
-                at += 1;
+/// Skip a block comment, honouring Rust's nesting.
+fn block_comment(source: &str, open: usize) -> usize {
+    let bytes = source.as_bytes();
+    let mut depth = 0;
+    let mut at = open;
+    while at < bytes.len() {
+        if bytes[at] == b'/' && bytes.get(at + 1) == Some(&b'*') {
+            depth += 1;
+            at += 2;
+        } else if bytes[at] == b'*' && bytes.get(at + 1) == Some(&b'/') {
+            depth -= 1;
+            at += 2;
+            if depth == 0 {
+                return at;
             }
-            bytes.len()
-        }
-        Some(&next) if next.is_ascii_alphabetic() || next == b'_' => quote + 1,
-        Some(_) => {
-            let mut at = quote + 2;
-            while at < bytes.len() {
-                if bytes[at] == b'\'' {
-                    return at + 1;
-                }
-                at += 1;
-            }
-            bytes.len()
+        } else {
+            at += 1;
         }
     }
+    bytes.len()
+}
+
+/// Skip a character literal whose opening quote is at `quote`.
+///
+/// `'a'` is a character literal and `'a` is a lifetime, so the closing quote
+/// decides. The scan stops at a line break or at a `"`, which is what keeps a
+/// lifetime from being read as an unterminated literal: `&'a str` has no closing
+/// quote before the next one on some later line, so it is left to the string
+/// check that follows.
+fn char_literal(bytes: &[u8], quote: usize) -> usize {
+    // `'"'` is a literal whose body is the quote that would otherwise look like
+    // the start of a string.
+    if bytes.get(quote + 1) == Some(&b'"') && bytes.get(quote + 2) == Some(&b'\'') {
+        return quote + 3;
+    }
+    let mut at = quote + 1;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'\\' => at += 2,
+            b'\'' => return at + 1,
+            b'\n' | b'"' => break,
+            _ => at += 1,
+        }
+    }
+    quote + 1
 }
 
 /// Number of `#` between `r` and the opening quote, when one follows.
@@ -119,7 +139,11 @@ fn quoted_literal(source: &str, quote: usize, found: &mut Vec<Violation>) -> usi
     while at < bytes.len() {
         match bytes[at] {
             b'\\' => {
-                if bytes.get(at + 1) == Some(&b'\n') {
+                // rustc accepts both LF and CRLF after the backslash, so the
+                // rule has to see the same continuations the compiler does.
+                if bytes.get(at + 1) == Some(&b'\n')
+                    || (bytes.get(at + 1) == Some(&b'\r') && bytes.get(at + 2) == Some(&b'\n'))
+                {
                     found.push(Violation {
                         offset: at,
                         opening: quote_of(&source[start..at]),

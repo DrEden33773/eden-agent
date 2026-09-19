@@ -146,9 +146,23 @@ jobs:
       - name: Git hook behavior
         if: ${{ !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: node scripts/ci-run.mjs hooks pnpm hooks:test
-      - name: Core and native process tests
-        if: ${{ !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
-        run: node scripts/ci-run.mjs core cargo test --workspace --locked --no-fail-fast
+      # Platform sensitivity, not the crate list, decides what each runner
+      # executes. These targets own the branches that really differ per OS:
+      # process ownership and shell descendants, link creation, path scope and
+      # history locking. The other crates are pure logic or temp-directory
+      # fixtures, and their tests no longer execute off Linux; Clippy still
+      # builds every target on every runner, so compilation coverage is unchanged.
+      - name: Platform-sensitive suites
+        if: ${{ !cancelled() && runner.os != 'Linux' && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        run: node scripts/ci-run.mjs platform-suites cargo test --locked --no-fail-fast -p eden-process -p eden-coding-tools -p eden-search -p eden-local-history -p eden-workspace
+      # Linux keeps the exact workspace command it always ran. Cargo resolves
+      # features across the selected packages, so any narrower selection builds a
+      # different unit graph and recompiles artifacts the cache already holds;
+      # narrowing only where the tests cannot differ keeps that cost to the two
+      # runners that need it, and a newly added crate still executes here.
+      - name: Workspace suites
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        run: node scripts/ci-run.mjs workspace-suites cargo test --workspace --locked --no-fail-fast
       - name: Independent author tests
         if: ${{ !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: node scripts/ci-run.mjs authors pnpm rust:test:authors

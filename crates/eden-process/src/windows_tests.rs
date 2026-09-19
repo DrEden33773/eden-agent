@@ -4,16 +4,26 @@
 //! compiled zero tests: the job-object ownership in `platform` was exercised
 //! only through the installed acceptance suites. These tests assert the same
 //! exit-status contract as the Unix suite against a real shell, and they observe
-//! descendant liveness through Win32 process handles rather than through the job
+//! descendants through Win32 process handles rather than through the job
 //! membership the implementation enumerates, so a cleanup that stopped nothing
 //! cannot pass by re-reading its own bookkeeping.
 //!
 //! Git for Windows provides the shell these tests drive; that is the same
 //! prerequisite the Windows native job and the repository hooks already have.
+//! A descendant's own process id comes from the shell, never from `$!`: under
+//! Git Bash `$!` is an MSYS pid, and the native runner measured `$!` = 787 for
+//! the process Windows knows as 5284, so probing it would observe an unrelated
+//! process. `Tree::drop` stops the members through `terminate_group` before the
+//! job handle closes, so these tests exercise job membership and termination,
+//! not the `KILL_ON_JOB_CLOSE` limit that covers a failed stop.
 #![cfg(windows)]
 
 use std::{path::Path, time::Duration};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader, Lines};
+
+/// Shell fragment that reports the Windows process id of the background process
+/// in `descendant`.
+const REPORT_WINDOWS_PID: &str = "echo \"descendant=$(cat /proc/$descendant/winpid)\"";
 
 /// Every barrier fails rather than hangs, so a lost cleanup step is reported as
 /// an assertion failure instead of a stalled run.
@@ -33,7 +43,8 @@ async fn drain(mut stream: impl AsyncRead + Unpin) {
 /// the job membership the implementation queries.
 ///
 /// A process that no longer exists cannot be opened at all, which is a definite
-/// answer for this probe.
+/// answer for this probe. A caller stops a descendant and probes it immediately,
+/// so the id cannot have been recycled by then.
 fn process_running(pid: u32) -> bool {
     use windows_sys::Win32::{
         Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT},
@@ -78,7 +89,7 @@ async fn wait_until_stopped(pid: u32, label: &str) {
 }
 
 /// One spawned shell: the leader, the job that owns it, and the report channel
-/// its descendants use to publish their process ids.
+/// its descendants use to publish their Windows process ids.
 struct Shell {
     child: tokio::process::Child,
     tree: crate::Tree,
@@ -88,13 +99,16 @@ struct Shell {
 impl Shell {
     /// Spawn the native shell with `command` as its script.
     ///
-    /// The shell reports each background process id as `descendant=<pid>` on
-    /// stdout, which is how these tests learn about members without asking the
-    /// job object what it contains.
+    /// The script first reports the shell it reached, so a `PATH` that resolves
+    /// some other `bash.exe` fails here with its own output instead of as a
+    /// cleanup timeout. Each descendant is then reported as
+    /// `descendant=<windows pid>`, which is how these tests learn about members
+    /// without asking the job object what it contains.
     async fn spawn(command: &str) -> Self {
+        let script = format!("echo \"shell=${{BASH_VERSION:-missing}}\"; {command}");
         let (mut child, tree) = crate::spawn(
             "bash",
-            &["--noprofile", "--norc", "-c", command],
+            &["--noprofile", "--norc", "-c", &script],
             Path::new("."),
         )
         .await
@@ -103,11 +117,17 @@ impl Shell {
         if let Some(stderr) = child.stderr.take() {
             tokio::spawn(drain(stderr));
         }
-        Self {
-            child,
-            tree,
-            lines: BufReader::new(stdout).lines(),
-        }
+        let mut lines = BufReader::new(stdout).lines();
+        let greeting = within("shell greeting", lines.next_line())
+            .await
+            .expect("read the shell greeting");
+        assert!(
+            greeting
+                .as_deref()
+                .is_some_and(|line| line.starts_with("shell=") && !line.ends_with("missing")),
+            "PATH resolved a shell that is not a working Bash: {greeting:?}"
+        );
+        Self { child, tree, lines }
     }
 
     fn leader(&self) -> u32 {
@@ -130,6 +150,15 @@ impl Shell {
         .await
     }
 
+    /// Fail unless the leader is still running, so a test never reports a
+    /// preserved exit status for a leader that finished before cleanup ran.
+    fn assert_leader_running(&mut self, context: &str) {
+        assert!(
+            self.child.try_wait().expect("query the shell").is_none(),
+            "{context}: the shell had already exited, so the assertion below would be vacuous"
+        );
+    }
+
     /// Reap the leader, failing rather than hanging if it never exits.
     async fn wait_for_leader(&mut self) -> std::process::ExitStatus {
         within("leader exit", self.child.wait())
@@ -147,20 +176,16 @@ impl Shell {
 /// the stop's own status, which is the rewrite the exit-status contract forbids.
 #[tokio::test]
 async fn completion_cleanup_preserves_the_leaders_exit_status() {
-    let mut shell = Shell::spawn(
-        "sleep 300 & descendant=$!; echo descendant=$descendant; wait $descendant; exit 7",
-    )
-    .await;
+    let command =
+        format!("sleep 300 & descendant=$!; {REPORT_WINDOWS_PID}; wait $descendant; exit 7");
+    let mut shell = Shell::spawn(&command).await;
     let leader = shell.leader();
     let descendant = shell.next_descendant("descendant report").await;
     assert!(
-        process_running(leader),
-        "the leader must still be running when the completion path runs, or this test proves nothing"
+        process_running(leader) && process_running(descendant),
+        "the leader and its descendant must both be alive before cleanup"
     );
-    assert!(
-        process_running(descendant),
-        "the descendant must be alive before cleanup"
-    );
+    shell.assert_leader_running("completion cleanup");
     shell
         .tree
         .cleanup_descendants()
@@ -172,33 +197,43 @@ async fn completion_cleanup_preserves_the_leaders_exit_status() {
         Some(7),
         "completion cleanup stopped the leader instead of only its descendants"
     );
-    let stop = crate::Stop::complete(&status);
-    assert_eq!(stop.exit_code, Some(7));
-    assert_eq!(stop.termination, None);
     within("settle", shell.tree.settle())
         .await
         .expect("settle the completed job");
 }
 
-/// The cancellation-path action stops the whole job, leader included, and the
-/// caller records that decision instead of inferring it from the status.
+/// The cancellation-path action stops the whole job, leader included.
+///
+/// The leader is blocked in `wait`, which bash can only leave by itself if the
+/// descendant dies, and the script would then report code 7. Observing the
+/// stop's own code instead is what tells the caller's explicit cancellation
+/// apart from a command that finished on its own.
 #[tokio::test]
 async fn requested_termination_stops_the_leader_and_its_descendants() {
-    let mut shell =
-        Shell::spawn("sleep 300 & descendant=$!; echo descendant=$descendant; wait").await;
+    // The leader pauses before reporting its own code, so terminating the
+    // descendant first cannot let a leader this job failed to stop win a race
+    // and report code 7 by itself.
+    let command = format!(
+        "sleep 300 & descendant=$!; {REPORT_WINDOWS_PID}; wait $descendant; sleep 2; exit 7"
+    );
+    let mut shell = Shell::spawn(&command).await;
     let leader = shell.leader();
     let descendant = shell.next_descendant("descendant report").await;
     assert!(
         process_running(leader) && process_running(descendant),
         "both members must be alive before the requested stop"
     );
+    shell.assert_leader_running("requested termination");
     shell
         .tree
         .terminate_group()
         .expect("terminate the owned job");
     let status = shell.wait_for_leader().await;
-    let stop = crate::Stop::stopped(&status);
-    assert_eq!(stop.termination, Some(crate::Termination::Requested));
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "the requested stop did not end the leader before it could report its own code"
+    );
     wait_until_stopped(descendant, "the descendant outlived the requested stop").await;
     within("settle", shell.tree.settle())
         .await
@@ -214,16 +249,22 @@ async fn requested_termination_stops_the_leader_and_its_descendants() {
 #[tokio::test]
 async fn cleanup_reaches_descendants_started_while_it_enumerates() {
     const WANTED: usize = 24;
-    let mut shell = Shell::spawn(
-        "while :; do sleep 300 & echo descendant=$!; done & echo descendant=$!; exit 0",
-    )
-    .await;
+    let command = format!(
+        "while :; do sleep 300 & descendant=$!; {REPORT_WINDOWS_PID}; done & descendant=$!; {REPORT_WINDOWS_PID}; exit 0"
+    );
+    let mut shell = Shell::spawn(&command).await;
     let mut descendants = Vec::with_capacity(WANTED);
     for _ in 0..WANTED {
         descendants.push(shell.next_descendant("descendant report").await);
     }
     let status = shell.wait_for_leader().await;
     assert_eq!(status.code(), Some(0), "the leader completed on its own");
+    for pid in &descendants {
+        assert!(
+            process_running(*pid),
+            "descendant {pid} must be alive before cleanup enumerates the job"
+        );
+    }
     shell
         .tree
         .cleanup_descendants()
@@ -240,18 +281,24 @@ async fn cleanup_reaches_descendants_started_while_it_enumerates() {
 }
 
 /// Abandoning the owned tree stops the leader and its descendants while the
-/// caller still holds the leader's child handle, so the job itself owns the
-/// domain rather than the caller's reaping.
+/// caller still holds the leader's child handle.
+///
+/// The stop has to come from the job's membership rather than from the caller's
+/// reaping: the leader is blocked in `wait` and pauses before reporting its own
+/// code, and the child handle stays open across the drop.
 #[tokio::test]
 async fn dropping_the_tree_stops_the_leader_and_its_descendants() {
-    let mut shell =
-        Shell::spawn("sleep 300 & descendant=$!; echo descendant=$descendant; wait").await;
+    let command = format!(
+        "sleep 300 & descendant=$!; {REPORT_WINDOWS_PID}; wait $descendant; sleep 2; exit 7"
+    );
+    let mut shell = Shell::spawn(&command).await;
     let leader = shell.leader();
     let descendant = shell.next_descendant("descendant report").await;
     assert!(
         process_running(leader) && process_running(descendant),
         "both members must be alive before the tree is abandoned"
     );
+    shell.assert_leader_running("abandoning the tree");
     let Shell {
         mut child, tree, ..
     } = shell;
@@ -261,6 +308,9 @@ async fn dropping_the_tree_stops_the_leader_and_its_descendants() {
     let status = within("leader exit", child.wait())
         .await
         .expect("wait for the abandoned shell");
-    let stop = crate::Stop::stopped(&status);
-    assert_eq!(stop.termination, Some(crate::Termination::Requested));
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "the abandoned job did not stop the leader before it could report its own code"
+    );
 }

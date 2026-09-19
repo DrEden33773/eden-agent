@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         return Ok(());
     }
-    let session = Session::open_with(&composition, options).await?;
+    let session = Session::open_with(&composition, options.clone()).await?;
     let version = args.get(5).map_or(Ok(1), |value| value.parse::<u32>())?;
     let namespace = args
         .get(6)
@@ -74,12 +74,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let id = session.id();
     let records = session.history().await?;
     session.shutdown().await?;
+    // A repeated shutdown stays a success, and reopening the store sees exactly
+    // the records the closed session reported.
+    session.shutdown().await?;
+    let reopened = Session::open_with(&composition, options).await?;
+    assert_eq!(reopened.history().await?.len(), records.len());
+    reopened.shutdown().await?;
     println!(
         "{}",
         json!({
             "session_id": id,
             "state_committed": true,
             "records": records.len(),
+            "double_shutdown": true,
             "version": version
         })
     );

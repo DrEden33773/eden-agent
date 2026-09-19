@@ -19,7 +19,7 @@ from typing import Any
 
 from http_fixture import FixtureHTTPServer
 from install import ROOT, Composition, Package, library, package, target
-from verification import author_artifact, installed, prepare, run
+from verification import author_artifact, example, installed, prepare, run, short_retries
 
 PROVIDER = "eden.coding-provider.v1"
 CONTEXT = "eden.coding-context.v2"
@@ -142,6 +142,9 @@ def configure(
                 "model": "controlled-model",
                 "api_key_env": "EDEN_VERIFY_KEY",
             }
+    # The product doubles a 2 s retry delay per attempt. The suites assert which
+    # retries happen, never how long they sleep, so they must not sleep.
+    short_retries(selected)
     path = destination / f"{name}.json"
     write(path, selected)
     return path
@@ -191,7 +194,7 @@ def main() -> None:
     destination = installed(artifacts / "coding-install")
     suffix = ".exe" if sys.platform == "win32" else ""
     host = destination / "bin" / ("eden" + suffix)
-    probe = destination / "bin" / ("coding_probe" + suffix)
+    probe = example("coding_probe")
     fixed_host = host.read_bytes()
     composition = json.loads((destination / "composition.json").read_text(encoding="utf-8"))
     results: dict[str, Any] = {}
@@ -691,6 +694,81 @@ class ArithmeticTests(unittest.TestCase):
                 }
             finally:
                 server.close()
+
+        # An interrupted durable intention is context, never executable work on
+        # reopen: the run must not perform the write it names, and nothing may
+        # appear on disk for it.
+        # The fabricated history must carry the binding this scenario reopens
+        # with (cwd, roles and package descriptors), so a plain session in the
+        # same project seeds it.
+        seed_history = scratch / "reopen-seed.jsonl"
+        seeding = Server(lambda *_: answer("seeded session for the interrupted reopen"))
+        try:
+            seeding_config = configure(destination, composition, seeding, "reopen-seed")
+            events(
+                run(
+                    [
+                        host,
+                        "--composition",
+                        seeding_config,
+                        "--cwd",
+                        project,
+                        "--session",
+                        seed_history,
+                        "--json",
+                        "Seed the durable history",
+                    ],
+                    caller,
+                )
+            )
+        finally:
+            seeding.close()
+        interrupted = scratch / "interrupted.jsonl"
+        seed = copy.deepcopy(records(seed_history)[:1])
+        seed.append(
+            {
+                "schema_version": 2,
+                "parent_id": 1,
+                "branch": "main",
+                "session_id": seed[0]["session_id"],
+                "sequence": 2,
+                "run_id": 1,
+                "kind": "tool_intent",
+                "payload": {
+                    "type": "tool_call",
+                    "call_id": "interrupted-write",
+                    "name": "write",
+                    "arguments": json.dumps({"path": "must-not-exist.txt", "content": "replayed"}),
+                },
+            }
+        )
+        interrupted.write_text(
+            json.dumps({"schema_version": 2, "transaction": seed}) + "\n", encoding="utf-8"
+        )
+        server = Server(lambda *_: answer("Historical effects remain unknown."))
+        try:
+            config = configure(destination, composition, server, "interrupted")
+            events(
+                run(
+                    [
+                        host,
+                        "--composition",
+                        config,
+                        "--cwd",
+                        project,
+                        "--session",
+                        interrupted,
+                        "--json",
+                        "Review interrupted history",
+                    ],
+                    caller,
+                )
+            )
+            assert not (project / "must-not-exist.txt").exists()
+            assert "was not replayed" in json.dumps(server.requests[0]["input"])
+            results["interrupted_intent"] = "reopened as uncertainty without replay"
+        finally:
+            server.close()
 
         selected = copy.deepcopy(composition)
         selected["packages"].append(author)

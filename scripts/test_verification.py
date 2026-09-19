@@ -7,9 +7,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from typing import Any
 from unittest.mock import patch
 
 import verification
+from install import Composition, Package
 
 
 class VerificationTests(unittest.TestCase):
@@ -57,7 +59,13 @@ class VerificationTests(unittest.TestCase):
             verification.validate_receipt(receipt, "source")
             with self.assertRaisesRegex(RuntimeError, "source changed"):
                 verification.validate_receipt(receipt, "new-lock-or-source")
+            rewritten = (root / "wrong-abi").stat()
             (root / "wrong-abi").write_bytes((root / "wrong-sdk").read_bytes())
+            # The memo keys on size and mtime, so the rewrite must move the clock
+            # forward even where the filesystem timestamp is coarse.
+            os.utime(
+                root / "wrong-abi", ns=(rewritten.st_atime_ns, rewritten.st_mtime_ns + 1_000_000)
+            )
             with self.assertRaisesRegex(RuntimeError, "artifacts changed"):
                 verification.validate_receipt(receipt, "source")
 
@@ -93,6 +101,55 @@ class VerificationTests(unittest.TestCase):
                 verification.installed(first)
                 self.assertFalse((first / "stale-session").exists())
                 self.assertEqual("original", (first / "composition.json").read_text())
+
+    def test_repeated_tree_hashes_reuse_contents_but_follow_rewrites(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            (root / "artifact").write_bytes(b"first")
+            before = verification.tree_hashes(root)
+            self.assertEqual({"artifact": verification.digest(root / "artifact")}, before)
+            self.assertEqual(before, verification.tree_hashes(root))
+            # Same size, new mtime: the memo may not hide the rewrite.
+            written = (root / "artifact").stat()
+            (root / "artifact").write_bytes(b"other")
+            os.utime(root / "artifact", ns=(written.st_atime_ns, written.st_mtime_ns + 1_000_000))
+            self.assertNotEqual(before, verification.tree_hashes(root))
+
+    def test_probe_binaries_live_outside_the_installation_seeds(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            with patch.object(verification, "prepare", return_value={"examples": str(root)}):
+                suffix = ".exe" if os.name == "nt" else ""
+                self.assertEqual(
+                    root / ("coding_probe" + suffix), verification.example("coding_probe")
+                )
+
+    def test_retry_delay_injection_touches_only_the_coding_package(self):
+        def entry(name: str, config: dict[str, Any] | None) -> Package:
+            return {
+                "descriptor": {"package": name, "version": "0.1.0", "provides": []},
+                "host": "eden-native-0.1.0",
+                "sdk": "eden-native-0.1.0",
+                "target": "x86_64-unknown-linux-gnu",
+                "library": "lib" + name + ".so",
+                "config": config,
+            }
+
+        composition: Composition = {
+            "packages": [
+                entry("coding", None),
+                entry("coding", {"compaction": {"keep_recent_tokens": 1}}),
+                entry("standard", None),
+            ],
+            "roles": {},
+        }
+        verification.short_retries(composition)
+        self.assertEqual({"retry": {"base_delay_ms": 1}}, composition["packages"][0]["config"])
+        self.assertEqual(
+            {"compaction": {"keep_recent_tokens": 1}, "retry": {"base_delay_ms": 1}},
+            composition["packages"][1]["config"],
+        )
+        self.assertIsNone(composition["packages"][2]["config"])
 
     def test_failure_preserves_command_streams_and_exit_code(self):
         with tempfile.TemporaryDirectory() as temp:

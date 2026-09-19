@@ -1,7 +1,7 @@
 // Shared check commands for contributors, hooks and CI.
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const project = fileURLToPath(new URL("../", import.meta.url));
@@ -25,6 +25,34 @@ export function manifests(root) {
   }
   return roots;
 }
+// The rustup shim adds 35-40 ms to every cargo invocation. `rustup which`
+// resolves the pinned toolchain through rust-toolchain.toml, the way a shim
+// invocation would, and the shim stays the fallback for anything it cannot
+// resolve. RUSTUP_TOOLCHAIN is deliberately not set: it would override that
+// repository override and turn a missing toolchain into a download attempt
+// instead of an error.
+let toolchain;
+function cargoFor(root) {
+  if (toolchain) return toolchain;
+  const result = spawnSync("rustup", ["which", "cargo"], { cwd: root, encoding: "utf8" });
+  const program = result.status === 0 ? result.stdout.trim() : "";
+  const directory = program && existsSync(program) ? dirname(program) : "";
+  toolchain = { program: directory ? program : "cargo", directory };
+  return toolchain;
+}
+
+// Without this the located cargo would still resolve rustc, cargo-fmt and
+// cargo-clippy through the shims, one process at a time.
+function withToolchainPath(env, directory) {
+  if (!directory) return env;
+  const name = Object.keys(env).find((key) => key.toUpperCase() === "PATH") ?? "PATH";
+  return { ...env, [name]: `${directory}${delimiter}${env[name] ?? ""}` };
+}
+
+// The version probe depends only on the snapshot's declared versions, so each
+// snapshot is checked once per process rather than once per check call.
+const verifiedPythonRoots = new Set();
+
 export function check(
   kind,
   { root = project, toolRoot = project, env = process.env, extra = [] } = {},
@@ -51,11 +79,14 @@ export function check(
     );
     if (!existsSync(python))
       throw new Error("Python checks need local tools. Run uv sync --locked.");
-    run(
-      python,
-      [
-        "-c",
-        `from importlib.metadata import version
+    const verified = verifiedPythonRoots.has(String(root));
+    verifiedPythonRoots.add(String(root));
+    if (!verified)
+      run(
+        python,
+        [
+          "-c",
+          `from importlib.metadata import version
 from pathlib import Path
 import tomllib
 
@@ -65,10 +96,10 @@ for dependency in config["dependency-groups"]["dev"]:
     if version(name) != expected:
         raise RuntimeError(f"Tool version mismatch: {name}; run uv sync --locked")
 `,
-      ],
-      root,
-      env,
-    );
+        ],
+        root,
+        env,
+      );
     const steps = {
       "python-format": [["ruff", "format", "."]],
       "python-format-check": [["ruff", "format", "--check", "."]],
@@ -105,7 +136,11 @@ for dependency in config["dependency-groups"]["dev"]:
   }
   if (!["fmt", "format", "clippy", "clippy-fix", "test"].includes(kind))
     throw new Error(`Unknown check: ${kind}`);
-  const rustEnv = { ...env, CARGO_TARGET_DIR: env.CARGO_TARGET_DIR || join(root, "target") };
+  const cargo = cargoFor(toolRoot);
+  const rustEnv = withToolchainPath(
+    { ...env, CARGO_TARGET_DIR: env.CARGO_TARGET_DIR || join(root, "target") },
+    cargo.directory,
+  );
   // `cargo test --workspace` covers the root workspace, so the test kind runs
   // only the independent author projects that workspace excludes.
   const selected =
@@ -139,7 +174,7 @@ for dependency in config["dependency-groups"]["dev"]:
               "warnings",
             ];
     try {
-      run("cargo", args, root, rustEnv);
+      run(cargo.program, args, root, rustEnv);
     } catch (error) {
       // Each author project is its own workspace, so one failure must not hide
       // the results of the projects that would have run after it.

@@ -93,6 +93,7 @@ jobs:
             target
             !target/**/incremental
             !target/verification/seeds
+            !target/verification/examples
           key: ${{ steps.build-cache-keys.outputs.key }}
           restore-keys: ${{ steps.build-cache-keys.outputs.restore-keys }}
       - name: Record cache identity
@@ -153,7 +154,7 @@ jobs:
         run: node scripts/ci-run.mjs authors pnpm rust:test:authors
       - name: Installed suites, independent authors and distribution
         if: ${{ !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
-        run: node scripts/ci-run.mjs installed python scripts/verify-all.py --workers 2 --output artifacts/verification
+        run: node scripts/ci-run.mjs installed python scripts/verify-all.py --output artifacts/verification
       - name: Package installed layout
         shell: bash
         run: node scripts/ci-run.mjs package tar -czf artifacts/eden-${{ runner.os }}-${{ runner.arch }}.tar.gz -C artifacts/distribution .
@@ -180,6 +181,7 @@ jobs:
             target
             !target/**/incremental
             !target/verification/seeds
+            !target/verification/examples
           key: ${{ steps.cargo-target.outputs.cache-primary-key }}
       - name: Record final step outcomes
         if: always()

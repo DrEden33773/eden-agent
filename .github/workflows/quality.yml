@@ -107,6 +107,7 @@ jobs:
             target
             !target/**/incremental
             !target/verification/seeds
+            !target/verification/examples
           key: ${{ steps.build-cache-keys.outputs.key }}
           restore-keys: ${{ steps.build-cache-keys.outputs.restore-keys }}
           lookup-only: true

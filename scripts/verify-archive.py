@@ -87,9 +87,13 @@ def verify_archive(
     validate_receipt(prepared, source_fingerprint())
     suffix = ".exe" if os.name == "nt" else ""
     seed = pathlib.Path(prepared["seeds"]) / "default"
+    # The seed holds exactly what an installation ships, so the distribution
+    # below is compared with it directly. Probe binaries never enter either, and
+    # a producer that starts copying them into an installation has to fail here.
     expected = file_state(seed)
-    for example in EXAMPLES:
-        del expected[f"bin/{example}{suffix}"]
+    probes = sorted(f"bin/{name}{suffix}" for name in EXAMPLES if f"bin/{name}{suffix}" in expected)
+    if probes:
+        raise ValueError(f"An installation must not ship probe binaries: {probes}")
     compare_files(file_state(distribution), expected)
     native_target = target()
     with tempfile.TemporaryDirectory(prefix="eden-archive-验收-") as temp:

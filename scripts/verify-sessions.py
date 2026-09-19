@@ -16,7 +16,7 @@ from collections.abc import Callable, Sequence
 from typing import Any, Protocol, cast
 
 from install import ROOT, Composition, Package, target
-from verification import installed, prepare
+from verification import example, installed, prepare
 
 
 class CodingServer(Protocol):
@@ -166,7 +166,7 @@ def main() -> None:
     destination = installed(artifacts / "session-install")
     suffix = ".exe" if sys.platform == "win32" else ""
     host = destination / "bin" / ("eden" + suffix)
-    probe = destination / "bin" / ("session_probe" + suffix)
+    probe = example("session_probe")
     host_hash = digest(host)
     composition = json.loads((destination / "composition.json").read_text(encoding="utf-8"))
     results: dict[str, Any] = {}

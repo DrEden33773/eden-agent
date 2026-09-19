@@ -16,7 +16,7 @@ import time
 from collections.abc import Sequence
 from typing import Any
 
-from install import ROOT, build_target, install, library, target
+from install import ROOT, Composition, build_target, install, library, target
 
 AUTHORS = (
     "loop-a",
@@ -79,9 +79,23 @@ def openssl() -> str:
     raise RuntimeError("Workspace TLS acceptance requires OpenSSL (including Git for Windows)")
 
 
+# A frozen tree is validated by every process that inherits the receipt, so the
+# same bytes would otherwise be hashed once per suite. Contents are read once and
+# reused while the size and modification time are unchanged, which is what every
+# writer in this harness changes. An in-place rewrite that keeps both is outside
+# what this memo can see, and no frozen tree is written after it is frozen.
+_DIGESTS: dict[tuple[str, int, int], str] = {}
+
+
 def digest(path: pathlib.Path) -> str:
-    with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+    stat = path.stat()
+    key = (str(path), stat.st_size, stat.st_mtime_ns)
+    known = _DIGESTS.get(key)
+    if known is None:
+        with path.open("rb") as stream:
+            known = hashlib.file_digest(stream, "sha256").hexdigest()
+        _DIGESTS[key] = known
+    return known
 
 
 def run(
@@ -275,20 +289,34 @@ def prepare(output: pathlib.Path | None = None) -> dict[str, Any]:
     run(["cargo", "build", "--workspace", "--all-targets", "--locked"], ROOT, timeout=None)
     phases["host_build"] = time.monotonic() - phase
     phase = time.monotonic()
-    suffix = ".exe" if os.name == "nt" else ""
     for controlled in (False, True):
-        seed = install(
+        install(
             seed_root / ("controlled" if controlled else "default"),
             controlled=controlled,
             license_directory=licenses / "third-party-licenses",
         )
-        for name in EXAMPLES:
-            shutil.copy2(
-                build_target() / "debug/examples" / (name + suffix), seed / "bin" / (name + suffix)
-            )
+    # The probes exercise the installed host but are not part of an installation,
+    # so they are built once and kept beside the seeds instead of inside every
+    # copy of them.
+    examples = build_target() / "verification/examples"
+    if examples.exists():
+        shutil.rmtree(examples)
+    examples.mkdir(parents=True)
+    suffix = ".exe" if os.name == "nt" else ""
+    for name in EXAMPLES:
+        shutil.copy2(
+            build_target() / "debug/examples" / (name + suffix), examples / (name + suffix)
+        )
+    # The search package resolves its worker beside the running executable, so a
+    # probe that searches needs that worker in its own directory too.
+    shutil.copy2(
+        build_target() / "debug" / ("eden-search-worker" + suffix),
+        examples / ("eden-search-worker" + suffix),
+    )
     frozen = {
         str(seed_root / name): tree_hashes(seed_root / name) for name in ("default", "controlled")
     }
+    frozen[str(examples)] = tree_hashes(examples)
     phases["install_and_freeze"] = time.monotonic() - phase
     phase = time.monotonic()
     exported = build_target() / "verification/author-inputs"
@@ -326,6 +354,7 @@ def prepare(output: pathlib.Path | None = None) -> dict[str, Any]:
         "compilation": compilation,
         "source_fingerprint": fingerprint,
         "seeds": str(seed_root),
+        "examples": str(examples),
         "exports": str(exported),
         "frozen": frozen,
         "phases": phases,
@@ -348,6 +377,30 @@ def prepare(output: pathlib.Path | None = None) -> dict[str, Any]:
         flush=True,
     )
     return receipt
+
+
+def short_retries(composition: Composition) -> None:
+    """Let the acceptance host retry at once instead of sleeping through its backoff.
+
+    The product's default base delay is 2 s and doubles per attempt, which put
+    ~16 s of pure sleep in a failing-response scenario. No assertion inspects a
+    delay, and the retry count is unchanged, so a green suite still means the
+    same control flow; the seed without a coding package is left alone.
+    """
+    for package in composition["packages"]:
+        if package["descriptor"]["package"] != "coding":
+            continue
+        config = package["config"] if isinstance(package["config"], dict) else {}
+        existing = config.get("retry")
+        retry: dict[str, Any] = existing if isinstance(existing, dict) else {}
+        package["config"] = {**config, "retry": {**retry, "base_delay_ms": 1}}
+
+
+def example(name: str) -> pathlib.Path:
+    """A built probe binary. Probes are not part of a shipped installation."""
+    prepared = prepare()
+    suffix = ".exe" if os.name == "nt" else ""
+    return pathlib.Path(prepared["examples"]) / (name + suffix)
 
 
 def installed(destination: pathlib.Path, controlled: bool = False) -> pathlib.Path:

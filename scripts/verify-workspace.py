@@ -20,7 +20,7 @@ from typing import Any
 
 from http_fixture import FixtureHTTPServer
 from install import ROOT, Composition, Package, library, package, target
-from verification import author_artifact, author_sources, prepare
+from verification import author_artifact, author_sources, example, prepare
 from verification import installed as prepared_install
 from verification import openssl as resolve_openssl
 
@@ -237,7 +237,7 @@ def main() -> None:
         destination = prepared_install(scratch / "installation")
         suffix = ".exe" if sys.platform == "win32" else ""
         host = destination / "bin" / ("eden" + suffix)
-        probe = destination / "bin" / ("workspace_probe" + suffix)
+        probe = example("workspace_probe")
         fixed_host = hashlib.sha256(host.read_bytes()).hexdigest()
         base: Composition = json.loads(
             (destination / "composition.json").read_text(encoding="utf-8")

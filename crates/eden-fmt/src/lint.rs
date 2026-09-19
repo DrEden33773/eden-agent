@@ -13,7 +13,6 @@
 //! scanner would have to reproduce all of that, and every mistake in it would
 //! either refuse a good file or — far worse — let a continuation through.
 
-use crate::edit::LineIndex;
 use crate::engine::tokenize;
 use proc_macro2::{Literal, TokenTree};
 
@@ -34,21 +33,20 @@ pub fn violations(source: &str) -> Vec<Violation> {
     let Ok(tokens) = tokenize(source) else {
         return Vec::new();
     };
-    let index = LineIndex::new(source);
     let mut found = Vec::new();
-    walk(&tokens, source, &index, &mut found);
+    walk(&tokens, source, &mut found);
     found.sort_by_key(|violation| violation.offset);
     found
 }
 
 /// Collect the continuations of every literal in a token tree, groups included.
-fn walk(tokens: &[TokenTree], source: &str, index: &LineIndex<'_>, found: &mut Vec<Violation>) {
+fn walk(tokens: &[TokenTree], source: &str, found: &mut Vec<Violation>) {
     for token in tokens {
         match token {
-            TokenTree::Literal(literal) => inspect(literal, source, index, found),
+            TokenTree::Literal(literal) => inspect(literal, source, found),
             TokenTree::Group(group) => {
                 let inner: Vec<TokenTree> = group.stream().into_iter().collect();
-                walk(&inner, source, index, found);
+                walk(&inner, source, found);
             }
             _ => {}
         }
@@ -61,10 +59,8 @@ fn walk(tokens: &[TokenTree], source: &str, index: &LineIndex<'_>, found: &mut V
 /// a byte string starts the span at `b` or at the quote — never arises, and a
 /// raw string holds no continuation because the lexer already said it is one
 /// token of verbatim text.
-fn inspect(literal: &Literal, source: &str, index: &LineIndex<'_>, found: &mut Vec<Violation>) {
-    let Some(range) = index.range(literal.span()) else {
-        return;
-    };
+fn inspect(literal: &Literal, source: &str, found: &mut Vec<Violation>) {
+    let range = literal.span().byte_range();
     let Some(text) = source.get(range.clone()) else {
         return;
     };

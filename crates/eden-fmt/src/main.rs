@@ -96,13 +96,6 @@ fn execute(arguments: &[String]) -> Result<ExitCode, String> {
         for (path, error) in &outcome.failed {
             eprintln!("{}: {error}", path.display());
         }
-        if !outcome.failed.is_empty() {
-            eprintln!(
-                "eden-fmt: {} file(s) could not be formatted",
-                outcome.failed.len()
-            );
-            return Ok(ExitCode::from(2));
-        }
         if !outcome.style.is_empty() {
             for (path, violation) in &outcome.style {
                 eprintln!("{}", style_line(Some(path), violation));
@@ -111,7 +104,16 @@ fn execute(arguments: &[String]) -> Result<ExitCode, String> {
                 "eden-fmt: {} backslash continuation(s) to replace",
                 outcome.style.len()
             );
-            return Ok(ExitCode::from(1));
+            if outcome.failed.is_empty() {
+                return Ok(ExitCode::from(1));
+            }
+        }
+        if !outcome.failed.is_empty() {
+            eprintln!(
+                "eden-fmt: {} file(s) could not be formatted",
+                outcome.failed.len()
+            );
+            return Ok(ExitCode::from(2));
         }
         if matches!(mode, Mode::Write) {
             return Ok(ExitCode::SUCCESS);

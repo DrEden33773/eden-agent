@@ -112,8 +112,11 @@ fn project_path(path: &[Record], records: &[Record]) -> Result<Vec<Item>, Fault>
         .map(|item| match item {
             Item::ToolCall { ref call_id, .. } if !completed.contains(call_id) => {
                 text_item(format!(
-                    "Historical tool call {call_id} was interrupted; result and external effects \
-                     are unknown. It was not replayed."
+                    concat!(
+                        "Historical tool call {call_id} was interrupted; result and external effects ",
+                        "are unknown. It was not replayed.",
+                    ),
+                    call_id = call_id,
                 ))
             }
             other => other,
@@ -319,8 +322,12 @@ fn summary_safe_items(items: Vec<Item>) -> Vec<Item> {
                             name, media_type, ..
                         } => Block::Text {
                             text: format!(
-                                "[File attachment {name} ({media_type}); preserved in original \
-                                 record]"
+                                concat!(
+                                    "[File attachment {name} ({media_type}); preserved in original ",
+                                    "record]",
+                                ),
+                                name = name,
+                                media_type = media_type,
                             ),
                         },
                         other => other,
@@ -446,12 +453,14 @@ pub(crate) async fn context(
                 role: "system".into(),
                 content: vec![Block::Text {
                     text: format!(
-                        "Summarize this coding conversation for continuation. Use headings: \
-                         Goal, Constraints, Progress (Done/In Progress/Blocked), Key Decisions, \
-                         Next Steps, Critical Context. Preserve user requirements, exact \
-                         paths/functions/errors, failed checks, pending work, and unknown \
-                         external tool effects. Update previous summaries rather than discarding \
-                         them. Do not continue the task. {}",
+                        concat!(
+                            "Summarize this coding conversation for continuation. Use headings: Goal, ",
+                            "Constraints, Progress (Done/In Progress/Blocked), Key Decisions, Next ",
+                            "Steps, Critical Context. Preserve user requirements, exact paths/functions/errors, ",
+                            "failed checks, pending work, and unknown external tool effects. Update ",
+                            "previous summaries rather than discarding them. Do not continue the ",
+                            "task. {}",
+                        ),
                         input.instructions
                     ),
                 }],
@@ -541,9 +550,11 @@ pub(crate) async fn context(
         }
     }
     let mut system = format!(
-        "You are eden, a coding assistant. Work in {}. Use the available tools to inspect, \
-         change and verify the project. Report observed results accurately. Tool failures \
-         are evidence to address; do not claim unexecuted checks passed.",
+        concat!(
+            "You are eden, a coding assistant. Work in {}. Use the available tools to inspect, change ",
+            "and verify the project. Report observed results accurately. Tool failures are evidence ",
+            "to address; do not claim unexecuted checks passed.",
+        ),
         input.cwd
     );
     if let Some(resources) = &input.resources {

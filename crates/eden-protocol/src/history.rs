@@ -31,10 +31,10 @@ fn validate_next(records: &[Record], record: &Record) -> Result<(), Fault> {
             first.session_id != record.session_id || first.schema_version != record.schema_version
         })
     {
-        return Err(invalid(
-            "unsupported or mixed schema, discontinuous sequence, empty branch/kind, or mixed \
-             identity",
-        ));
+        return Err(invalid(concat!(
+            "unsupported or mixed schema, discontinuous sequence, empty branch/kind, or mixed ",
+            "identity",
+        )));
     }
     if let Some(parent) = record.parent_id {
         if parent == 0
@@ -240,10 +240,12 @@ mod tests {
     }
     #[test]
     fn v1_is_readable_with_linear_parent_projection() {
-        let bytes = b"{\"schema_version\":1,\"session_id\":7,\"sequence\":1,\
-                     \"run_id\":1,\"kind\":\"user\",\
-         \"payload\":{}}\n{\"schema_version\":1,\"session_id\":7,\"sequence\":2,\"run_id\":1,\
-         \"kind\":\"assistant\",\"payload\":{}}\n";
+        let bytes = concat!(
+            "{\"schema_version\":1,\"session_id\":7,\"sequence\":1,\"run_id\":1,\"kind\":\"user\"",
+            ",\"payload\":{}}\n{\"schema_version\":1,\"session_id\":7,\"sequence\":2,\"run_id\":",
+            "1,\"kind\":\"assistant\",\"payload\":{}}\n",
+        )
+        .as_bytes();
         let scan = scan_records(bytes);
         assert!(scan.diagnostic.is_none());
         assert_eq!(scan.records[1].parent_id, Some(1));

@@ -71,8 +71,10 @@ fn tools() -> Vec<ToolDefinition> {
         ),
         (
             "edit",
-            "Replace exactly one occurrence of old_text with new_text. Fails without changing \
-             the file if absent or ambiguous.",
+            concat!(
+                "Replace exactly one occurrence of old_text with new_text. Fails without changing ",
+                "the file if absent or ambiguous.",
+            ),
             json!({
                 "type": "object",
                 "properties": {
@@ -438,8 +440,12 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
                             "PersistenceFailure",
                             "coding-loop",
                             format!(
-                                "Tool call {call_id}: external side effects may already have \
-                                 occurred; result commit failed: {error}"
+                                concat!(
+                                    "Tool call {call_id}: external side effects may already have ",
+                                    "occurred; result commit failed: {error}",
+                                ),
+                                call_id = call_id,
+                                error = error,
                             ),
                         )
                     })?;

@@ -22,8 +22,10 @@
 pub mod edit;
 pub mod engine;
 pub mod json;
+pub mod lint;
 pub mod scan;
 pub mod select;
 
 pub use edit::LineIndex;
 pub use engine::{Error, Options, format_source};
+pub use lint::Violation;

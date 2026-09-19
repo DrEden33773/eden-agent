@@ -190,10 +190,10 @@ impl Session {
         let bytes = std::fs::read(&options.source).map_err(|e| invalid(e.to_string()))?;
         let scan = eden_protocol::history::scan_records(&bytes);
         if scan.diagnostic.is_some() && !matches!(options.kind, CopyKind::Recover) {
-            return Err(invalid(
-                "source has damaged/uncommitted data; use explicit recover to copy the validated \
-                 prefix",
-            ));
+            return Err(invalid(concat!(
+                "source has damaged/uncommitted data; use explicit recover to copy the validated ",
+                "prefix",
+            )));
         }
         let first = scan
             .records
@@ -236,16 +236,20 @@ impl Session {
         }
         if options.public_only {
             losses.push(
-                "Plugin private state and provider reasoning state are omitted; this is not a \
-                 full state restoration."
-                    .into(),
+                concat!(
+                    "Plugin private state and provider reasoning state are omitted; this is not a ",
+                    "full state restoration.",
+                )
+                .into(),
             );
         }
         if cwd != first.payload["cwd"].as_str().unwrap_or("") {
             losses.push(
-                "Working directory binding changes; external project files are not copied or \
-                 rolled back."
-                    .into(),
+                concat!(
+                    "Working directory binding changes; external project files are not copied or ",
+                    "rolled back.",
+                )
+                .into(),
             );
         }
         let composition = std::fs::canonicalize(composition).map_err(|e| invalid(e.to_string()))?;
@@ -342,9 +346,11 @@ impl Session {
             );
         }
         let mut preserved = vec![
-            "Public selected history, attachments, branch links and source provenance; source \
-             bytes remain unchanged."
-                .into(),
+            concat!(
+                "Public selected history, attachments, branch links and source provenance; source ",
+                "bytes remain unchanged.",
+            )
+            .into(),
         ];
         if let Some(reply) = &migration {
             preserved.extend(reply.preserved.clone());
@@ -403,10 +409,10 @@ impl Session {
                     .filter(|r| r.kind == "extension_state")
                     .count();
                 if reply.states.len() != count {
-                    return Err(invalid(
-                        "migrator must preserve one state result per source record; preview a \
-                         public-only copy to discard state",
-                    ));
+                    return Err(invalid(concat!(
+                        "migrator must preserve one state result per source record; preview a ",
+                        "public-only copy to discard state",
+                    )));
                 }
                 let mut states = reply.states.into_iter();
                 for record in &mut records {
@@ -649,8 +655,12 @@ impl Session {
                                             "PersistenceFailure",
                                             "navigation",
                                             format!(
-                                                "summary failed ({error}); could not restore \
-                                                 selection: {restore}"
+                                                concat!(
+                                                    "summary failed ({error}); could not restore ",
+                                                    "selection: {restore}",
+                                                ),
+                                                error = error,
+                                                restore = restore,
                                             ),
                                         )
                                     })?;

@@ -2,20 +2,24 @@
 //!
 //! [`crate::tests`] is Unix-only, so before this module the Windows target
 //! compiled zero tests: the job-object ownership in `platform` was exercised
-//! only through the installed acceptance suites. These tests assert the same
-//! exit-status contract as the Unix suite against a real shell, and they observe
-//! descendants through Win32 process handles rather than through the job
-//! membership the implementation enumerates, so a cleanup that stopped nothing
-//! cannot pass by re-reading its own bookkeeping.
+//! only through the installed acceptance suites. These tests drive a real shell
+//! through the paths the product takes — completing a command, cancelling one,
+//! abandoning the tree — and they observe descendants through Win32 process
+//! handles rather than through the job membership the implementation
+//! enumerates, so a cleanup that stopped nothing cannot pass by re-reading its
+//! own bookkeeping.
 //!
 //! Git for Windows provides the shell these tests drive; that is the same
 //! prerequisite the Windows native job and the repository hooks already have.
-//! A descendant's own process id comes from the shell, never from `$!`: under
-//! Git Bash `$!` is an MSYS pid, and the native runner measured `$!` = 787 for
-//! the process Windows knows as 5284, so probing it would observe an unrelated
-//! process. `Tree::drop` stops the members through `terminate_group` before the
-//! job handle closes, so these tests exercise job membership and termination,
-//! not the `KILL_ON_JOB_CLOSE` limit that covers a failed stop.
+//! `bin\bash.exe` is a launcher: the native runner measured a spawned pid of
+//! 5992 for a shell whose own pid was 3256, with both in the job, so the
+//! completion test keeps the production order of reaping the shell before it
+//! clears what outlived it. A descendant's pid comes from the shell's
+//! `/proc/<pid>/winpid`, never from `$!`, which names an MSYS pid (the same run
+//! measured `$!` = 787 for the process Windows knows as 5284). `Tree::drop`
+//! stops the members through `terminate_group` before the job handle closes, so
+//! these tests exercise job membership and termination, not the
+//! `KILL_ON_JOB_CLOSE` limit that covers a failed stop.
 #![cfg(windows)]
 
 use std::{path::Path, time::Duration};
@@ -88,26 +92,57 @@ async fn wait_until_stopped(pid: u32, label: &str) {
     .await;
 }
 
-/// One spawned shell: the leader, the job that owns it, and the report channel
-/// its descendants use to publish their Windows process ids.
+/// The Bash that runs the script in the process it is spawned as.
+///
+/// Git for Windows ships `bin\bash.exe`, a launcher whose child runs the script,
+/// beside the `usr\bin\bash.exe` that does not: the native runner measured a
+/// spawned pid of 6712 for a shell whose own pid was 1124. Only a test that must
+/// keep the leader alive across cleanup needs this direct shell, and it checks
+/// the identity it depends on before asserting anything.
+fn direct_shell() -> String {
+    for directory in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
+        let launcher = directory.join("bash.exe");
+        if !launcher.is_file() {
+            continue;
+        }
+        if let Some(root) = launcher.parent().and_then(std::path::Path::parent) {
+            let direct = root.join("usr").join("bin").join("bash.exe");
+            if direct.is_file() {
+                return direct.to_string_lossy().into_owned();
+            }
+        }
+        return launcher.to_string_lossy().into_owned();
+    }
+    panic!("a native Bash must be on PATH for process tests");
+}
+
+/// One spawned shell: the leader, its own reported Windows pid, the job that owns
+/// it, and the report channel its descendants publish their ids on.
 struct Shell {
     child: tokio::process::Child,
     tree: crate::Tree,
+    shell_pid: u32,
     lines: Lines<BufReader<tokio::process::ChildStdout>>,
 }
 
 impl Shell {
-    /// Spawn the native shell with `command` as its script.
+    /// Spawn `bash` from `PATH` with `command` as its script.
+    async fn spawn(command: &str) -> Self {
+        Self::spawn_with("bash", command).await
+    }
+
+    /// Spawn `shell` with `command` as its script.
     ///
-    /// The script first reports the shell it reached, so a `PATH` that resolves
-    /// some other `bash.exe` fails here with its own output instead of as a
-    /// cleanup timeout. Each descendant is then reported as
+    /// The script first reports the Windows process id the shell has for itself,
+    /// so a `PATH` that resolves an unusable `bash.exe` fails here with its own
+    /// output instead of as a cleanup timeout, and so a test can tell whether the
+    /// process it owns is the shell. Each descendant is then reported as
     /// `descendant=<windows pid>`, which is how these tests learn about members
     /// without asking the job object what it contains.
-    async fn spawn(command: &str) -> Self {
-        let script = format!("echo \"shell=${{BASH_VERSION:-missing}}\"; {command}");
+    async fn spawn_with(shell: &str, command: &str) -> Self {
+        let script = format!("echo \"shell=$(cat /proc/$$/winpid)\"; {command}");
         let (mut child, tree) = crate::spawn(
-            "bash",
+            shell,
             &["--noprofile", "--norc", "-c", &script],
             Path::new("."),
         )
@@ -121,13 +156,17 @@ impl Shell {
         let greeting = within("shell greeting", lines.next_line())
             .await
             .expect("read the shell greeting");
-        assert!(
-            greeting
-                .as_deref()
-                .is_some_and(|line| line.starts_with("shell=") && !line.ends_with("missing")),
-            "PATH resolved a shell that is not a working Bash: {greeting:?}"
-        );
-        Self { child, tree, lines }
+        let shell_pid = greeting
+            .as_deref()
+            .and_then(|line| line.strip_prefix("shell="))
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .unwrap_or_else(|| panic!("the resolved shell is not a working Bash: {greeting:?}"));
+        Self {
+            child,
+            tree,
+            shell_pid,
+            lines,
+        }
     }
 
     fn leader(&self) -> u32 {
@@ -167,25 +206,35 @@ impl Shell {
     }
 }
 
-/// The completion-path action stops descendants and leaves the leader's own exit
-/// status untouched.
+/// The completion path must not signal the process the crate owns.
 ///
-/// The leader blocks in `wait` for a background descendant, so the descendant is
-/// provably alive and the leader cannot have exited on its own when cleanup
-/// runs. A stop that reached the leader would replace the real exit code 7 with
-/// the stop's own status, which is the rewrite the exit-status contract forbids.
+/// This is the exit-status contract the module documents: cleanup excludes the
+/// leader, so a command that is still running keeps its own code. It needs a
+/// Bash that runs the script in the process the crate spawned, because with the
+/// launcher the script runs in a descendant and killing it is what the
+/// completion path is supposed to do to descendants. The leader blocks in `wait`
+/// for a live descendant and pauses after it before reporting its own code, so
+/// neither cleanup nor a lost scheduling race can be mistaken for the code the
+/// command reached.
 #[tokio::test]
-async fn completion_cleanup_preserves_the_leaders_exit_status() {
-    let command =
-        format!("sleep 300 & descendant=$!; {REPORT_WINDOWS_PID}; wait $descendant; exit 7");
-    let mut shell = Shell::spawn(&command).await;
+async fn completion_cleanup_leaves_the_leader_running() {
+    let shell = direct_shell();
+    let command = format!(
+        "sleep 300 & descendant=$!; {REPORT_WINDOWS_PID}; wait $descendant; sleep 2; exit 7"
+    );
+    let mut shell = Shell::spawn_with(&shell, &command).await;
+    assert_eq!(
+        shell.leader(),
+        shell.shell_pid,
+        "this test needs a Bash that runs the script in the process the crate spawned"
+    );
     let leader = shell.leader();
     let descendant = shell.next_descendant("descendant report").await;
     assert!(
         process_running(leader) && process_running(descendant),
         "the leader and its descendant must both be alive before cleanup"
     );
-    shell.assert_leader_running("completion cleanup");
+    shell.assert_leader_running("completion cleanup with a live leader");
     shell
         .tree
         .cleanup_descendants()
@@ -195,11 +244,48 @@ async fn completion_cleanup_preserves_the_leaders_exit_status() {
     assert_eq!(
         status.code(),
         Some(7),
-        "completion cleanup stopped the leader instead of only its descendants"
+        "completion cleanup signalled the leader instead of its descendants only"
     );
     within("settle", shell.tree.settle())
         .await
         .expect("settle the completed job");
+}
+
+/// The completion-path action stops the descendants that outlived a command and
+/// keeps the exit code that command already reported.
+///
+/// This is the completion path the product takes: it reaps the shell, reads its
+/// own code 7, and only then clears descendants that are still running, so the
+/// surviving background process is provably alive when cleanup starts and gone
+/// when the barrier returns. The leader is deliberately not kept alive across
+/// cleanup here. Git for Windows' `bin\bash.exe` is a launcher whose child runs
+/// the script — the native runner measured a spawned pid of 5992 for a shell
+/// whose own pid was 3256, both job members — so an alive "leader" during
+/// cleanup is not the shell that owns the command, and the Unix suite already
+/// covers that race for a shell that is its own leader.
+#[tokio::test]
+async fn completion_cleanup_stops_survivors_of_a_completed_command() {
+    let command = format!("sleep 300 & descendant=$!; {REPORT_WINDOWS_PID}; exit 7");
+    let mut shell = Shell::spawn(&command).await;
+    let descendant = shell.next_descendant("descendant report").await;
+    assert!(
+        process_running(descendant),
+        "the descendant must outlive the command"
+    );
+    let status = shell.wait_for_leader().await;
+    assert_eq!(
+        status.code(),
+        Some(7),
+        "the shell's own code must reach the caller"
+    );
+    shell
+        .tree
+        .cleanup_descendants()
+        .expect("cleanup the descendants that outlived the command");
+    within("settle", shell.tree.settle())
+        .await
+        .expect("settle the completed job");
+    wait_until_stopped(descendant, "the descendant outlived the completion path").await;
 }
 
 /// The cancellation-path action stops the whole job, leader included.

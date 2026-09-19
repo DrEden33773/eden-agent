@@ -152,14 +152,19 @@ jobs:
       # history locking. The other crates are pure logic or temp-directory
       # fixtures, and their tests no longer execute off Linux; Clippy still
       # builds every target on every runner, so compilation coverage is unchanged.
+      # This command's selection is declared in scripts/ci-cache.py and is part of
+      # the build cache identity, so the unit graph it compiles is written back by
+      # the first heavy main run instead of being rebuilt on every run;
+      # scripts/test_ci_cache.py checks that this command and that declaration
+      # still agree.
       - name: Platform-sensitive suites
         if: ${{ !cancelled() && runner.os != 'Linux' && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: node scripts/ci-run.mjs platform-suites cargo test --locked --no-fail-fast -p eden-process -p eden-coding-tools -p eden-search -p eden-local-history -p eden-workspace
-      # Linux keeps the exact workspace command it always ran. Cargo resolves
-      # features across the selected packages, so any narrower selection builds a
-      # different unit graph and recompiles artifacts the cache already holds;
-      # narrowing only where the tests cannot differ keeps that cost to the two
-      # runners that need it, and a newly added crate still executes here.
+      # Linux keeps the exact workspace command it always ran: it is the runner
+      # that still executes what the other two no longer do, and a newly added
+      # crate executes here. Cargo resolves features across the selected packages,
+      # so Linux's own selection is part of its cache identity as well, and the
+      # entry it restores is the workspace graph it builds.
       - name: Workspace suites
         if: ${{ !cancelled() && runner.os == 'Linux' && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: node scripts/ci-run.mjs workspace-suites cargo test --workspace --locked --no-fail-fast

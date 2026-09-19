@@ -99,7 +99,10 @@ jobs:
           restore-keys: cargo-registry-v1-${{ runner.os }}-${{ runner.arch }}-
           lookup-only: true
       # The path list is part of the cache version, so it must match the heavy
-      # job's restore byte for byte or the lookup can never find its entry.
+      # job's restore byte for byte or the lookup can never find its entry. The
+      # identity itself comes from the same script and the same CI_CACHE_OS value
+      # the heavy job passes, so this probe looks for the entry that runner's own
+      # test selection is written under.
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         id: cargo-target
         with:

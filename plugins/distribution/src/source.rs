@@ -47,7 +47,7 @@ pub async fn command(
                 let stop = eden_process::Stop::complete(&status);
                 tree.cleanup_descendants()?;
                 (stop, status, false)
-            }
+            },
             _ = cancel.cancelled() => {
                 tree.terminate_group()?;
                 let status = child.wait().await.map_err(io)?;
@@ -174,10 +174,9 @@ pub async fn prepare(
                 ));
             }
             let mut response = tokio::select! {
-                        _=cancel.cancelled()=>return Err(error("Cancelled",
-                        "download cancelled")),
-                        result=client.get(url).send()=>result.map_err(|e|error("DownloadFailure",
-                        format!("{e:?}")))?
+                _ = cancel.cancelled() => return Err(error("Cancelled", "download cancelled")),
+                result = client.get(url).send() =>
+                    result.map_err(|e| error("DownloadFailure", format!("{e:?}")))?,
             }
             .error_for_status()
             .map_err(|e| error("DownloadFailure", format!("{e:?}")))?;
@@ -186,10 +185,9 @@ pub async fn prepare(
             let mut digest = Sha256::new();
             loop {
                 let chunk = tokio::select! {
-                                _=cancel.cancelled()=>return Err(error("Cancelled",
-                                "download cancelled")),
-                                chunk=response.chunk()=>chunk.map_err(|e|error("DownloadFailure",
-                                format!("{e:?}")))?
+                    _ = cancel.cancelled() => return Err(error("Cancelled", "download cancelled")),
+                    chunk = response.chunk() =>
+                        chunk.map_err(|e| error("DownloadFailure", format!("{e:?}")))?,
                 };
                 let Some(chunk) = chunk else {
                     break;

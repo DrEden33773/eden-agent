@@ -3,6 +3,7 @@
 use crate::edit::{LineIndex, advance_column, has_comment};
 use crate::json;
 use crate::scan::{self, MacroCall};
+use crate::select;
 use proc_macro2::{Delimiter, Group, LineColumn, TokenStream, TokenTree};
 use std::fmt;
 use std::io::Write;
@@ -132,11 +133,11 @@ pub fn format_source(source: &str, options: &Options) -> Result<String, Error> {
         // is what makes the answer stable for `cargo fmt` as well.
         let spliced = splice(&baseline, &lifted, &macros, &pieces)?;
         let next = rustfmt(&spliced, options)?;
-        // rustfmt re-indents an opaque macro body to the indentation it tracks
-        // at the call. Re-indenting is the point; rewriting the inside of a
-        // literal while doing it is not, and a literal's text is one token, so
-        // comparing the two token streams catches it.
-        if words(&spliced)? != words(&next)? {
+        // The first round's rustfmt already re-indented any opaque body the
+        // input carried, so the comparison starts at the input rather than at
+        // the splice: a literal's text is one token and rustfmt never rewrites
+        // one on purpose.
+        if words(&current)? != words(&next)? {
             return Err(Error::Verification {
                 line: 1,
                 message: "rustfmt changed a literal or a name inside a macro body".to_string(),
@@ -203,7 +204,7 @@ fn splice(
     Ok(out)
 }
 
-/// Replace every `json!` body with a rustfmt-readable expression.
+/// Replace every `json!` / `select!` body with a rustfmt-readable expression.
 pub fn lower_source(source: &str, options: &Options) -> Result<String, Error> {
     lower_ranges(source, options).map(|(text, _)| text)
 }
@@ -453,6 +454,7 @@ impl<'a> Emitter<'a> {
         let suffix = scan::suffix(call.group.delimiter(), statement);
         match call.name.as_str() {
             scan::JSON_NAME => json::lower_body(self, &call.group, &suffix),
+            scan::SELECT_NAME => select::lower_body(self, &call.group, &suffix),
             other => Err(self.error(call.path_start, format!("unsupported macro `{other}!`"))),
         }
         .map_err(|error| error.in_macro(&call.name))?;
@@ -570,6 +572,14 @@ impl<'a> Lifter<'a> {
         self.index.offset(at).ok_or_else(unlocated)
     }
 
+    /// Column the formatted text gives the first token of a piece.
+    pub fn piece_indent(&self, tokens: &[TokenTree]) -> usize {
+        let Some(first) = tokens.first() else {
+            return 0;
+        };
+        start_of(&self.index, first).map_or(0, |start| self.index.column(start))
+    }
+
     /// Width of the first line of a piece, as the formatted text spells it.
     pub fn piece_width(&self, tokens: &[TokenTree]) -> usize {
         let Some(first) = tokens.first() else {
@@ -598,7 +608,10 @@ impl<'a> Lifter<'a> {
                 let close_end = self.offset_of(found.group.span().end())?;
                 self.copy_gap_to(match_start)?;
                 self.drop_region(self.at, open_end, "match scrutinee")?;
-                json::lift_body(self, &found.group, &found.name)?;
+                match found.prefix {
+                    scan::JSON_MATCH => json::lift_body(self, &found.group, &found.name)?,
+                    _ => return Err(self.error(open_end, "a select! body cannot appear here")),
+                }
                 self.skip_to(close_end);
                 at += 3;
                 continue;
@@ -652,7 +665,11 @@ impl<'a> Lifter<'a> {
                 self.push(" ");
             }
             self.push(open);
-            json::lift_body(self, &found.group, &found.name)?;
+            match found.prefix {
+                scan::JSON_MATCH => json::lift_body(self, &found.group, &found.name)?,
+                scan::SELECT_MATCH => select::lift_body(self, &found.group, &found.name)?,
+                _ => unreachable!(),
+            }
             self.drop_region(self.at, call.close_end, "macro body tail")?;
             self.push(close);
             self.pieces.push(piece_start..self.out.len());
@@ -671,6 +688,7 @@ impl<'a> Lifter<'a> {
 
 /// A sentinel match found by walking tokens: `match <sentinel> { .. }`.
 pub(crate) struct Found {
+    pub prefix: &'static str,
     pub name: String,
     pub group: Group,
 }
@@ -708,11 +726,14 @@ pub(crate) fn sentinel_match_at(tokens: &[TokenTree], at: usize) -> Option<Found
         return None;
     }
     let name = name.to_string();
-    if scan::delimiter_of(&name, scan::JSON_MATCH).is_some() {
-        return Some(Found {
-            name,
-            group: group.clone(),
-        });
+    for prefix in [scan::JSON_MATCH, scan::SELECT_MATCH] {
+        if scan::delimiter_of(&name, prefix).is_some() {
+            return Some(Found {
+                prefix,
+                name: name.clone(),
+                group: group.clone(),
+            });
+        }
     }
     None
 }
@@ -732,7 +753,7 @@ pub(crate) fn statement_position(
 }
 
 pub(crate) fn is_target(call: &MacroCall) -> bool {
-    call.name == scan::JSON_NAME
+    call.name == scan::JSON_NAME || call.name == scan::SELECT_NAME
 }
 
 /// The mode a set of files is formatted in.

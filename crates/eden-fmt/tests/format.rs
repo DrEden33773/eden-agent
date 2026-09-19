@@ -113,6 +113,8 @@ fn unknown_grammar_is_refused_rather_than_guessed() {
     assert!(statements.contains("json"), "{statements}");
     let two = failure("fn f() {\n    let v = json!(a, b);\n}\n");
     assert!(two.contains("json"), "{two}");
+    let select = failure("async fn f() {\n    tokio::select! { a b }\n}\n");
+    assert!(select.contains("select"), "{select}");
 }
 
 #[test]
@@ -164,4 +166,53 @@ fn a_call_that_continues_with_a_method_stays_an_expression() {
 fn a_literal_that_spans_lines_is_refused_rather_than_rewritten() {
     let refused = failure("fn f() {\n    let v = json!({ \"a\": r#\"line1\nline2\"# });\n}\n");
     assert!(refused.contains("literal"), "{refused}");
+}
+#[test]
+fn select_bodies_are_rebuilt_from_the_tokio_grammar() {
+    let source = "async fn f() {\n    tokio::select! {\n    biased;\n    _=cancel.cancelled()=>return Err(Fault::new(\"Cancelled\",\n    \"composition\")),\n    _=std::future::ready(())=>{\n\n    }\n    }\n}\n";
+    let formatted = assert_idempotent(source);
+    assert!(formatted.contains("biased;"), "{formatted}");
+    assert!(
+        formatted.contains("_ = cancel.cancelled() => return Err(Fault::new("),
+        "{formatted}"
+    );
+    assert!(
+        formatted.contains("_ = std::future::ready(()) => {}"),
+        "{formatted}"
+    );
+}
+
+#[test]
+fn select_arms_without_commas_keep_their_block_handlers() {
+    let source = "async fn f() {\n    tokio::select! {\n        _ = cancel.cancelled() => {\n            tree.terminate();\n        }\n        _ = std::future::ready(()) => {}\n    }\n}\n";
+    let formatted = assert_idempotent(source);
+    assert!(
+        formatted.contains("=> {\n            tree.terminate();\n        }"),
+        "{formatted}"
+    );
+}
+
+#[test]
+fn select_guards_and_else_are_part_of_the_grammar() {
+    let source = "async fn f() {\n    tokio::select! {\n        biased;\n        Some(x) = rx.recv() => handle(x),\n        _ = other(), if ready && armed => ok(),\n        else => fallback(),\n    }\n}\n";
+    let formatted = assert_idempotent(source);
+    assert!(
+        formatted.contains("Some(x) = rx.recv() => handle(x),"),
+        "{formatted}"
+    );
+    assert!(
+        formatted.contains("_ = other(), if ready && armed => ok(),"),
+        "{formatted}"
+    );
+    assert!(formatted.contains("else => fallback(),"), "{formatted}");
+}
+
+#[test]
+fn a_json_object_inside_a_select_handler_is_lowered_once_with_it() {
+    let source = "async fn f() {\n    tokio::select! {\n        biased;\n        _ = cancel.cancelled() => Err(Fault::new(\"Cancelled\", json!({\"endpoint\":\"model-access\"}))),\n        reply = request() => reply,\n    }\n}\n";
+    let formatted = assert_idempotent(source);
+    assert!(
+        formatted.contains("json!({ \"endpoint\": \"model-access\" })"),
+        "{formatted}"
+    );
 }

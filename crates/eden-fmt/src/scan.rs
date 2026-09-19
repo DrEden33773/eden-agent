@@ -5,14 +5,26 @@ use proc_macro2::{Delimiter, Group, Spacing, TokenStream, TokenTree};
 
 /// The macro name that `json!` is matched against, whatever path prefixes it.
 pub const JSON_NAME: &str = "json";
+/// The macro name that `select!` is matched against, whatever path prefixes it.
+pub const SELECT_NAME: &str = "select";
 
 /// Scrutinee of a lowered `json!` body; the suffix records the original delimiter.
 pub const JSON_MATCH: &str = "__EdenJson";
+/// Scrutinee of a lowered `select!` body; the suffix records the original delimiter.
+pub const SELECT_MATCH: &str = "__EdenSelect";
 /// Key marker of a lowered object member: `_ if __ejk(key) => value`.
 pub const KEY: &str = "__ejk";
+/// Future marker of a lowered `select!` arm.
+pub const FUTURE: &str = "__es";
+/// Future and guard marker of a lowered `select!` arm.
+pub const GUARD: &str = "__esg";
+/// Marker for the `biased;` line of a `select!` body.
+pub const BIASED: &str = "__EdenBiased";
+/// Marker for the `else => handler` arm of a `select!` body.
+pub const ELSE: &str = "__EdenElse";
 /// Every identifier lowering may introduce. Input that already contains one is
 /// refused, so a lifted value can never be mistaken for a sentinel.
-pub const SENTINELS: [&str; 2] = [JSON_MATCH, KEY];
+pub const SENTINELS: [&str; 7] = [JSON_MATCH, SELECT_MATCH, KEY, FUTURE, GUARD, BIASED, ELSE];
 
 /// Keywords that start a statement, never a json! object key.
 const STATEMENT_KEYWORDS: [&str; 18] = [
@@ -215,16 +227,20 @@ pub fn sentinel_match(group: &Group) -> Option<SentinelMatch> {
         return None;
     }
     let name = name.to_string();
-    let delimiter = delimiter_of(&name, JSON_MATCH)?;
-    if body.delimiter() != Delimiter::Brace {
-        return None;
+    for prefix in [JSON_MATCH, SELECT_MATCH] {
+        if let Some(delimiter) = delimiter_of(&name, prefix) {
+            if body.delimiter() != Delimiter::Brace {
+                return None;
+            }
+            let statement = statement_of(&name, prefix);
+            return Some(SentinelMatch {
+                prefix,
+                name,
+                delimiter,
+                statement,
+                group: body.clone(),
+            });
+        }
     }
-    let statement = statement_of(&name, JSON_MATCH);
-    Some(SentinelMatch {
-        prefix: JSON_MATCH,
-        name,
-        delimiter,
-        statement,
-        group: body.clone(),
-    })
+    None
 }

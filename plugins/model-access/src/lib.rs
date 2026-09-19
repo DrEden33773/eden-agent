@@ -172,19 +172,16 @@ fn create(config: Value) -> Result<Package, Fault> {
                 let cancel = cx.scope.cancellation();
                 tokio::select! {
                     biased;
-                    _ = cancel.cancelled() => Err(Fault::new(
-                        "Cancelled",
-                        "model-access",
-                        "request cancelled",
-                    )),
+                    _ = cancel.cancelled() =>
+                        Err(Fault::new("Cancelled", "model-access", "request cancelled",)),
                     reply = request(
-                        &settings.endpoint,
-                        &settings.model,
-                        &settings.key,
-                        &input,
-                        &settings.options,
-                        |kind, payload| cx.emit(kind, payload),
-                    ) => reply,
+                            &settings.endpoint,
+                            &settings.model,
+                            &settings.key,
+                            &input,
+                            &settings.options,
+                            |kind, payload| cx.emit(kind, payload),
+                        ) => reply,
                 }
             }
         }))

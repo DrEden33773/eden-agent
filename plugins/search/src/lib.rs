@@ -163,8 +163,8 @@ impl State {
     ) -> Result<ToolResult, Fault> {
         let mut slot = tokio::select! {
             biased;
-            _=cancel.cancelled()=>return Err(fault("Cancelled","search stopped")),
-            slot=self.worker.lock()=>slot,
+            _ = cancel.cancelled() => return Err(fault("Cancelled", "search stopped")),
+            slot = self.worker.lock() => slot,
         };
         if slot.is_none() {
             *slot = Some(Arc::new(Worker::start(&self.executable)?));
@@ -174,11 +174,17 @@ impl State {
         let mut exchange =
             tokio::task::spawn_blocking(move || exchange_worker.exchange(request, progress));
         let result = tokio::select! {
-            result=&mut exchange=>result.map_err(|e|ExchangeFailure::from(fault("SearchFailure",e.to_string()))).and_then(|r|r),
-            _=cancel.cancelled()=>{
-                let stopped=tokio::task::spawn_blocking(move ||worker.stop()).await.map_err(|e|fault("CleanupFailure",e.to_string()))?;
-                let _=exchange.await;*slot=None;stopped?;
-                return Err(fault("Cancelled","search stopped"));
+            result = &mut exchange => result
+                .map_err(|e| ExchangeFailure::from(fault("SearchFailure", e.to_string())))
+                .and_then(|r| r),
+            _ = cancel.cancelled() => {
+                let stopped = tokio::task::spawn_blocking(move || worker.stop())
+                    .await
+                    .map_err(|e| fault("CleanupFailure", e.to_string()))?;
+                let _ = exchange.await;
+                *slot = None;
+                stopped?;
+                return Err(fault("Cancelled", "search stopped"));
             }
         };
         // Only a fully read business-error response preserves stream alignment.

@@ -43,7 +43,7 @@ python3 scripts/verify.py
 python3 scripts/verify-coding.py
 ```
 
-The native CI matrix runs these checks on Linux x86_64, Windows x86_64 and the actual macOS runner architecture. Its artifacts contain an installation archive and machine-readable coding/native verification results with the tested target and commit. These checks cover native loading and lifecycle, not interactive terminal behavior.
+The native CI matrix runs these checks on Linux x86_64, Windows x86_64 and the actual macOS runner architecture. The test targets whose behavior differs per operating system — process ownership, link creation, path scope and history locking — run on all three; the remaining workspace tests run on Linux, while Clippy and the acceptance suites still compile and load every plugin on every runner. Its artifacts contain an installation archive and machine-readable coding/native verification results with the tested target and commit. These checks cover native loading and lifecycle, not interactive terminal behavior.
 
 ## Contributions and license
 

@@ -146,9 +146,20 @@ jobs:
       - name: Git hook behavior
         if: ${{ !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: node scripts/ci-run.mjs hooks pnpm hooks:test
-      - name: Core and native process tests
+      # Platform sensitivity, not the crate list, decides the matrix. These
+      # targets own the branches that really differ per OS: process ownership and
+      # shell descendants, link creation, path scope and history locking.
+      - name: Platform-sensitive suites
         if: ${{ !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
-        run: node scripts/ci-run.mjs core cargo test --workspace --locked --no-fail-fast
+        run: node scripts/ci-run.mjs platform-suites cargo test --locked --no-fail-fast -p eden-process -p eden-coding-tools -p eden-search -p eden-local-history -p eden-workspace
+      # Everything else is pure logic or temp-directory fixtures. The `--exclude`
+      # form keeps a newly added crate covered here instead of in no run at all,
+      # and it keeps eden-workspace whole: a test-name filter that selects zero
+      # tests degrades silently, which is the failure this layering removes.
+      # Clippy still builds every target on every runner.
+      - name: Linux-only suites
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        run: node scripts/ci-run.mjs linux-suites cargo test --workspace --locked --no-fail-fast --exclude eden-process --exclude eden-coding-tools --exclude eden-search --exclude eden-local-history --exclude eden-workspace
       - name: Independent author tests
         if: ${{ !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: node scripts/ci-run.mjs authors pnpm rust:test:authors

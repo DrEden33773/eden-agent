@@ -86,7 +86,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "session_id": id,
             "state_committed": true,
             "records": records.len(),
-            "reopened_records": records.len(),
             "double_shutdown": true,
             "version": version
         })

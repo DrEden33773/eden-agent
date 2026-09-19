@@ -80,8 +80,10 @@ def openssl() -> str:
 
 
 # A frozen tree is validated by every process that inherits the receipt, so the
-# same bytes would otherwise be hashed once per suite. A rewrite changes the size
-# or the modification time, which is the key here; contents are read once.
+# same bytes would otherwise be hashed once per suite. Contents are read once and
+# reused while the size and modification time are unchanged, which is what every
+# writer in this harness changes. An in-place rewrite that keeps both is outside
+# what this memo can see, and no frozen tree is written after it is frozen.
 _DIGESTS: dict[tuple[str, int, int], str] = {}
 
 
@@ -389,7 +391,9 @@ def short_retries(composition: Composition) -> None:
         if package["descriptor"]["package"] != "coding":
             continue
         config = package["config"] if isinstance(package["config"], dict) else {}
-        package["config"] = {**config, "retry": {"base_delay_ms": 1}}
+        existing = config.get("retry")
+        retry: dict[str, Any] = existing if isinstance(existing, dict) else {}
+        package["config"] = {**config, "retry": {**retry, "base_delay_ms": 1}}
 
 
 def example(name: str) -> pathlib.Path:

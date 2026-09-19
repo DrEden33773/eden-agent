@@ -59,7 +59,13 @@ class VerificationTests(unittest.TestCase):
             verification.validate_receipt(receipt, "source")
             with self.assertRaisesRegex(RuntimeError, "source changed"):
                 verification.validate_receipt(receipt, "new-lock-or-source")
+            rewritten = (root / "wrong-abi").stat()
             (root / "wrong-abi").write_bytes((root / "wrong-sdk").read_bytes())
+            # The memo keys on size and mtime, so the rewrite must move the clock
+            # forward even where the filesystem timestamp is coarse.
+            os.utime(
+                root / "wrong-abi", ns=(rewritten.st_atime_ns, rewritten.st_mtime_ns + 1_000_000)
+            )
             with self.assertRaisesRegex(RuntimeError, "artifacts changed"):
                 verification.validate_receipt(receipt, "source")
 
@@ -104,7 +110,9 @@ class VerificationTests(unittest.TestCase):
             self.assertEqual({"artifact": verification.digest(root / "artifact")}, before)
             self.assertEqual(before, verification.tree_hashes(root))
             # Same size, new mtime: the memo may not hide the rewrite.
+            written = (root / "artifact").stat()
             (root / "artifact").write_bytes(b"other")
+            os.utime(root / "artifact", ns=(written.st_atime_ns, written.st_mtime_ns + 1_000_000))
             self.assertNotEqual(before, verification.tree_hashes(root))
 
     def test_probe_binaries_live_outside_the_installation_seeds(self):

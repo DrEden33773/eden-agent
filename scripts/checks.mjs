@@ -26,10 +26,11 @@ export function manifests(root) {
   return roots;
 }
 // The rustup shim adds 35-40 ms to every cargo invocation. `rustup which`
-// resolves the pinned toolchain through rust-toolchain.toml and fails fast when
-// it is absent, and the shim stays the fallback. RUSTUP_TOOLCHAIN is
-// deliberately not set: it would override that repository override and turn a
-// missing toolchain into a download attempt instead of an error.
+// resolves the pinned toolchain through rust-toolchain.toml, the way a shim
+// invocation would, and the shim stays the fallback for anything it cannot
+// resolve. RUSTUP_TOOLCHAIN is deliberately not set: it would override that
+// repository override and turn a missing toolchain into a download attempt
+// instead of an error.
 let toolchain;
 function cargoFor(root) {
   if (toolchain) return toolchain;

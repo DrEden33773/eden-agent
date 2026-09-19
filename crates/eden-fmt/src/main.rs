@@ -58,6 +58,19 @@ fn execute(arguments: &[String]) -> Result<ExitCode, String> {
         let mut source = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut source)
             .map_err(|error| error.to_string())?;
+        // A buffer fed by an editor gets the same rule as a file on disk, so a
+        // save cannot quietly introduce a continuation.
+        let violations = eden_fmt::engine::check_source(&source);
+        if !violations.is_empty() {
+            for violation in &violations {
+                eprintln!("{}", style_line(None, violation));
+            }
+            eprintln!(
+                "eden-fmt: {} backslash continuation(s) to replace",
+                violations.len()
+            );
+            return Ok(ExitCode::from(1));
+        }
         match eden_fmt::format_source(&source, &options) {
             Ok(formatted) => {
                 print!("{formatted}");
@@ -83,6 +96,18 @@ fn execute(arguments: &[String]) -> Result<ExitCode, String> {
         for (path, error) in &outcome.failed {
             eprintln!("{}: {error}", path.display());
         }
+        if !outcome.style.is_empty() {
+            for (path, violation) in &outcome.style {
+                eprintln!("{}", style_line(Some(path), violation));
+            }
+            eprintln!(
+                "eden-fmt: {} backslash continuation(s) to replace",
+                outcome.style.len()
+            );
+            if outcome.failed.is_empty() {
+                return Ok(ExitCode::from(1));
+            }
+        }
         if !outcome.failed.is_empty() {
             eprintln!(
                 "eden-fmt: {} file(s) could not be formatted",
@@ -101,6 +126,22 @@ fn execute(arguments: &[String]) -> Result<ExitCode, String> {
             outcome.changed.len()
         );
         Ok(ExitCode::from(1))
+    }
+}
+
+/// One diagnostic line: the rule, the fix, and the literal that breaks it.
+fn style_line(path: Option<&std::path::Path>, violation: &eden_fmt::engine::Violation) -> String {
+    let hint = concat!(
+        "string literal still uses a backslash continuation; ",
+        "carry the text with `concat!(...)` or lay it out as a raw string",
+    );
+    match path {
+        Some(path) => format!(
+            "{}: {hint} ({})",
+            violation.position(path),
+            violation.opening
+        ),
+        None => format!("{hint} ({})", violation.opening),
     }
 }
 

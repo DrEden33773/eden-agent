@@ -58,9 +58,12 @@ async fn server(status: &str, body: String) -> (String, tokio::task::JoinHandle<
         socket
             .write_all(
                 format!(
-                    "HTTP/1.1 {status}\r\nContent-Type: text/event-stream\r\nContent-Length: \
-                     {}\r\nConnection: close\r\n\r\n",
-                    body.len()
+                    concat!(
+                        "HTTP/1.1 {status}\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: ",
+                        "close\r\n\r\n",
+                    ),
+                    body.len(),
+                    status = status,
                 )
                 .as_bytes(),
             )
@@ -308,8 +311,11 @@ async fn cancelling_inflight_request_closes_its_socket() {
         read_request(&mut socket).await;
         socket
             .write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: \
-                 chunked\r\n\r\n",
+                concat!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n",
+                    "Transfer-Encoding: chunked\r\n\r\n",
+                )
+                .as_bytes(),
             )
             .await
             .unwrap();
@@ -357,8 +363,10 @@ async fn cancelling_inflight_request_closes_its_socket() {
 
 #[test]
 fn sse_preserves_utf8_crlf_multiline_data_and_ignores_comments_at_every_split() {
-    let body = ": keepalive\r\nevent: response.output_text.delta\r\ndata: {\r\ndata: \
-     \"type\":\"response.output_text.delta\",\"delta\":\"你好🙂\"}\r\n\r\ndata: [DONE]\r\n\r\n";
+    let body = concat!(
+        ": keepalive\r\nevent: response.output_text.delta\r\ndata: {\r\ndata: \"type\":\"response.output_text.delta\",\"delta\":\"你好🙂\"}\r\n\r\ndata: ",
+        "[DONE]\r\n\r\n",
+    );
     for split in 0..=body.len() {
         let mut decoder = Sse::default();
         let mut events = decoder.push(&body.as_bytes()[..split]).unwrap();
@@ -937,14 +945,18 @@ fn explicit_context_errors_and_quota_messages_are_classified_without_echoing_the
     for (status, message, expected) in [
         (
             400,
-            "This model's maximum context length is 1048576 tokens. Your messages resulted in \
-             too many tokens: test-secret",
+            concat!(
+                "This model's maximum context length is 1048576 tokens. Your messages resulted ",
+                "in too many tokens: test-secret",
+            ),
             "ContextOverflow",
         ),
         (
             429,
-            "You exceeded your current quota, please check your plan and billing details. \
-             test-secret",
+            concat!(
+                "You exceeded your current quota, please check your plan and billing details. ",
+                "test-secret",
+            ),
             "ProviderFailure",
         ),
         (

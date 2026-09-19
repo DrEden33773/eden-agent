@@ -2,6 +2,7 @@
 
 use crate::edit::{LineIndex, advance_column, has_comment};
 use crate::json;
+use crate::lint;
 use crate::scan::{self, MacroCall};
 use crate::select;
 use proc_macro2::{Delimiter, Group, LineColumn, TokenStream, TokenTree};
@@ -767,11 +768,25 @@ pub enum Mode {
 pub struct Outcome {
     pub changed: Vec<PathBuf>,
     pub failed: Vec<(PathBuf, Error)>,
+    /// Every style violation found, in source order.
+    pub style: Vec<(PathBuf, Violation)>,
 }
 
 /// Format one file's text, verifying the result is a fixed point before writing.
+///
+/// The style rule comes first: a literal that still carries a backslash
+/// continuation refuses the file, and nothing is written on that path, which is
+/// what keeps the rule a check rather than an edit. `run` reports every
+/// violation through `check_source` before it gets here.
 pub fn format_file(path: &Path, options: &Options, write: bool) -> Result<bool, Error> {
     let source = std::fs::read_to_string(path)?;
+    if let Some(first) = check_source(&source).first() {
+        return Err(Error::Grammar {
+            line: first.line,
+            column: first.column,
+            message: "string literal still uses a backslash continuation".to_string(),
+        });
+    }
     let formatted = format_source(&source, options)?;
     if formatted == source {
         return Ok(false);
@@ -791,12 +806,44 @@ pub fn format_file(path: &Path, options: &Options, write: bool) -> Result<bool, 
     Ok(true)
 }
 
+/// First line whose text differs, for a diagnostic about two revisions.
 fn first_difference(before: &str, after: &str) -> usize {
     before
         .lines()
         .zip(after.lines())
         .position(|(left, right)| left != right)
         .map_or(1, |line| line + 1)
+}
+
+/// Every literal in a source that still carries a backslash line continuation.
+///
+/// This is the one rule no formatter can enforce by rewriting: rustfmt never
+/// touches a literal and neither does `eden-fmt`, so a continuation is silent in
+/// both `cargo fmt --check` and `eden-fmt check` until it is reported here.
+pub fn check_source(source: &str) -> Vec<Violation> {
+    let index = LineIndex::new(source);
+    lint::violations(source)
+        .into_iter()
+        .map(|violation| Violation {
+            line: index.line(violation.offset),
+            column: index.column(violation.offset) + 1,
+            opening: violation.opening,
+        })
+        .collect()
+}
+
+/// What the style rule found in one file.
+pub struct Violation {
+    pub line: usize,
+    pub column: usize,
+    pub opening: String,
+}
+
+impl Violation {
+    /// The position, as `file:line:column` callers expect.
+    pub fn position(&self, path: &Path) -> String {
+        format!("{}:{}:{}", path.display(), self.line, self.column)
+    }
 }
 
 /// Every `.rs` file under the given paths, in a stable order.
@@ -863,8 +910,26 @@ fn is_skipped(name: &str) -> bool {
 }
 
 /// Format every file, reporting failures instead of stopping at the first one.
+///
+/// The style rule is collected for every file before formatting starts, so one
+/// run names every continuation in the tree instead of the first one per file.
 pub fn run(files: &[PathBuf], mode: &Mode, options: &Options) -> Outcome {
     let write = matches!(mode, Mode::Write);
+    let mut style: Vec<(PathBuf, Violation)> = Vec::new();
+    for path in files {
+        let Ok(source) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for violation in check_source(&source) {
+            style.push((path.clone(), violation));
+        }
+    }
+    style.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then(left.1.line.cmp(&right.1.line))
+            .then(left.1.column.cmp(&right.1.column))
+    });
     let results: std::sync::Mutex<Vec<(PathBuf, Result<bool, Error>)>> =
         std::sync::Mutex::new(Vec::new());
     let next = std::sync::atomic::AtomicUsize::new(0);
@@ -875,7 +940,13 @@ pub fn run(files: &[PathBuf], mode: &Mode, options: &Options) -> Outcome {
                 loop {
                     let index = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let Some(path) = files.get(index) else { break };
-                    let result = format_file(path, options, write);
+                    // A file with a style violation is already reported as one;
+                    // formatting it would only add a second, poorer diagnostic.
+                    let result = if style.iter().any(|(other, _)| other == path) {
+                        Ok(false)
+                    } else {
+                        format_file(path, options, write)
+                    };
                     results
                         .lock()
                         .expect("results lock")
@@ -895,5 +966,9 @@ pub fn run(files: &[PathBuf], mode: &Mode, options: &Options) -> Outcome {
     }
     changed.sort();
     failed.sort_by(|left, right| left.0.cmp(&right.0));
-    Outcome { changed, failed }
+    Outcome {
+        changed,
+        failed,
+        style,
+    }
 }

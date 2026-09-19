@@ -305,6 +305,12 @@ def prepare(output: pathlib.Path | None = None) -> dict[str, Any]:
         shutil.copy2(
             build_target() / "debug/examples" / (name + suffix), examples / (name + suffix)
         )
+    # The search package resolves its worker beside the running executable, so a
+    # probe that searches needs that worker in its own directory too.
+    shutil.copy2(
+        build_target() / "debug" / ("eden-search-worker" + suffix),
+        examples / ("eden-search-worker" + suffix),
+    )
     frozen = {
         str(seed_root / name): tree_hashes(seed_root / name) for name in ("default", "controlled")
     }

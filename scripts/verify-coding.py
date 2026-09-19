@@ -698,8 +698,33 @@ class ArithmeticTests(unittest.TestCase):
         # An interrupted durable intention is context, never executable work on
         # reopen: the run must not perform the write it names, and nothing may
         # appear on disk for it.
+        # The fabricated history must carry the binding this scenario reopens
+        # with (cwd, roles and package descriptors), so a plain session in the
+        # same project seeds it.
+        seed_history = scratch / "reopen-seed.jsonl"
+        seeding = Server(lambda *_: answer("seeded session for the interrupted reopen"))
+        try:
+            seeding_config = configure(destination, composition, seeding, "reopen-seed")
+            events(
+                run(
+                    [
+                        host,
+                        "--composition",
+                        seeding_config,
+                        "--cwd",
+                        project,
+                        "--session",
+                        seed_history,
+                        "--json",
+                        "Seed the durable history",
+                    ],
+                    caller,
+                )
+            )
+        finally:
+            seeding.close()
         interrupted = scratch / "interrupted.jsonl"
-        seed = copy.deepcopy(records(scratch / "fail-tool_intent.jsonl")[:1])
+        seed = copy.deepcopy(records(seed_history)[:1])
         seed.append(
             {
                 "schema_version": 2,

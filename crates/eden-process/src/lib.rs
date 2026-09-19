@@ -580,3 +580,5 @@ mod platform {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod windows_tests;

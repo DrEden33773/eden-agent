@@ -78,8 +78,10 @@ mod tests {
         let path = std::env::temp_dir().join(format!("eden-env-values-{}.env", std::process::id()));
         std::fs::write(
             &path,
-            "PRESERVED=file-value\nEMPTY=file-value\nLITERAL='$(not a shell \
-             command)'\nQUOTED=\"a value with spaces\"\n",
+            concat!(
+                "PRESERVED=file-value\nEMPTY=file-value\nLITERAL='$(not a shell command)'\nQUOTED=\"a ",
+                "value with spaces\"\n",
+            ),
         )
         .unwrap();
         let result = prepare(

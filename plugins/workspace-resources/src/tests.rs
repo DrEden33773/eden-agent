@@ -99,8 +99,10 @@ fn skill_body_is_only_returned_when_invoked_and_snapshot_stays_fixed() {
     let f = Fixture::new();
     f.write(
         "project/.eden/skills/a/SKILL.md",
-        "---\nname: a\ndescription: do the task\ndisable-model-invocation: \
-                true\n---\nORIGINAL BODY",
+        concat!(
+            "---\nname: a\ndescription: do the task\ndisable-model-invocation: true\n---\nORIGINAL ",
+            "BODY",
+        ),
     );
     let loaded = load(&f.config(), 1).unwrap();
     let serialized = serde_json::to_string(&loaded.snapshot).unwrap();

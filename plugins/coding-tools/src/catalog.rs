@@ -3,8 +3,10 @@ pub(super) fn tools() -> Vec<ToolDefinition> {
     [
         (
             "powershell",
-            "Run native PowerShell without profiles at the explicit cwd. Waits for \
-                process-tree cleanup on completion or cancellation.",
+            concat!(
+                "Run native PowerShell without profiles at the explicit cwd. Waits for process-tree ",
+                "cleanup on completion or cancellation.",
+            ),
             json!({
                 "type": "object",
                 "properties": { "command": { "type": "string" } },
@@ -23,8 +25,10 @@ pub(super) fn tools() -> Vec<ToolDefinition> {
         ),
         (
             "skill",
-            "Load an available skill on demand. Relative references resolve from its \
-                skill directory.",
+            concat!(
+                "Load an available skill on demand. Relative references resolve from its skill ",
+                "directory.",
+            ),
             json!({
                 "type": "object",
                 "properties": { "name": { "type": "string" }, "arguments": { "type": "string" } },
@@ -58,8 +62,10 @@ pub(super) fn tools() -> Vec<ToolDefinition> {
         ),
         (
             "edit",
-            "Replace exactly one occurrence of old_text with new_text. Fails without changing \
-             the file if absent or ambiguous.",
+            concat!(
+                "Replace exactly one occurrence of old_text with new_text. Fails without changing ",
+                "the file if absent or ambiguous.",
+            ),
             json!({
                 "type": "object",
                 "properties": {

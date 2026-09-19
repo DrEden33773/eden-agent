@@ -294,8 +294,10 @@ impl Manager {
             if !output.join(&bundle.manifest.library).is_file() {
                 return Err(error(
                     "BuildRequired",
-                    "matching plugin artifact is missing; source build requires an explicit \
-                install --build",
+                    concat!(
+                        "matching plugin artifact is missing; source build requires an explicit install ",
+                        "--build",
+                    ),
                 ));
             }
             let digest = files::digest(&output, cancel)?;
@@ -528,8 +530,10 @@ impl Manager {
             return Err(error(
                 "PackageInUse",
                 format!(
-                    "version is referenced by {}; explicitly remove with force only after \
-                handling these bindings",
+                    concat!(
+                        "version is referenced by {}; explicitly remove with force only after handling ",
+                        "these bindings",
+                    ),
                     references.join(", ")
                 ),
             ));

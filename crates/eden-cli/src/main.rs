@@ -128,25 +128,23 @@ async fn run(args: Vec<String>) -> Result<i32, Box<dyn std::error::Error>> {
                 return Ok(0);
             }
             "--help" => {
-                println!(
-                    "eden trust allow|deny|inspect PATH [--global-dir DIR]\n\
-                    eden resources list [--cwd DIR]\n\
-                    eden commands\n\
-                    eden command NAME JSON\n\
-                    eden package install SOURCE [--build]\n\
-                    eden session switch PATH --composition COMPOSITION\n\
-                    Resource options: --global-dir DIR --trust-project --no-trust-project --no-context --no-skills --no-templates --skill-path PATH --template-path PATH\nTools: --tools NAMES --exclude-tools NAMES --read-only\n\neden [--env-file PATH] [--composition PATH] [--cwd DIR] [--session \
-                     PATH|--no-session] [--print|--json] [--attach TEXT|--image IMAGE|--file \
-                     PDF] PROMPT\neden --history PATH\neden history inspect|export PATH \
-                     [DEST]\neden session info|tree|compact|continue PATH\neden session \
-                     fork|clone|import|upgrade|recover|migrate SOURCE DEST [--at NODE] [--cwd \
-                     DIR] [--public-only] [--apply]\neden session branch PATH --at NODE --branch \
-                     NAME [--summarize]\neden session metadata PATH --name NAME [--tag \
-                     TAG]\neden session queue|enqueue|queue-mode|include-attachment PATH \
-                     [OPTIONS]\nSession commands accept --composition PATH. Copy commands \
-                     preview by default; --apply creates the new file. Explicit model and \
-                     credentials are required by the default Responses provider."
-                );
+                println!(concat!(
+                    "eden trust allow|deny|inspect PATH [--global-dir DIR]\neden resources list ",
+                    "[--cwd DIR]\neden commands\neden command NAME JSON\neden package install SOURCE ",
+                    "[--build]\neden session switch PATH --composition COMPOSITION\nResource options: ",
+                    "--global-dir DIR --trust-project --no-trust-project --no-context --no-skills ",
+                    "--no-templates --skill-path PATH --template-path PATH\nTools: --tools NAMES ",
+                    "--exclude-tools NAMES --read-only\n\neden [--env-file PATH] [--composition ",
+                    "PATH] [--cwd DIR] [--session PATH|--no-session] [--print|--json] [--attach ",
+                    "TEXT|--image IMAGE|--file PDF] PROMPT\neden --history PATH\neden history inspect|export ",
+                    "PATH [DEST]\neden session info|tree|compact|continue PATH\neden session fork|clone|import|upgrade|recover|migrate ",
+                    "SOURCE DEST [--at NODE] [--cwd DIR] [--public-only] [--apply]\neden session ",
+                    "branch PATH --at NODE --branch NAME [--summarize]\neden session metadata ",
+                    "PATH --name NAME [--tag TAG]\neden session queue|enqueue|queue-mode|include-attachment ",
+                    "PATH [OPTIONS]\nSession commands accept --composition PATH. Copy commands ",
+                    "preview by default; --apply creates the new file. Explicit model and credentials ",
+                    "are required by the default Responses provider.",
+                ));
                 return Ok(0);
             }
             _ if arg.starts_with('-') => return Err(format!("unknown option: {arg}").into()),

@@ -5,8 +5,10 @@ fn independent_history_reads_prefix_without_plugins_or_original_cwd() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("legacy.jsonl");
     let bytes =
-        b"{\"schema_version\":1,\"session_id\":9,\"sequence\":1,\"run_id\":0,\"kind\":\"session\",\
-     \"payload\":{\"cwd\":\"/missing-original-project\"}}\n{\"partial\":";
+        concat!(
+            "{\"schema_version\":1,\"session_id\":9,\"sequence\":1,\"run_id\":0,\"kind\":\"session\",\"payload",
+            "\":{\"cwd\":\"/missing-original-project\"}}\n{\"partial\":",
+        ).as_bytes();
     std::fs::write(&path, bytes).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_eden"))
         .args(["history", "inspect"])

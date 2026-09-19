@@ -90,6 +90,24 @@ fn execute(arguments: &[String]) -> Result<ExitCode, String> {
             );
             return Ok(ExitCode::from(2));
         }
+        if !outcome.style.is_empty() {
+            let hint = concat!(
+                "string literal still uses a backslash continuation; ",
+                "carry the text with `concat!(...)` or lay it out as a raw string",
+            );
+            for (path, violation) in &outcome.style {
+                eprintln!(
+                    "{}: {hint} ({})",
+                    violation.position(path),
+                    violation.opening
+                );
+            }
+            eprintln!(
+                "eden-fmt: {} string literal(s) still use a backslash continuation",
+                outcome.style.len()
+            );
+            return Ok(ExitCode::from(1));
+        }
         if matches!(mode, Mode::Write) {
             return Ok(ExitCode::SUCCESS);
         }

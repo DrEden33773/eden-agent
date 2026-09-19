@@ -190,7 +190,16 @@ def cache_keys(
     restore = [prefix]
     legacy = LEGACY_IMAGES.get((runner_os, architecture))
     legacy_key = None
-    if legacy and legacy[0] == image and inputs == LEGACY_BUILD_INPUTS:
+    # The v1 entry was written before the matrix layering existed, so every
+    # runner that recorded one was running the workspace command. Only that
+    # selection may restore it; a narrowed run has no recorded entry of its own
+    # selection and starts cold, like any other new context.
+    if (
+        legacy
+        and legacy[0] == image
+        and inputs == LEGACY_BUILD_INPUTS
+        and not selection["packages"]
+    ):
         legacy_key = f"cargo-target-v1-{runner_os}-{architecture}-{legacy[1]}-{LEGACY_CACHE_COMMIT}"
         restore.append(legacy_key)
     return {

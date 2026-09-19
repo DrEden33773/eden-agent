@@ -65,6 +65,26 @@ def step_condition(text: str, marker: str) -> str:
     raise AssertionError(f"no condition on the step containing {marker!r}")
 
 
+def step_env(text: str, marker: str) -> dict[str, str]:
+    """The step-level `env:` mapping of the workflow step containing the marker."""
+    lines = text.splitlines()
+    index = next(index for index, line in enumerate(lines) if marker in line)
+    start = max(index for index in range(index + 1) if re.match(r"^\s*- ", lines[index]))
+    step = lines[start:index]
+    declared = {}
+    for position, line in enumerate(step):
+        if line.strip() != "env:":
+            continue
+        indent = len(line) - len(line.lstrip())
+        for following in step[position + 1 :]:
+            if following.strip() and len(following) - len(following.lstrip()) <= indent:
+                break
+            match = re.match(r"^\s+([A-Za-z0-9_]+): (.+?)\s*$", following)
+            if match:
+                declared[match.group(1)] = match.group(2)
+    return declared
+
+
 def matrix_oses(text: str) -> set[str]:
     """The runner labels of the single runner matrix the workflow declares."""
     matches = re.findall(r"^\s+os: \[([^\]]*)\]$", text, re.MULTILINE)
@@ -184,17 +204,28 @@ class CacheKeyTests(CacheKeyCase):
 
     def test_legacy_migration_requires_exact_inputs_platform_and_recorded_image(self) -> None:
         fingerprint = cache.identities(FILES, ENV)[1]
+        workspace_runners = {
+            runner
+            for runner, (label, _) in cache.TEST_SELECTIONS.items()
+            if label == "workspace-suites"
+        }
         with patch.object(cache, "LEGACY_BUILD_INPUTS", fingerprint):
             for (runner_os, architecture), (image, old_hash) in cache.LEGACY_IMAGES.items():
                 selected = self.keys(runner_os=runner_os, architecture=architecture, image=image)
-                expected = f"cargo-target-v1-{runner_os}-{architecture}-{old_hash}-{cache.LEGACY_CACHE_COMMIT}"
-                self.assertEqual(selected["restore_keys"][-1], expected)
-                self.assertEqual(selected["legacy_candidate"], expected)
-                self.assertEqual(selected["legacy_source_commit"], cache.LEGACY_SOURCE_COMMIT)
                 changed = self.keys(
                     runner_os=runner_os, architecture=architecture, image=image + "0"
                 )
                 self.assertIsNone(changed["legacy_candidate"])
+                if runner_os not in workspace_runners:
+                    # The v1 entry predates the layering, so a narrowed runner has
+                    # no recorded entry of its own selection to restore.
+                    self.assertIsNone(selected["legacy_candidate"])
+                    self.assertEqual(len(selected["restore_keys"]), 1)
+                    continue
+                expected = f"cargo-target-v1-{runner_os}-{architecture}-{old_hash}-{cache.LEGACY_CACHE_COMMIT}"
+                self.assertEqual(selected["restore_keys"][-1], expected)
+                self.assertEqual(selected["legacy_candidate"], expected)
+                self.assertEqual(selected["legacy_source_commit"], cache.LEGACY_SOURCE_COMMIT)
             self.assertIsNone(
                 self.keys(dict(FILES, **{"Cargo.lock": "version = 3\n"}))["legacy_candidate"]
             )
@@ -202,6 +233,20 @@ class CacheKeyTests(CacheKeyCase):
                 self.keys(environment={**ENV, "CARGO_INCREMENTAL": "1"})["legacy_candidate"]
             )
             self.assertIsNone(self.keys(architecture="unknown-architecture")["legacy_candidate"])
+
+    def test_a_narrowed_selection_has_no_legacy_entry_to_restore(self) -> None:
+        fingerprint = cache.identities(FILES, ENV)[1]
+        narrowed = {
+            (runner, architecture): image
+            for (runner, architecture), (image, _digest) in cache.LEGACY_IMAGES.items()
+            if cache.TEST_SELECTIONS[runner][1]
+        }
+        self.assertTrue(narrowed)
+        with patch.object(cache, "LEGACY_BUILD_INPUTS", fingerprint):
+            for (runner, architecture), image in narrowed.items():
+                selected = self.keys(runner_os=runner, architecture=architecture, image=image)
+                self.assertIsNone(selected["legacy_candidate"])
+                self.assertEqual(len(selected["restore_keys"]), 1)
 
     def test_checkout_line_endings_preserve_toml_identity(self) -> None:
         crlf = {name: text.replace("\n", "\r\n") for name, text in FILES.items()}
@@ -305,6 +350,15 @@ class WorkflowIdentityTests(unittest.TestCase):
         # A new test phase must declare its selection, or its unit graph would be
         # stored under a key that ignores what it ran.
         self.assertEqual({label for label, _ in commands}, set(declared))
+        # Runners that share a phase label must declare the same selection, or one
+        # of them would key its entry as another runner's graph.
+        for label in declared:
+            shared = {
+                tuple(packages)
+                for runner_label, packages in cache.TEST_SELECTIONS.values()
+                if runner_label == label
+            }
+            self.assertEqual(len(shared), 1, label)
         for label, arguments in commands:
             self.assertEqual(set(re.findall(r"-p ([A-Za-z0-9_-]+)", arguments)), declared[label])
             self.assertEqual("--workspace" in arguments, not declared[label])
@@ -325,11 +379,11 @@ class WorkflowIdentityTests(unittest.TestCase):
         # never run.
         self.assertEqual(matrix_oses(self.heavy), matrix_oses(self.probe))
         self.assertEqual(set(cache.TEST_SELECTIONS), matrix_oses(self.heavy))
-        # Same identity inputs and the same literal build environment, so both
-        # derivations of the key agree.
+        # Same step environment and the same literal build environment, so both
+        # derivations of the key agree: every variable the derivation reads
+        # (CI_CACHE_*, ImageVersion, and anything added later) has to be here.
         self.assertEqual(
-            re.findall(r"^\s+(CI_CACHE_[A-Z_]+): (.+)$", self.heavy, re.MULTILINE),
-            re.findall(r"^\s+(CI_CACHE_[A-Z_]+): (.+)$", self.probe, re.MULTILINE),
+            step_env(self.heavy, "scripts/ci-cache.py"), step_env(self.probe, "scripts/ci-cache.py")
         )
         self.assertEqual(
             declared_build_environment(self.heavy), declared_build_environment(self.probe)

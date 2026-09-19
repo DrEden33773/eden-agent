@@ -64,7 +64,7 @@ Five suites execute in separate processes with separate installation copies, pro
 
 Each native runner also extracts its actual release archive into a fresh directory beneath an unrelated receipt file. `scripts/verify-archive.py` compares every file and its bytes against the frozen distribution, checks executable permission bits on POSIX, and executes the packaged CLI's `--version` and `resources list` commands with an isolated project and global directory. Windows execution validates native executable access. These commands make no Provider calls. `artifacts/ci/archive-verification.json` binds the archive, host and plugin hashes to the source commit and native target; it is a compact downloadable proof alongside the raw native diagnostics.
 
-CI caches the pinned Rust toolchain, pnpm store, uv downloads, Cargo registry/Git sources and native build outputs separately. A build-cache entry names one compatible build context — OS, architecture, runner image, toolchain, manifests, locks, CI profile identity and the test selection that runner executes — and later source revisions restore it, because the commit is recorded in `artifacts/ci/cache-inputs.json` instead of the key; a key that carried the commit created one entry per run and could never hit one. The test selection belongs to that context because Cargo resolves features across the packages a command selects: the narrowed subset is a different unit graph from the workspace one, and while the identity ignored it, the workspace entry stayed an exact hit, so the narrowed graph was never written back and every Windows and macOS run rebuilt it (`cargo-target-v3` is deliberately not restored under `cargo-target-v4`, and no fallback is declared: the first heavy main run on the new key is cold, which is the v4 baseline — that rekeys every runner, Linux included, although its command did not change). Each runner's selection is declared once in `scripts/ci-cache.py` against the runner label that both the heavy job and the cache-state probe pass, so the probe looks for the entry that job writes; `scripts/test_ci_cache.py` fails when the declaration and the workflow's command, runner conditions or probe inputs drift apart. An empty package list is the unchanged `cargo test --workspace`. Only a main push or a manual dispatch writes caches: a pull-request run's entries live under `refs/pull/<n>/merge`, which no other pull request and no branch can restore, so writing them only evicts the entries the main runs restore. Because a job-level `cache-mode` has to be a literal value and not an expression, the pull-request and main paths call the same native verification workflow from two jobs that declare `read` and `write` respectively instead of sharing one job. Cargo validates restored outputs; CI does not restore source timestamps or cache test verdicts. CI disables incremental compilation and uses debug level 1 to reduce cache transfer size while retaining line information and debug assertions. Cache identities, compilation counts and phase durations are uploaded under `artifacts/ci` on success or failure. A cache hit alone is not evidence of a passed test or an avoided rebuild.
+CI caches the pinned Rust toolchain, pnpm store, uv downloads, Cargo registry/Git sources and native build outputs separately. A build-cache entry names one compatible build context — OS, architecture, runner image, toolchain, manifests, locks, CI profile identity and the test selection that runner executes — and later source revisions restore it, because the commit is recorded in `artifacts/ci/cache-inputs.json` instead of the key; a key that carried the commit created one entry per run and could never hit one. The test selection belongs to that context because Cargo resolves features across the packages a command selects: the narrowed subset is a different unit graph from the workspace one, and while the identity ignored it, the workspace entry stayed an exact hit, so the narrowed graph was never written back and every Windows and macOS run rebuilt it (`cargo-target-v3` is deliberately not restored under `cargo-target-v4`, and no fallback is declared: the first heavy main run on the new key is cold, which is the v4 baseline — that rekeys every runner, Linux included, although its command did not change; `cargo-target-v5` is the same deliberate rekey for the `eden-fmt` workspace member, which joins every runner's unit graph while the test selection stays unchanged). Each runner's selection is declared once in `scripts/ci-cache.py` against the runner label that both the heavy job and the cache-state probe pass, so the probe looks for the entry that job writes; `scripts/test_ci_cache.py` fails when the declaration and the workflow's command, runner conditions or probe inputs drift apart. An empty package list is the unchanged `cargo test --workspace`. Only a main push or a manual dispatch writes caches: a pull-request run's entries live under `refs/pull/<n>/merge`, which no other pull request and no branch can restore, so writing them only evicts the entries the main runs restore. Because a job-level `cache-mode` has to be a literal value and not an expression, the pull-request and main paths call the same native verification workflow from two jobs that declare `read` and `write` respectively instead of sharing one job. Cargo validates restored outputs; CI does not restore source timestamps or cache test verdicts. CI disables incremental compilation and uses debug level 1 to reduce cache transfer size while retaining line information and debug assertions. Cache identities, compilation counts and phase durations are uploaded under `artifacts/ci` on success or failure. A cache hit alone is not evidence of a passed test or an avoided rebuild.
 
 Measure cold and warm runs on the same source and toolchain. Compare preparation, compilation, execution and cache transfer separately; preserve the failed baseline and the original regression assertions. Do not speed up a failing test by adding retries, broad sleeps, skips or weaker assertions. The acceptance host is configured with a 1 ms retry base delay instead of the product's 2 s default: the suites assert which retries happen and never how long they took. `python -m unittest discover -s scripts -p 'test_*.py' -v` checks license packaging, preparation invalidation, installation isolation and failure diagnostics without compiling the workspace.
 
@@ -74,8 +74,41 @@ Measure cold and warm runs on the same source and toolchain. Compare preparation
 
 Biome 2.5.3 is pinned in pnpm and applies its recommended lint preset, formatting and import organization to mjs. Build outputs, dependencies and local virtual environments are excluded from checks. `.vscode/settings.json` selects Ruff, Biome and rust-analyzer for format-on-save; install the recommended extensions to use those editor integrations.
 
+## Macro call formatting
+
+`rustfmt` never enters a `json!` body that uses object syntax, because `"key": value` is not a Rust expression. `eden-fmt` is a workspace member that formats exactly those bodies: it lowers a body into the Rust expression rustfmt does parse, formats the file, and lifts the result back into the DSL. Every layout decision is still rustfmt's, so the tool is a compatibility layer rather than a second pretty-printer. It refuses to touch a file whose target macro it cannot read (`pnpm rust:check` then reports the position and leaves the file alone), and its output is a fixed point of both `cargo fmt` and itself. Build it once with `cargo build --locked -p eden-fmt`; `pnpm rust:check` and `pnpm rust:fmt` run it for the root workspace and for every independent author.
+
+The shape it enforces is the shape rustfmt gives a struct literal and an array:
+
+- A `json!` object stays on one line while it fits; otherwise it is written one member per line, indented four spaces, with a trailing comma after the last member.
+- A `json!` array follows the same rule: one line while it fits, otherwise one element per line.
+- A value is formatted by rustfmt, so a long expression breaks the way rustfmt breaks it.
+
+Write it this way:
+
+```rust
+let short = json!({ "type": "object", "required": ["command"] });
+let long = json!({
+    "type": "object",
+    "properties": { "command": { "type": "string" } },
+    "additionalProperties": false,
+});
+```
+
+Not this way:
+
+```rust
+let short = json!({"type":"object","required":["command"]});
+let long = json!({
+"type":"object",
+"properties":{"command":{"type":"string"}},
+});
+```
+
+`pnpm rust:fmt` applies both formatters: `cargo fmt` for the Rust around a macro, and `eden-fmt write` for the macro bodies.
+
 ## Rustfmt limitations
 
 `rustfmt.toml` explicitly sets edition/style edition 2024 and a 100-column target. All commands continue using the pinned stable Rust toolchain. A passing `cargo fmt --check` is not a strict line-length guarantee: rustfmt may leave an enclosing closure or block untouched when an unbreakable macro string overflows, as tracked in [rustfmt #6870](https://github.com/rust-lang/rustfmt/issues/6870). Editor format-on-save can encounter the same limitation.
 
-Split long strings with Rust backslash-newline continuations where their contents must stay identical, and lay out complex macro arguments over multiple lines. Re-run `pnpm rust:fmt` and inspect the affected block, then run `pnpm rust:check`. Long literals in fixtures and protocol messages need the same attention as ordinary code; changing formatter width or switching to nightly is not required.
+An unbreakable string inside a `json!` body can also pass the target once the body is indented to the standard above, because neither formatter splits a string literal: `plugins/coding-tools/src/tests.rs` carries one line of 103 columns for that reason. Carrying that text some other way — `concat!`, or a raw string laid out by meaning — is a separate change, and until then the affected block stays readable by hand. Re-run `pnpm rust:fmt` and inspect the affected block, then run `pnpm rust:check`. Long literals in fixtures and protocol messages need the same attention as ordinary code; changing formatter width or switching to nightly is not required.

@@ -21,7 +21,7 @@ async fn append(cx: &CallContext, kind: &str, payload: Value) -> Result<StoreRep
         .await?;
     cx.emit(
         "committed",
-        json!({"sequence":receipt.sequence,"kind":kind}),
+        json!({ "sequence": receipt.sequence, "kind": kind }),
     )?;
     Ok(receipt)
 }
@@ -51,22 +51,12 @@ fn tools() -> Vec<ToolDefinition> {
             json!({
                 "type": "object",
                 "properties": {
-                    "path": {
-                        "type": "string"
-                    },
-                    "offset": {
-                        "type": "integer",
-                        "minimum": 1
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "minimum": 1
-                    }
+                    "path": { "type": "string" },
+                    "offset": { "type": "integer", "minimum": 1 },
+                    "limit": { "type": "integer", "minimum": 1 },
                 },
-                "required": [
-                    "path"
-                ],
-                "additionalProperties": false
+                "required": ["path"],
+                "additionalProperties": false,
             }),
         ),
         (
@@ -74,19 +64,9 @@ fn tools() -> Vec<ToolDefinition> {
             "Write a UTF-8 file, creating parent directories.",
             json!({
                 "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string"
-                    },
-                    "content": {
-                        "type": "string"
-                    }
-                },
-                "required": [
-                    "path",
-                    "content"
-                ],
-                "additionalProperties": false
+                "properties": { "path": { "type": "string" }, "content": { "type": "string" } },
+                "required": ["path", "content"],
+                "additionalProperties": false,
             }),
         ),
         (
@@ -96,22 +76,12 @@ fn tools() -> Vec<ToolDefinition> {
             json!({
                 "type": "object",
                 "properties": {
-                    "path": {
-                        "type": "string"
-                    },
-                    "old_text": {
-                        "type": "string"
-                    },
-                    "new_text": {
-                        "type": "string"
-                    }
+                    "path": { "type": "string" },
+                    "old_text": { "type": "string" },
+                    "new_text": { "type": "string" },
                 },
-                "required": [
-                    "path",
-                    "old_text",
-                    "new_text"
-                ],
-                "additionalProperties": false
+                "required": ["path", "old_text", "new_text"],
+                "additionalProperties": false,
             }),
         ),
         (
@@ -119,15 +89,9 @@ fn tools() -> Vec<ToolDefinition> {
             "Run a bash command in the session cwd. Returns bounded output and the exit code.",
             json!({
                 "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string"
-                    }
-                },
-                "required": [
-                    "command"
-                ],
-                "additionalProperties": false
+                "properties": { "command": { "type": "string" } },
+                "required": ["command"],
+                "additionalProperties": false,
             }),
         ),
     ]
@@ -164,7 +128,12 @@ async fn provider_retry(
                 if error.code == "Cancelled" {
                     return Err(error);
                 }
-                append(cx, "model_error", json!({"attempt":attempt,"error":error})).await?;
+                append(
+                    cx,
+                    "model_error",
+                    json!({ "attempt": attempt, "error": error }),
+                )
+                .await?;
                 if error.code != "RetryableProviderFailure" || attempt == settings.max_retries {
                     return Err(error);
                 }
@@ -173,7 +142,7 @@ async fn provider_retry(
                     .saturating_mul(2_u64.saturating_pow(attempt));
                 cx.emit(
                     "model_retry",
-                    json!({"attempt":attempt+1,"delay_ms":delay_ms}),
+                    json!({ "attempt": attempt + 1, "delay_ms": delay_ms }),
                 )?;
                 let cancellation = cx.scope.cancellation();
                 tokio::select! {
@@ -218,7 +187,7 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
     .await?;
     let selected_tools = catalog.map(|catalog| catalog.tools);
     if !input.resume {
-        append(&cx, "submission", json!({"content":input.content})).await?;
+        append(&cx, "submission", json!({ "content": input.content })).await?;
     }
     if let Some(snapshot) = &resources {
         append(&cx, "resource_snapshot", json!(snapshot)).await?;
@@ -249,7 +218,7 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
         append(
             &cx,
             "input_hook",
-            json!({"original":input.content,"transformed":hooked.content}),
+            json!({ "original": input.content, "transformed": hooked.content }),
         )
         .await?;
         input.content = hooked.content;
@@ -303,7 +272,7 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
         append(
             &cx,
             "model_request",
-            json!({"request_id":request_id,"queue_ids":queue_ids}),
+            json!({ "request_id": request_id, "queue_ids": queue_ids }),
         )
         .await?;
         let reply = match provider_retry(&cx, &projected, &settings).await {
@@ -372,7 +341,7 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
             .collect();
         drafts.push(RecordDraft {
             kind: "model_response".into(),
-            payload: json!({"request_id":request_id}),
+            payload: json!({ "request_id": request_id }),
         });
         for (state, record) in deliveries.values() {
             if *state == "queue_delivered" && record.run_id == cx.run_id() {
@@ -398,11 +367,14 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
         for (index, kind) in committed_kinds.iter().enumerate() {
             cx.emit(
                 "committed",
-                json!({"sequence":first_sequence+index as u64,"kind":kind}),
+                json!({ "sequence": first_sequence + index as u64, "kind": kind }),
             )?;
         }
         for id in &queue_ids {
-            cx.emit("queue_consumed", json!({"id":id,"request_id":request_id}))?;
+            cx.emit(
+                "queue_consumed",
+                json!({ "id": id, "request_id": request_id }),
+            )?;
         }
         let usage_overflow = settings.compaction_enabled
             && limits.context_window > 0
@@ -430,7 +402,7 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
                                 if execution.call_id != original.call_id || execution.cwd != original.cwd {
                                     return Err(Fault::new("InvalidInput", "before-tool", "hooks may change tool name and arguments, but not call identity or cwd"));
                                 }
-                                append(&cx, "tool_execution_intent", json!({"original":original,"execution":execution})).await?;
+                                append(&cx, "tool_execution_intent", json!({"original": original,"execution": execution})).await?;
                                 cx.call::<_, ToolResult>(TOOL, &execution).await
                             }.await
                         }
@@ -615,12 +587,7 @@ mod s2_tests {
             "id": 1,
             "kind": "steering",
             "branch": "main",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "correct this"
-                }
-            ]
+            "content": [{ "type": "text", "text": "correct this" }],
         });
         let records = vec![
             record(1, "queue_accepted", entry.clone()),
@@ -635,7 +602,7 @@ mod s2_tests {
     }
     #[test]
     fn consumption_survives_restore_and_uses_stable_identity() {
-        let entry = json!({"id":1,"kind":"follow_up","branch":"main","content":[]});
+        let entry = json!({ "id": 1, "kind": "follow_up", "branch": "main", "content": [] });
         let records = vec![
             record(1, "queue_accepted", entry.clone()),
             record(2, "queue_delivered", entry.clone()),
@@ -674,7 +641,7 @@ mod s2_tests {
                     "first_kept": 2,
                     "uncertainties": [],
                     "read_files": [],
-                    "modified_files": []
+                    "modified_files": [],
                 }),
             ),
         ];

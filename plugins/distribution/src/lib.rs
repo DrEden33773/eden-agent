@@ -116,13 +116,8 @@ fn catalog() -> Vec<CommandDefinition> {
             "Prepare a local directory/tar/tar.gz, pinned Git revision or HTTPS \
                 archive. Installation does not enable the package.",
             json!({
-            "source":{
-            "type":"object"
-            },
-            "build":{
-            "type":"boolean",
-            "default":false
-            }
+                "source": { "type": "object" },
+                "build": { "type": "boolean", "default": false },
             }),
             vec!["source"],
         ),
@@ -137,16 +132,9 @@ fn catalog() -> Vec<CommandDefinition> {
             "Remove one installed version. Referenced versions require explicit force; \
                 history is retained.",
             json!({
-            "name":{
-            "type":"string"
-            },
-            "version":{
-            "type":"string"
-            },
-            "force":{
-            "type":"boolean",
-            "default":false
-            }
+                "name": { "type": "string" },
+                "version": { "type": "string" },
+                "force": { "type": "boolean", "default": false },
             }),
             vec!["name", "version"],
         ),
@@ -155,15 +143,9 @@ fn catalog() -> Vec<CommandDefinition> {
             "Save an immutable resolved composition using installed versions. Missing \
                 dependencies are never downloaded here.",
             json!({
-            "base":{
-            "type":"string"
-            },
-            "packages":{
-            "type":"array"
-            },
-            "roles":{
-            "type":"object"
-            }
+                "base": { "type": "string" },
+                "packages": { "type": "array" },
+                "roles": { "type": "object" },
             }),
             vec!["base", "packages"],
         ),
@@ -174,10 +156,10 @@ fn catalog() -> Vec<CommandDefinition> {
             name: name.into(),
             description: description.into(),
             parameters: json!({
-            "type":"object",
-            "properties":properties,
-            "required":required,
-            "additionalProperties":false
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": false,
             }),
         },
     )

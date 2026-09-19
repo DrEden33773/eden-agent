@@ -9,15 +9,15 @@ pub fn render(value: &Value) -> String {
         );
     }
     let mut header = json!({
-        "mode":value["mode"],
-        "case":value["case"],
-        "scope":value["scope"]["path"],
-        "complete":value["complete"],
-        "total_matches":value["total_matches"],
-        "returned":value["returned"],
-        "has_more":value["has_more"],
-        "index":value["index"],
-        "ranking":value["ranking"]
+        "mode": value["mode"],
+        "case": value["case"],
+        "scope": value["scope"]["path"],
+        "complete": value["complete"],
+        "total_matches": value["total_matches"],
+        "returned": value["returned"],
+        "has_more": value["has_more"],
+        "index": value["index"],
+        "ranking": value["ranking"],
     });
     if let Some(cursor) = value.get("cursor") {
         header["cursor"] = cursor.clone();
@@ -78,34 +78,21 @@ mod tests {
     fn grouped_output_keeps_completeness_and_avoids_repeating_paths() {
         let path = "src/a/long/relative/path/to/component.rs";
         let lines: Vec<_> = (1..=30)
-            .map(|line| {
-                json!({
-                "line":line,
-                "text":"needle",
-                "line_truncated":false
-                })
-            })
+            .map(|line| json!({ "line": line, "text": "needle", "line_truncated": false }))
             .collect();
         let page = json!({
-                "mode":"literal",
-                "case":"sensitive",
-                "scope":{
-                "path":"/project"
-        },
-                "complete":true,
-                "total_matches":31,
-                "returned":30,
-                "has_more":true,
-                "cursor":"next-page",
-                "index":{
-                "state":"ready"
-        },
-                "skipped_count":0,
-                "skipped":[],
-                "groups":[{
-                "path":path,
-                "matches":lines
-        }]
+            "mode": "literal",
+            "case": "sensitive",
+            "scope": { "path": "/project" },
+            "complete": true,
+            "total_matches": 31,
+            "returned": 30,
+            "has_more": true,
+            "cursor": "next-page",
+            "index": { "state": "ready" },
+            "skipped_count": 0,
+            "skipped": [],
+            "groups": [{ "path": path, "matches": lines }],
         });
         let output = render(&page);
         assert_eq!(output.matches(path).count(), 1);

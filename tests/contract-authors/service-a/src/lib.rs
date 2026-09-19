@@ -29,10 +29,7 @@ fn create(config: Value) -> Result<Package, Fault> {
             let value = request["value"]
                 .as_i64()
                 .ok_or_else(|| Fault::new("InvalidInput", "service-a", "value must be integer"))?;
-            Ok(json!({
-            "answer":value*7,
-            "author":"independent-a"
-            }))
+            Ok(json!({ "answer": value * 7, "author": "independent-a" }))
         })
         .service(SOURCE, |request: ResourceRequest, _| async move {
             Ok(ResourceReply {

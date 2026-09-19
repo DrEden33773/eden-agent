@@ -26,13 +26,13 @@ pub(crate) fn project(
                     .iter()
                     .map(|block| match block {
                         Block::Text { text } => Ok(if role == "assistant" {
-                            json!({"type":"output_text","text":text,"annotations":[]})
+                            json!({ "type": "output_text", "text": text, "annotations": [] })
                         } else {
-                            json!({"type":"input_text","text":text})
+                            json!({ "type": "input_text", "text": text })
                         }),
                         Block::Image { media_type, data } if role == "user" => Ok(json!({
                             "type": "input_image",
-                            "image_url": format!("data:{media_type};base64,{data}")
+                            "image_url": format!("data:{media_type};base64,{data}"),
                         })),
                         Block::File { .. } if options.profile == Profile::Deepseek => Err(failure(
                             "DeepSeek Responses does not support file input; \
@@ -45,12 +45,12 @@ pub(crate) fn project(
                         } if role == "user" => Ok(json!({
                             "type": "input_file",
                             "filename": name,
-                            "file_data": format!("data:{media_type};base64,{data}")
+                            "file_data": format!("data:{media_type};base64,{data}"),
                         })),
                         _ => Err(failure("attachments require a user message")),
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok(json!({"type":"message","role":role,"content":content}))
+                Ok(json!({ "type": "message", "role": role, "content": content }))
             }
             Item::ToolCall {
                 call_id,
@@ -60,13 +60,13 @@ pub(crate) fn project(
                 "type": "function_call",
                 "call_id": call_id,
                 "name": name,
-                "arguments": arguments
+                "arguments": arguments,
             })),
             Item::ToolResult { call_id, result } => Ok(json!({
                 "type": "function_call_output",
                 "call_id": call_id,
                 "output": serde_json::to_string(result)
-                    .map_err(|_| failure("tool output serialization failed"))?
+                    .map_err(|_| failure("tool output serialization failed"))?,
             })),
             Item::ProviderState { provider, value }
                 if provider == options.profile.state() && value["type"] == "reasoning" =>
@@ -85,11 +85,11 @@ pub(crate) fn project(
                 "name": tool.name,
                 "description": tool.description,
                 "parameters": tool.parameters,
-                "strict": false
+                "strict": false,
             })
         })
         .collect();
-    let mut body = json!({"model":model,"input":items,"tools":tools,"stream":true});
+    let mut body = json!({ "model": model, "input": items, "tools": tools, "stream": true });
     if options.profile == Profile::Openai {
         body["store"] = json!(false);
         body["include"] = json!(["reasoning.encrypted_content"]);
@@ -107,7 +107,7 @@ pub(crate) fn project(
         body["max_output_tokens"] = json!(tokens);
     }
     if let Some(effort) = &options.reasoning_effort {
-        body["reasoning"] = json!({"effort":effort});
+        body["reasoning"] = json!({ "effort": effort });
     }
     Ok(body)
 }

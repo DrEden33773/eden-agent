@@ -45,10 +45,7 @@ pub async fn run(args: &[String]) -> Result<i32, Box<dyn Error>> {
                 eden_agent::save_trust(&options.global_dir, &path, action == "allow")?;
                 println!(
                     "{}",
-                    json!({
-                    "path":std::fs::canonicalize(path)?,
-                    "trusted":action=="allow"
-                    })
+                    json!({ "path": std::fs::canonicalize(path)?, "trusted": action == "allow" })
                 );
             }
             "inspect" => println!(
@@ -102,20 +99,22 @@ pub async fn run(args: &[String]) -> Result<i32, Box<dyn Error>> {
                 .ok_or("package requires install, list, remove or resolve")?;
             let arguments = match action {
                 "install" => json!({
-                "source":match source {
-                 Some(source)=>source,
-                None=>json!({
-                "kind":"local",
-                "path":positional.get(1).ok_or("install requires SOURCE or --source-json")?
-                })
-                },
-                "build":build
+                    "source": match source {
+                        Some(source) => source,
+                        None => json!({
+                            "kind": "local",
+                            "path": positional
+                                .get(1)
+                                .ok_or("install requires SOURCE or --source-json")?,
+                        }),
+                    },
+                    "build": build,
                 }),
                 "list" => json!({}),
                 "remove" => json!({
-                "name":positional.get(1).ok_or("missing name")?,
-                "version":positional.get(2).ok_or("missing version")?,
-                "force":force
+                    "name": positional.get(1).ok_or("missing name")?,
+                    "version": positional.get(2).ok_or("missing version")?,
+                    "force": force,
                 }),
                 "resolve" => serde_json::from_str(
                     positional.get(1).ok_or("resolve requires JSON arguments")?,

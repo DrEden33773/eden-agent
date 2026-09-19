@@ -311,7 +311,7 @@ fn register_at(
     let temporary = directory.join(format!("{id}-{}.tmp", std::process::id()));
     std::fs::write(
         &temporary,
-        serde_json::to_vec(&json!({"history":path,"libraries":libraries})).map_err(fail)?,
+        serde_json::to_vec(&json!({ "history": path, "libraries": libraries })).map_err(fail)?,
     )
     .map_err(fail)?;
     std::fs::rename(temporary, target).map_err(fail)
@@ -394,14 +394,19 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("library"), b"external library").unwrap();
         let target_manifest: PackageManifest = serde_json::from_value(json!({
-            "descriptor":{"package":"example","version":"1.0.0","provides":[]},
-            "library":"library","sdk":"test","host":"test","target":"test","config":null
+            "descriptor": { "package": "example", "version": "1.0.0", "provides": [] },
+            "library": "library",
+            "sdk": "test",
+            "host": "test",
+            "target": "test",
+            "config": null,
         }))
         .unwrap();
         std::fs::write(
             outside.join("receipt.json"),
             serde_json::to_vec(&json!({
-                "manifest":target_manifest,"digest":digest(&outside).unwrap()
+                "manifest": target_manifest,
+                "digest": digest(&outside).unwrap(),
             }))
             .unwrap(),
         )
@@ -428,10 +433,17 @@ mod tests {
             compound_alias.join("library"),
             loose,
         ] {
-            let mut composition: Composition = serde_json::from_value(json!({"packages":[{
-                "descriptor":{"package":"example","version":"1.0.0","provides":[]},
-                "library":library,"sdk":"test","host":"test","target":"test","config":null
-            }],"roles":{}}))
+            let mut composition: Composition = serde_json::from_value(json!({
+                "packages": [{
+                    "descriptor": { "package": "example", "version": "1.0.0", "provides": [] },
+                    "library": library,
+                    "sdk": "test",
+                    "host": "test",
+                    "target": "test",
+                    "config": null,
+                }],
+                "roles": {},
+            }))
             .unwrap();
             assert_eq!(
                 resolve_paths(&mut composition, &root, &root.join("other-store"))
@@ -471,10 +483,17 @@ mod tests {
         )
         .unwrap();
         let composition = |library: &Path| -> Composition {
-            serde_json::from_value(json!({"packages":[{
-                "descriptor":{"package":"example","version":"1.0.0","provides":[]},
-                "library":library,"sdk":"test","host":"test","target":"test","config":null
-            }],"roles":{}}))
+            serde_json::from_value(json!({
+                "packages": [{
+                    "descriptor": { "package": "example", "version": "1.0.0", "provides": [] },
+                    "library": library,
+                    "sdk": "test",
+                    "host": "test",
+                    "target": "test",
+                    "config": null,
+                }],
+                "roles": {},
+            }))
             .unwrap()
         };
         let active_store = root.join("active-store");
@@ -486,7 +505,11 @@ mod tests {
             std::fs::write(&library, b"managed library").unwrap();
             let mut manifest = composition(Path::new("lib/library")).packages.remove(0);
             manifest.library = "lib/library".into();
-            let receipt = json!({"manifest":manifest,"digest":digest(&package).unwrap(),"path":"old-location-before-relocation"});
+            let receipt = json!({
+                "manifest": manifest,
+                "digest": digest(&package).unwrap(),
+                "path": "old-location-before-relocation",
+            });
             let receipt_path = package.join("receipt.json");
             std::fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
             validate(&composition(&library), &active_store).unwrap();
@@ -530,10 +553,19 @@ mod tests {
         let history = root.join("history.jsonl");
         std::fs::write(&history, b"original binding").unwrap();
         let composition = |version: &str| -> Composition {
-            serde_json::from_value(json!({"packages":[{
-                "descriptor":{"package":"test","version":"1","provides":[]},
-                "library":std::fs::canonicalize(root.join(version).join("plugin")).unwrap(),"sdk":"test","host":"test","target":"test","config":null
-            }],"roles":{}})).unwrap()
+            serde_json::from_value(json!({
+                "packages": [{
+                    "descriptor": { "package": "test", "version": "1", "provides": [] },
+                    "library":
+                        std::fs::canonicalize(root.join(version).join("plugin")).unwrap(),
+                    "sdk": "test",
+                    "host": "test",
+                    "target": "test",
+                    "config": null,
+                }],
+                "roles": {},
+            }))
+            .unwrap()
         };
         register_at(
             &root,

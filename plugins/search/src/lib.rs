@@ -77,9 +77,7 @@ impl Worker {
             if let Some(stage) = reply["progress"].as_str() {
                 progress(
                     &format!("search_{stage}"),
-                    serde_json::json!({
-                    "worker_pid":reply["worker_pid"]
-                    }),
+                    serde_json::json!({ "worker_pid": reply["worker_pid"] }),
                 )?;
                 continue;
             }
@@ -302,118 +300,98 @@ fn create(config: Value) -> Result<Package, Fault> {
 }
 eden_plugin_sdk::export_plugin!(descriptor, create);
 fn catalog() -> Vec<ToolDefinition> {
-    ["find",
- "grep"].into_iter().map(|name| {
-        let mut properties = json!({
-            "pattern":{
-"type":"string",
-"minLength":1
-},
-            "path":{
-"type":"string",
-"description":"Existing file or directory, relative to cwd or absolute. Default cwd. \
-                Never widens a missing path."
-},
-            "ranking":{
-"type":"string",
-"enum":if name=="find"{
-vec!["relevance",
-"git",
-"history"]
-}else{
-vec!["relevance",
-"git",
-"definition",
-"history"]
-},
-"default":"relevance",
-"description":"Explicit optional priority; history requires configured persistence, \
-                definition is a heuristic hint."
-},
-            "case":{
-"type":"string",
-"enum":["sensitive",
-"insensitive",
-"smart"],
-"default":"sensitive"
-},
-            "exclude":{
-"type":"array",
-"items":{
-"type":"string"
-},
-"description":"Explicit relative-path globs"
-},
-            "limit":{
-"type":"integer",
-"minimum":1,
-"maximum":200,
-"default":30
-},
-            "cursor":{
-"type":"string",
-"description":"Continue with exactly the same search arguments. Invalidated by file \
-                changes, eviction or reopen."
-},
-            "refresh":{
-"type":"boolean",
-"description":"Rebuild the in-memory index before a new query"
-},
-            "follow_symlinks":{
-"type":"boolean",
-"default":false
-}
-});
-        properties["mode"] = if name == "grep" {
- json!({
-"type":"string",
-"enum":["literal",
-"regex",
-"fuzzy"],
-"default":"literal"
-})
-} else {
- json!({
-"type":"string",
-"enum":["fuzzy",
-"glob"],
-"default":"fuzzy"
-})
-};
-        if name == "grep" {
-            properties["fallback"] = json!({
-"type":"string",
-"enum":["fuzzy"],
-"description":"Opt in only for literal grep: fuzzy candidates after complete zero exact \
-                matches, in the same scope. Exact and candidate results remain separate."
-});
-            properties["max_file_bytes"] = json!({
-"type":"integer",
-"minimum":1,
-"maximum":10485760,
-"default":5242880
-});
-}
-        ToolDefinition {
- name:name.into(),
-description:if name == "grep" {
- "Search file contents with FFF. Literal and case-sensitive by default. \
+    ["find", "grep"]
+        .into_iter()
+        .map(|name| {
+            let mut properties = json!({
+                "pattern": { "type": "string", "minLength": 1 },
+                "path": {
+                    "type": "string",
+                    "description":
+                        "Existing file or directory, relative to cwd or absolute. Default cwd. \
+                Never widens a missing path.",
+                },
+                "ranking": {
+                    "type": "string",
+                    "enum": if name == "find" {
+                            vec!["relevance", "git", "history"]
+                        } else {
+                            vec!["relevance", "git", "definition", "history"]
+                        },
+                    "default": "relevance",
+                    "description":
+                        "Explicit optional priority; history requires configured persistence, \
+                definition is a heuristic hint.",
+                },
+                "case": {
+                    "type": "string",
+                    "enum": ["sensitive", "insensitive", "smart"],
+                    "default": "sensitive",
+                },
+                "exclude": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Explicit relative-path globs",
+                },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 30 },
+                "cursor": {
+                    "type": "string",
+                    "description":
+                        "Continue with exactly the same search arguments. Invalidated by file \
+                changes, eviction or reopen.",
+                },
+                "refresh": {
+                    "type": "boolean",
+                    "description": "Rebuild the in-memory index before a new query",
+                },
+                "follow_symlinks": { "type": "boolean", "default": false },
+            });
+            properties["mode"] = if name == "grep" {
+                json!({
+                    "type": "string",
+                    "enum": ["literal", "regex", "fuzzy"],
+                    "default": "literal",
+                })
+            } else {
+                json!({ "type": "string", "enum": ["fuzzy", "glob"], "default": "fuzzy" })
+            };
+            if name == "grep" {
+                properties["fallback"] = json!({
+                    "type": "string",
+                    "enum": ["fuzzy"],
+                    "description":
+                        "Opt in only for literal grep: fuzzy candidates after complete zero exact \
+                matches, in the same scope. Exact and candidate results remain separate.",
+                });
+                properties["max_file_bytes"] = json!({
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10485760,
+                    "default": 5242880,
+                });
+            }
+            ToolDefinition {
+                name: name.into(),
+                description: if name == "grep" {
+                    "Search file contents with FFF. Literal and case-sensitive by default. \
                 Results are grouped by file with line numbers; has_more means continue \
                 using cursor. complete describes evaluated scope, while skipped and \
                 line_truncated describe omissions. Fuzzy results are candidates, not proof \
                 of exact occurrence."
-} else {
- "Find files by fuzzy whole relative path (default) or explicit glob. \
+                } else {
+                    "Find files by fuzzy whole relative path (default) or explicit glob. \
                 Returns compact grouped pages with explicit continuation and index state."
-}.into(),
-parameters:json!({
-"type":"object",
-"properties":properties,
-"required":["pattern"],
-"additionalProperties":false
-})
-}
-}).collect()
+                }
+                .into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": properties,
+                    "required": ["pattern"],
+                    "additionalProperties": false,
+                }),
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -483,7 +461,7 @@ fn main() {
             cwd: fixture.0.to_string_lossy().into_owned(),
             call_id: name.into(),
             name: "grep".into(),
-            arguments: json!({"pattern":name}),
+            arguments: json!({ "pattern": name }),
         };
         let failed = state
             .clone()

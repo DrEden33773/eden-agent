@@ -66,7 +66,7 @@ fn no_context_disables_all_automatic_instruction_sources() {
         f.write(path, "must not be loaded");
     }
     let mut config = f.config();
-    config.settings = json!({"discover_context": false});
+    config.settings = json!({ "discover_context": false });
     let loaded = load(&config, 1).unwrap();
     assert!(loaded.snapshot.instructions.is_empty());
     assert!(loaded.snapshot.system.is_none());

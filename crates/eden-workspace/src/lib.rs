@@ -276,11 +276,11 @@ mod tests {
         .unwrap();
         let mut options = fixture.options();
         options.project_trust = Some(true);
-        options.overrides = json!({"retry":{"delay":9}});
+        options.overrides = json!({ "retry": { "delay": 9 } });
         let workspace = Workspace::discover(&fixture.0.join("project"), &options).unwrap();
         assert_eq!(
             workspace.settings,
-            json!({"retry":{"max":4,"delay":9},"tools":["grep"]})
+            json!({ "retry": { "max": 4, "delay": 9 }, "tools": ["grep"] })
         );
         assert!(workspace.trusted);
     }

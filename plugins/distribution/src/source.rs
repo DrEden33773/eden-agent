@@ -107,10 +107,7 @@ pub async fn prepare(
             }
             Ok((
                 files::bundle_root(destination)?,
-                json!({
-                "kind":"local",
-                "path":path
-                }),
+                json!({ "kind": "local", "path": path }),
             ))
         }
         Source::Git { url, revision } => {
@@ -155,11 +152,7 @@ pub async fn prepare(
             .await?;
             Ok((
                 files::bundle_root(destination)?,
-                json!({
-                "kind":"git",
-                "url":url,
-                "commit":commit
-                }),
+                json!({ "kind": "git", "url": url, "commit": commit }),
             ))
         }
         Source::Https { url, sha256 } => {
@@ -217,11 +210,7 @@ pub async fn prepare(
             files::unpack(&archive, destination, cancel)?;
             Ok((
                 files::bundle_root(destination)?,
-                json!({
-                "kind":"https",
-                "url":url,
-                "sha256":actual
-                }),
+                json!({ "kind": "https", "url": url, "sha256": actual }),
             ))
         }
     }

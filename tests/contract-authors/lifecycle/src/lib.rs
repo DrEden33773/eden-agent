@@ -85,7 +85,7 @@ impl AgentLoop for Lifecycle {
             let result = read.as_mut().poll(task);
             if result.is_pending() && !announced {
                 announced = true;
-                if let Err(error) = cx.emit("waiting", json!({"tcp_read": "pending"})) {
+                if let Err(error) = cx.emit("waiting", json!({ "tcp_read": "pending" })) {
                     return Poll::Ready(Err(std::io::Error::other(error)));
                 }
             }

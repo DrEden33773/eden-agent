@@ -119,8 +119,13 @@ mod tests {
     use eden_plugin_sdk::serde_json::json;
     #[test]
     fn read_only_and_exclusions_apply_to_the_executable_selection() {
-        let registry = Registry::new(&json!({"tools":["read","write","bash","grep"],"exclude_tools":["read"],"read_only":true})).unwrap();
+        let registry = Registry::new(&json!({
+            "tools": ["read", "write", "bash", "grep"],
+            "exclude_tools": ["read"],
+            "read_only": true,
+        }))
+        .unwrap();
         assert_eq!(registry.selected, BTreeSet::from(["grep".into()]));
-        assert!(Registry::new(&json!({"tools":["read","read"]})).is_err());
+        assert!(Registry::new(&json!({ "tools": ["read", "read"] })).is_err());
     }
 }

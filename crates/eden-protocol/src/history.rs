@@ -200,10 +200,7 @@ mod tests {
         bytes.extend(
             serde_json::to_vec(&json!({
                 "schema_version": 2,
-                "transaction": [
-                    record(2, Some(1), "assistant"),
-                    record(4, Some(2), "tool_intent")
-                ]
+                "transaction": [record(2, Some(1), "assistant"), record(4, Some(2), "tool_intent")],
             }))
             .unwrap(),
         );
@@ -216,7 +213,7 @@ mod tests {
     fn navigation_changes_active_path_without_deleting_old_nodes() {
         let mut selected = record(3, Some(1), "branch_selected");
         selected.branch = "alternate".into();
-        selected.payload = json!({"target":1,"branch":"alternate"});
+        selected.payload = json!({ "target": 1, "branch": "alternate" });
         let mut next = record(4, Some(1), "assistant");
         next.branch = "alternate".into();
         let records = vec![

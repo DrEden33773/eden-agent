@@ -146,7 +146,7 @@ class CacheKeyTests(CacheKeyCase):
     def test_the_key_names_one_reusable_build_context_not_one_commit(self) -> None:
         before = self.keys()
         later = self.keys(commit="b" * 40)
-        self.assertTrue(before["key"].startswith("cargo-target-v4-"))
+        self.assertTrue(before["key"].startswith("cargo-target-v5-"))
         self.assertNotIn(COMMIT, before["key"])
         # One entry per compatible build context is what makes a later revision
         # restore it instead of writing an entry only its own revision can use.

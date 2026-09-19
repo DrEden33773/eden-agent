@@ -214,7 +214,7 @@ impl Router {
         self.events.push(
             request.run_id,
             "service_called",
-            serde_json::json!({"contract": request.contract, "input": request.payload}),
+            serde_json::json!({ "contract": request.contract, "input": request.payload }),
         );
         instance.call(request, cancel).await
     }

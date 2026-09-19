@@ -8,10 +8,7 @@ fn main() {
         if writeln!(
             output,
             "{}",
-            serde_json::json!({
-            "progress":stage,
-            "worker_pid":std::process::id()
-            })
+            serde_json::json!({ "progress": stage, "worker_pid": std::process::id() })
         )
         .and_then(|_| output.flush())
         .is_err()
@@ -26,12 +23,8 @@ fn main() {
             engine.query(&request)
         });
         let reply = match result {
-            Ok(value) => serde_json::json!({
-            "result":value
-            }),
-            Err(error) => serde_json::json!({
-            "error":error
-            }),
+            Ok(value) => serde_json::json!({ "result": value }),
+            Err(error) => serde_json::json!({ "error": error }),
         };
         if serde_json::to_writer(&mut output, &reply).is_err()
             || writeln!(output).is_err()

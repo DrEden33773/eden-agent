@@ -39,7 +39,9 @@ async fn open_abandon(
         .ok_or("missing packages")?
     {
         if package["descriptor"]["package"] == "coding-replacements" {
-            package["config"] = serde_json::json!({"open_gate":listener.local_addr()?.to_string()});
+            package["config"] = serde_json::json!({
+                "open_gate": listener.local_addr()?.to_string(),
+            });
         }
     }
     std::fs::write(composition_path, serde_json::to_vec(&composition)?)?;
@@ -94,7 +96,7 @@ async fn open_abandon(
             "open_lock_observed": true,
             "caller_aborted": true,
             "store_close_acknowledged": true,
-            "reopened_after_abandoned_delivery": true
+            "reopened_after_abandoned_delivery": true,
         })
     );
     Ok(())

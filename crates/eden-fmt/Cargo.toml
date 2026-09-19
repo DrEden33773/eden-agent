@@ -1,0 +1,19 @@
+[package]
+name = "eden-fmt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Format the json! and select! macro bodies that rustfmt does not reach"
+publish = false
+
+[dependencies]
+proc-macro2 = { version = "1", features = ["span-locations"] }
+syn = { version = "2", features = ["full", "parsing", "printing"] }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

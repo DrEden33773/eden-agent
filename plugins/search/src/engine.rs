@@ -139,9 +139,7 @@ impl Engine {
                     self.viewed.get(&path).cloned(),
                 )?;
             }
-            return Ok(json!({
-            "recorded":args["_history_dir"].is_string()
-            }));
+            return Ok(json!({ "recorded": args["_history_dir"].is_string() }));
         }
         let limit = args.get("limit").map_or(Ok(30), |v| {
             v.as_u64()
@@ -149,9 +147,9 @@ impl Engine {
                 .ok_or("limit must be between 1 and 200")
         })? as usize;
         let mut key = json!({
-        "cwd":request["cwd"],
-        "name":request["name"],
-        "arguments":request["arguments"]
+            "cwd": request["cwd"],
+            "name": request["name"],
+            "arguments": request["arguments"],
         });
         if let Some(object) = key.get_mut("arguments").and_then(Value::as_object_mut) {
             object.remove("cursor");
@@ -277,25 +275,22 @@ impl Engine {
         let mut rows = vec![];
         let mut fallback = false;
         let mut metadata = json!({
-                "complete":true,
-                "index":{
-                "state":"ready",
-                "content_indexed":picker.bigram_index().is_some(),
-                "persistent_content":false,
-                "worker_pid":std::process::id()
-        },
-                "scope":{
-                "path":scope,
-                "ignore":"FFF gitignore and hidden-file rules; .git excluded",
-                "follow_symlinks":follow
-        },
-                "mode":mode,
-                "case":case,
-                "skipped":[],
-                "truncation":{
-                "result_limit":false,
-                "line_display_bytes":512
-        }
+            "complete": true,
+            "index": {
+                "state": "ready",
+                "content_indexed": picker.bigram_index().is_some(),
+                "persistent_content": false,
+                "worker_pid": std::process::id(),
+            },
+            "scope": {
+                "path": scope,
+                "ignore": "FFF gitignore and hidden-file rules; .git excluded",
+                "follow_symlinks": follow,
+            },
+            "mode": mode,
+            "case": case,
+            "skipped": [],
+            "truncation": { "result_limit": false, "line_display_bytes": 512 },
         });
         if name == "find" {
             if !["glob", "fuzzy"].contains(&mode) {
@@ -320,9 +315,7 @@ impl Engine {
                         path.clone()
                     };
                     if matcher.is_match(&matched_path) && !excludes.is_match(&path) {
-                        rows.push(json!({
-                        "path":path
-                        }));
+                        rows.push(json!({ "path": path }));
                     }
                 }
             } else {
@@ -351,13 +344,20 @@ impl Engine {
                         continue;
                     }
                     rows.push(json!({
-"path":path,
-"score":if ranking == "git" {
- score.base_score + score.filename_bonus + score.special_filename_bonus + score.path_alignment_bonus + score.git_status_boost
-} else {
- score.base_score + score.filename_bonus + score.special_filename_bonus + score.path_alignment_bonus
-}
-}));
+                        "path": path,
+                        "score": if ranking == "git" {
+                                score.base_score
+                                    + score.filename_bonus
+                                    + score.special_filename_bonus
+                                    + score.path_alignment_bonus
+                                    + score.git_status_boost
+                            } else {
+                                score.base_score
+                                    + score.filename_bonus
+                                    + score.special_filename_bonus
+                                    + score.path_alignment_bonus
+                            },
+                    }));
                 }
             }
             if mode == "fuzzy" {
@@ -373,7 +373,7 @@ impl Engine {
                         continue;
                     }
                     if let Some(matched) = matcher.match_one(&path, 0) {
-                        rows.push(json!({"path":path,"score":matched.score}));
+                        rows.push(json!({ "path": path, "score": matched.score }));
                     }
                 }
             }
@@ -406,10 +406,10 @@ impl Engine {
                     None
                 };
                 if let Some(reason) = reason {
-                    metadata["skipped"].as_array_mut().unwrap().push(json!({
-                    "path":path,
-                    "reason":reason
-                    }));
+                    metadata["skipped"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({ "path": path, "reason": reason }));
                 } else {
                     std::fs::File::open(file.absolute_path(picker, picker.base_path()))
                         .map_err(|e| format!("cannot read {path}: {e}"))?;
@@ -502,16 +502,17 @@ impl Engine {
                         continue;
                     }
                     output.push(json!({
-                    "path":path,
-                    "line":item.line_number,
-                    "column":item.col,
-                    "text":item.line_content,
-                    "score":item.fuzzy_score,
-                    "definition_hint":item.is_definition,
-                    "git_changed":found.files[item.file_index].git_status.is_some(),
-                    "line_truncated":original.len() > item.line_content.len(),
-                    "line_bytes":original.len()
-}));
+                        "path": path,
+                        "line": item.line_number,
+                        "column": item.col,
+                        "text": item.line_content,
+                        "score": item.fuzzy_score,
+                        "definition_hint": item.is_definition,
+                        "git_changed":
+                            found.files[item.file_index].git_status.is_some(),
+                        "line_truncated": original.len() > item.line_content.len(),
+                        "line_bytes": original.len(),
+                    }));
                 }
                 if mode == "fuzzy" {
                     use std::io::BufRead;
@@ -543,9 +544,17 @@ impl Engine {
                             if let Some((score, column)) =
                                 unicode_line_match(&mut matcher, pattern, &line)
                             {
-                                output.push(json!({"path":path,"line":number,"column":column,"text":line,
-                                    "score":score,"definition_hint":false,"git_changed":file.git_status.is_some(),
-                                    "line_truncated":false,"line_bytes":line.len()}));
+                                output.push(json!({
+                                    "path": path,
+                                    "line": number,
+                                    "column": column,
+                                    "text": line,
+                                    "score": score,
+                                    "definition_hint": false,
+                                    "git_changed": file.git_status.is_some(),
+                                    "line_truncated": false,
+                                    "line_bytes": line.len(),
+                                }));
                             }
                         }
                     }
@@ -587,11 +596,12 @@ impl Engine {
                         if line.map_err(fail)?.len() > 512 {
                             metadata["complete"] = json!(false);
                             metadata["skipped"].as_array_mut().unwrap().push(json!({
-                            "path":path,
-                            "line":index+1,
-                            "reason":"fuzzy_long_line_not_fully_evaluated",
-                            "continuation":"read this file at the reported line"
-}));
+                                "path": path,
+                                "line": index + 1,
+                                "reason": "fuzzy_long_line_not_fully_evaluated",
+                                "continuation":
+                                    "read this file at the reported line",
+                            }));
                         }
                     }
                 }
@@ -686,10 +696,7 @@ impl Engine {
         let mut groups: Vec<Value> = vec![];
         for row in &cached.rows[row_start..row_end] {
             if groups.last().is_none_or(|g| g["path"] != row["path"]) {
-                groups.push(json!({
-                "path":row["path"],
-                "matches":[]
-                }));
+                groups.push(json!({ "path": row["path"], "matches": [] }));
             }
             let mut item = row.clone();
             item.as_object_mut().unwrap().remove("path");
@@ -739,13 +746,13 @@ impl Engine {
         }
         if cached.fallback {
             Ok(json!({
-            "exact":{
-            "mode":"literal",
-            "complete":true,
-            "total_matches":0,
-            "has_more":false
-            },
-            "candidates":page
+                "exact": {
+                    "mode": "literal",
+                    "complete": true,
+                    "total_matches": 0,
+                    "has_more": false,
+                },
+                "candidates": page,
             }))
         } else {
             Ok(page)
@@ -865,13 +872,7 @@ mod tests {
             Self(std::fs::canonicalize(path).unwrap())
         }
         fn request(&self, pattern: &str) -> Value {
-            json!({
-            "cwd":self.0,
-            "name":"grep",
-            "arguments":{
-            "pattern":pattern
-            }
-            })
+            json!({ "cwd": self.0, "name": "grep", "arguments": { "pattern": pattern } })
         }
     }
     impl Drop for Fixture {
@@ -1027,12 +1028,9 @@ mod tests {
         );
         assert!(!history.exists());
         let read = json!({
-        "name":"__record_read",
-        "cwd":fixture.0,
-        "arguments":{
-        "path":"z.txt",
-        "_history_dir":history
-        }
+            "name": "__record_read",
+            "cwd": fixture.0,
+            "arguments": { "path": "z.txt", "_history_dir": history },
         });
         engine.query(&read).unwrap();
         drop(engine);

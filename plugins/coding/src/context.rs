@@ -273,7 +273,7 @@ fn evidence(path: &[Record]) -> (Vec<String>, Vec<String>, Vec<Value>) {
             }
             calls.insert(
                 call_id.clone(),
-                json!({"call_id":call_id,"name":name,"arguments":arguments}),
+                json!({ "call_id": call_id, "name": name, "arguments": arguments }),
             );
         }
         if record.kind == "tool_result"
@@ -428,7 +428,10 @@ pub(crate) async fn context(
             }
         }
         if cut == 0 && input.action == "compact" {
-            cx.emit("compaction_skipped", json!({"reason":"no_older_context"}))?;
+            cx.emit(
+                "compaction_skipped",
+                json!({ "reason": "no_older_context" }),
+            )?;
         }
         if cut > 0 {
             let split = cut < path.len()
@@ -521,7 +524,7 @@ pub(crate) async fn context(
                 "summary": summary,
                 "read_files": read,
                 "modified_files": modified,
-                "uncertainties": uncertainties
+                "uncertainties": uncertainties,
             });
             if kind == "compaction" {
                 payload["first_kept"] = json!(path.get(cut).map_or(0, |r| r.sequence));
@@ -645,7 +648,11 @@ mod tests {
                 }),
             ),
             record(2, "message", json!(text_item("recent work".into()))),
-            record(3, "compaction", json!({"summary":"summary","first_kept":2})),
+            record(
+                3,
+                "compaction",
+                json!({ "summary": "summary", "first_kept": 2 }),
+            ),
         ];
         let projected = project_records(&path).unwrap();
         let text = serde_json::to_string(&projected).unwrap();
@@ -662,7 +669,7 @@ mod tests {
             record(
                 2,
                 "compaction",
-                json!({"summary":"summary","first_kept":999}),
+                json!({ "summary": "summary", "first_kept": 999 }),
             ),
         ];
         assert!(project_records(&path).is_err());
@@ -678,7 +685,7 @@ mod tests {
                     "version": 1,
                     "required": true,
                     "summary": "old",
-                    "value": {}
+                    "value": {},
                 }),
             ),
             record(
@@ -689,7 +696,7 @@ mod tests {
                     "version": 2,
                     "required": false,
                     "summary": "new",
-                    "value": {}
+                    "value": {},
                 }),
             ),
         ];
@@ -710,7 +717,7 @@ mod tests {
             record(
                 3,
                 "compaction",
-                json!({"summary":"previous summary","first_kept":2}),
+                json!({ "summary": "previous summary", "first_kept": 2 }),
             ),
             record(4, "message", json!(text_item("latest work".into()))),
         ];
@@ -789,7 +796,7 @@ mod tests {
                 "provider_state",
                 json!(Item::ProviderState {
                     provider: "test".into(),
-                    value: json!({"reasoning":"required state"})
+                    value: json!({ "reasoning": "required state" })
                 }),
             ),
             record(
@@ -820,7 +827,7 @@ mod tests {
                     arguments: "{}".into()
                 }),
             ),
-            record(6, "model_response", json!({"request_id":"1:2"})),
+            record(6, "model_response", json!({ "request_id": "1:2" })),
             record(
                 7,
                 "tool_result",
@@ -857,7 +864,7 @@ mod tests {
         compacted.push(record(
             9,
             "compaction",
-            json!({"summary":"earlier task","first_kept":path[cut].sequence}),
+            json!({ "summary": "earlier task", "first_kept": path[cut].sequence }),
         ));
         let projected = project_records(&compacted).unwrap();
         for kept in &path[1..] {
@@ -880,12 +887,7 @@ mod tests {
                     "id": 4,
                     "kind": "steering",
                     "branch": "main",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "x".repeat(90000)
-                        }
-                    ]
+                    "content": [{ "type": "text", "text": "x".repeat(90000) }],
                 }),
             ),
         ];
@@ -908,7 +910,7 @@ mod tests {
             record(
                 3,
                 "compaction",
-                json!({"summary":"small previous summary","first_kept":0}),
+                json!({ "summary": "small previous summary", "first_kept": 0 }),
             ),
             record(4, "message", json!(text_item("recent small work".into()))),
         ];

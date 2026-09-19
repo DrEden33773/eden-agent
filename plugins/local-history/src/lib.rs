@@ -164,7 +164,7 @@ impl Store {
                     parent_id: Some(target),
                     branch: branch.clone(),
                     kind: "branch_selected".into(),
-                    payload: serde_json::json!({"target":target,"branch":branch}),
+                    payload: serde_json::json!({ "target": target, "branch": branch }),
                 };
                 self.commit(vec![record])?;
             }
@@ -379,7 +379,7 @@ mod tests {
             .handle(StoreRequest::Append {
                 run_id: 1,
                 kind: "intent".into(),
-                payload: json!({"path":"a"}),
+                payload: json!({ "path": "a" }),
             })
             .unwrap();
         assert_eq!(receipt.sequence, 1);
@@ -405,7 +405,7 @@ mod tests {
             .handle(StoreRequest::Append {
                 run_id: 1,
                 kind: "tool_intent".into(),
-                payload: json!({"name":"write"}),
+                payload: json!({ "name": "write" }),
             })
             .unwrap();
         assert_eq!(
@@ -527,7 +527,7 @@ mod tests {
                         },
                         RecordDraft {
                             kind: "branch_selected".into(),
-                            payload: json!({"target":999})
+                            payload: json!({ "target": 999 })
                         }
                     ]
                 })

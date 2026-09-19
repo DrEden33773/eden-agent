@@ -25,10 +25,7 @@ fn create(_: Value) -> Result<Package, Fault> {
     Ok(Package::new("service-b")
         .service("example.client.v1", |request: Value, cx| async move {
             let reply: Value = cx.call("example.compute.v1", &request).await?;
-            Ok(json!({
-                        "via":"independent-b",
-                        "result":reply
-            }))
+            Ok(json!({ "via": "independent-b", "result": reply }))
         })
         .service("example.commands.v1", |_: CatalogRequest, _| async {
             Ok(CommandCatalog {
@@ -38,13 +35,9 @@ fn create(_: Value) -> Result<Package, Fault> {
                         "Independent B calls independent A through an author-defined contract."
                             .into(),
                     parameters: json!({
-                                        "type":"object",
-                                        "properties":{
-                                        "value":{
-                                        "type":"integer"
-                    }
-                    },
-                                        "required":["value"]
+                        "type": "object",
+                        "properties": { "value": { "type": "integer" } },
+                        "required": ["value"],
                     }),
                 }],
             })

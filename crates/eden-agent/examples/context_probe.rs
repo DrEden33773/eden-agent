@@ -146,7 +146,7 @@ async fn main() -> Result<()> {
             "ids": ids,
             "pending": pending,
             "records": records.len(),
-            "terminal": terminal
+            "terminal": terminal,
         })
     );
     Ok(())

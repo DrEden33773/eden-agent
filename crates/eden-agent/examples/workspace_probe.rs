@@ -28,7 +28,7 @@ async fn search(
     pattern: &str,
     arguments: Value,
 ) -> Result<(Value, String), Box<dyn std::error::Error>> {
-    let mut args = json!({"pattern":pattern});
+    let mut args = json!({ "pattern": pattern });
     args.as_object_mut()
         .unwrap()
         .extend(arguments.as_object().unwrap().clone());
@@ -112,18 +112,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "Unavailable"
             );
             json!({
-            "preflight_preserved":true,
-            "failed_init_unavailable":true,
-            "old_binding_preserved":true,
-            "explicit_recovery":true,
-            "old_handle_rejected":true
+                "preflight_preserved": true,
+                "failed_init_unavailable": true,
+                "old_binding_preserved": true,
+                "explicit_recovery": true,
+                "old_handle_rejected": true,
             })
         }
         "interop" => {
-            let reply = call(&session, "example.client.v1", json!({"value":6})).await?;
+            let reply = call(&session, "example.client.v1", json!({ "value": 6 })).await?;
             assert_eq!(reply["result"]["answer"], 42);
             assert_eq!(reply["via"], "independent-b");
-            let command = session.command("example.compute".into(), json!({"value":7}))?;
+            let command = session.command("example.compute".into(), json!({ "value": 7 }))?;
             let answer = session.wait(command).await?.into_result()?;
             assert_eq!(answer["answer"], 49);
             assert!(
@@ -133,7 +133,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .instructions
                     .contains("external-a")
             );
-            json!({"unknown_contract_call":reply,"command":answer,"independent_resource_source":true})
+            json!({
+                "unknown_contract_call": reply,
+                "command": answer,
+                "independent_resource_source": true,
+            })
         }
         "resources" => {
             let before = session.resources().await?;
@@ -160,7 +164,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .instructions
                     .contains("SECOND-INSTRUCTION")
             );
-            json!({"failed_reload_retained_snapshot":true,"explicit_atomic_reload":true})
+            json!({ "failed_reload_retained_snapshot": true, "explicit_atomic_reload": true })
         }
         "cancel-search" => {
             let root = cwd.join("cancel-corpus");
@@ -187,7 +191,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             cwd: dir,
                             call_id: "cancel-search".into(),
                             name: "grep".into(),
-                            arguments: json!({"pattern":"needle","path":"cancel-corpus"})
+                            arguments: json!({ "pattern": "needle", "path": "cancel-corpus" })
                         }),
                     },
                     signal,
@@ -207,12 +211,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eden_protocol::Outcome::Cancelled
             ));
             std::fs::remove_dir_all(root)?;
-            json!({"cancelled_after_native_index_started":true,"stopped_worker_pid":pid})
+            json!({ "cancelled_after_native_index_started": true, "stopped_worker_pid": pid })
         }
         "search" => {
             std::fs::create_dir_all(cwd.join("src"))?;
             std::fs::write(cwd.join("src/matches.txt"), "needle\n".repeat(61))?;
-            let (first, _) = search(&session, "needle", json!({"path":"src","limit":17})).await?;
+            let (first, _) =
+                search(&session, "needle", json!({ "path": "src", "limit": 17 })).await?;
             assert_eq!(first["total_matches"], 61);
             assert_eq!(first["returned"], 17);
             let pid = first["index"]["worker_pid"].clone();
@@ -222,7 +227,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (page, _) = search(
                     &session,
                     "needle",
-                    json!({"path":"src","limit":17,"cursor":page["cursor"]}),
+                    json!({ "path": "src", "limit": 17, "cursor": page["cursor"] }),
                 )
                 .await?;
                 total += page["returned"].as_u64().unwrap();
@@ -230,7 +235,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             assert_eq!(total, 61);
             std::fs::write(cwd.join("src/matches.txt"), "new-content\n")?;
             assert_eq!(
-                search(&session, "new-content", json!({"path":"src"}))
+                search(&session, "new-content", json!({ "path": "src" }))
                     .await?
                     .0["total_matches"],
                 1
@@ -244,7 +249,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 workspace(),
             )
             .await?;
-            let (independent, _) = search(&other, "new-content", json!({"path":"src"})).await?;
+            let (independent, _) = search(&other, "new-content", json!({ "path": "src" })).await?;
             let other_pid = independent["index"]["worker_pid"].clone();
             assert_ne!(pid, other_pid);
             other.shutdown().await?;
@@ -252,17 +257,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 search(
                     &session,
                     "needle",
-                    json!({"path":"src","limit":17,"cursor":first["cursor"]})
+                    json!({ "path": "src", "limit": 17, "cursor": first["cursor"] })
                 )
                 .await
                 .is_err()
             );
             json!({
-            "same_file_pagination":total,
-            "updated_without_refresh":true,
-            "independent_worker_pids":[pid,
-            other_pid],
-            "stale_cursor_rejected":true
+                "same_file_pagination": total,
+                "updated_without_refresh": true,
+                "independent_worker_pids": [pid, other_pid],
+                "stale_cursor_rejected": true,
             })
         }
         _ => return Err("unknown probe mode".into()),

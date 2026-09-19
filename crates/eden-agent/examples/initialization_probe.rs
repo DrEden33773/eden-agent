@@ -14,7 +14,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("packages required")?
     {
         if package["descriptor"]["package"] == "init-probe" {
-            package["config"] = serde_json::json!({"address": listener.local_addr()?.to_string()});
+            package["config"] =
+                serde_json::json!({ "address": listener.local_addr()?.to_string() });
         }
     }
     let pending_path = path.with_file_name("abandoned-init.json");

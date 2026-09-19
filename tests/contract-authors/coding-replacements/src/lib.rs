@@ -60,14 +60,14 @@ async fn provider(input: ModelInput, _: CallContext) -> Result<ModelReply, Fault
             name: "write".into(),
             arguments: json!({
                 "path": "author-created.txt",
-                "content": "independent provider wrote this\n"
+                "content": "independent provider wrote this\n",
             })
             .to_string(),
         }],
     };
     Ok(ModelReply {
         items,
-        usage: json!({"author":true}),
+        usage: json!({ "author": true }),
     })
 }
 fn project(records: &[Record]) -> Result<Vec<Item>, Fault> {
@@ -187,9 +187,12 @@ fn summarize_items(path: &[Record], items: Vec<Item>) -> Result<Value, Fault> {
             observations.join("; ")
         ),
         "first_kept": 0,
-        "source_ids": path.iter().map(|record|record.sequence).collect::<Vec<_>>(),
+        "source_ids": path
+            .iter()
+            .map(|record| record.sequence)
+            .collect::<Vec<_>>(),
         "uncertainties": uncertainties,
-        "author": "coding-replacements"
+        "author": "coding-replacements",
     }))
 }
 
@@ -252,18 +255,8 @@ async fn context(input: ContextInput, cx: CallContext) -> Result<ModelInput, Fau
             description: "Independent author write schema".into(),
             parameters: json!({
                 "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string"
-                    },
-                    "content": {
-                        "type": "string"
-                    }
-                },
-                "required": [
-                    "path",
-                    "content"
-                ]
+                "properties": { "path": { "type": "string" }, "content": { "type": "string" } },
+                "required": ["path", "content"],
             }),
         }],
     })
@@ -461,7 +454,7 @@ impl Storage {
                     parent_id: Some(target),
                     branch: branch.clone(),
                     kind: "branch_selected".into(),
-                    payload: json!({"target":target,"branch":branch}),
+                    payload: json!({ "target": target, "branch": branch }),
                 }])?;
             }
             StoreRequest::Read => {
@@ -749,7 +742,7 @@ mod tests {
 
     #[test]
     fn migration_preview_and_apply_translate_real_state_identically() {
-        let states = vec![state(0, json!({"value":17}))];
+        let states = vec![state(0, json!({ "value": 17 }))];
         let preview = migrate(
             MigrateRequest {
                 states: states.clone(),
@@ -770,7 +763,7 @@ mod tests {
         .unwrap();
         assert_eq!(json!(preview), json!(applied));
         assert_eq!(preview.states[0].version, 1);
-        assert_eq!(preview.states[0].value, json!({"count":17}));
+        assert_eq!(preview.states[0].value, json!({ "count": 17 }));
         let result = interpret(InterpretRequest {
             states: preview.states,
         })
@@ -782,14 +775,17 @@ mod tests {
     fn migration_preserves_additional_extension_fields() {
         let result = migrate(
             MigrateRequest {
-                states: vec![state(0, json!({"value":3,"label":"keep"}))],
+                states: vec![state(0, json!({ "value": 3, "label": "keep" }))],
                 apply: true,
             },
             false,
             false,
         )
         .unwrap();
-        assert_eq!(result.states[0].value, json!({"count":3,"label":"keep"}));
+        assert_eq!(
+            result.states[0].value,
+            json!({ "count": 3, "label": "keep" })
+        );
         assert!(result.losses.is_empty());
     }
 
@@ -801,7 +797,7 @@ mod tests {
             })
             .is_err()
         );
-        let mut unknown = state(1, json!({"count":3}));
+        let mut unknown = state(1, json!({ "count": 3 }));
         unknown.namespace = "unknown.counter".into();
         assert!(
             interpret(InterpretRequest {
@@ -839,7 +835,7 @@ mod tests {
             parent_id: None,
             branch: "main".into(),
             kind: "session".into(),
-            payload: json!({"cwd":"isolated"}),
+            payload: json!({ "cwd": "isolated" }),
         }];
         let bytes = encode_transaction(&records).unwrap();
         let prepared = PreparedHistory::write(&path, &bytes).unwrap();

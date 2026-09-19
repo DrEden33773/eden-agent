@@ -296,7 +296,8 @@ mod platform {
     };
     use windows_sys::Win32::{
         Foundation::{
-            ERROR_INVALID_PARAMETER, ERROR_MORE_DATA, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+            ERROR_INVALID_PARAMETER, ERROR_MORE_DATA, HANDLE, INVALID_HANDLE_VALUE, STILL_ACTIVE,
+            WAIT_OBJECT_0,
         },
         System::{
             Diagnostics::ToolHelp::{
@@ -311,7 +312,7 @@ mod platform {
                 SetInformationJobObject,
             },
             Threading::{
-                CREATE_SUSPENDED, INFINITE, OpenProcess, OpenThread,
+                CREATE_SUSPENDED, GetExitCodeProcess, INFINITE, OpenProcess, OpenThread,
                 PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
                 ResumeThread, THREAD_SUSPEND_RESUME, TerminateProcess, WaitForSingleObject,
             },
@@ -481,6 +482,20 @@ mod platform {
         }
         Ok(member != 0)
     }
+    /// Whether a job member has stopped running.
+    ///
+    /// The exit code answers this while a process is still terminating, when its
+    /// wait state is not yet signaled: `STILL_ACTIVE` means it really is running,
+    /// and anything else means it has already stopped or is on its way out.
+    fn has_exited(process: &OwnedHandle) -> Result<bool, Fault> {
+        let mut code = 0u32;
+        // SAFETY: The handle owns PROCESS_QUERY_LIMITED_INFORMATION and the exit
+        // code output is writable.
+        if unsafe { GetExitCodeProcess(process.as_raw_handle(), &mut code) } == 0 {
+            return Err(win_error("read shell job member state"));
+        }
+        Ok(code != STILL_ACTIVE as u32)
+    }
     /// Terminate job members one at a time, optionally skipping the leader.
     ///
     /// `TerminateJobObject` is deliberately not used: it overwrites the exit
@@ -504,17 +519,15 @@ mod platform {
             // SAFETY: The handle has PROCESS_TERMINATE access and belongs to
             // this job, which contains only the shell and its descendants.
             if unsafe { TerminateProcess(process.as_raw_handle(), 1) } == 0 {
-                // Windows refuses to stop a process that already terminated and
-                // reports that as access denied. A member that exited after it
-                // was enumerated is the normal race, exactly as on Unix, so only
-                // a member that is still running is a cleanup failure.
-                // SAFETY: The handle owns SYNCHRONIZE access, and a zero timeout
-                // only reports the current state instead of waiting.
-                let exited =
-                    unsafe { WaitForSingleObject(process.as_raw_handle(), 0) } == WAIT_OBJECT_0;
-                if !exited {
-                    return Err(win_error("terminate shell job member"));
+                // Windows refuses to stop a process that already started
+                // terminating and reports that as access denied. A member that
+                // stopped after it was enumerated is the normal race, exactly as
+                // on Unix, so ask the process whether it still runs instead of
+                // trusting the failed stop: only a running member is a failure.
+                if has_exited(&process)? {
+                    continue;
                 }
+                return Err(win_error("terminate shell job member"));
             }
         }
         Ok(())

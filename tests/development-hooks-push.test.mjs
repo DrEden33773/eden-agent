@@ -47,7 +47,9 @@ test("pre-push rejects a broken intra-doc link that compiles and formats cleanly
   const result = command(root, "git", ["push", remote, "main:refs/heads/topic"]);
   const output = result.stdout + result.stderr;
   assert.notEqual(result.status, 0, "push accepted a revision with a broken doc link");
-  assert.match(output, /cargo doc --workspace --no-deps --locked failed/);
+  // The program may arrive as a bare `cargo` or as an absolute `cargo.exe`, so
+  // the assertion names the invocation both platforms share.
+  assert.match(output, /doc --workspace --no-deps --locked failed/);
   assert.match(output, /unresolved link/);
   assert.equal(git(root, "rev-parse", "HEAD"), head);
   unchanged(root, "src/lib.rs", index, worktree);

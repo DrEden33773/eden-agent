@@ -38,6 +38,26 @@ test("pre-commit checks staged Rust and preserves partial staging in both direct
   unchanged(root, "src/lib.rs", good, bad);
 });
 
+test("pre-commit runs every family when the hook sources themselves change", (t) => {
+  const root = fixture(t);
+  // A committed change to the check sources runs all five families, which is the
+  // one case where the doc check also belongs to a commit rather than a push.
+  writeFileSync(
+    join(root, "scripts/hooks.mjs"),
+    `${readFileSync(join(root, "scripts/hooks.mjs"), "utf8")}\n// fixture infrastructure change\n`,
+  );
+  writeFileSync(
+    join(root, "src/lib.rs"),
+    "/// See [`moved_away`] for the contract.\npub fn value() -> u32 {\n    4\n}\n",
+  );
+  git(root, "add", "scripts/hooks.mjs", "src/lib.rs");
+  const result = command(root, "git", ["commit", "-m", "infrastructure change with a doc link"]);
+  const output = result.stdout + result.stderr;
+  assert.notEqual(result.status, 0, "commit accepted a broken doc link beside a hook change");
+  assert.match(output, /doc --workspace --no-deps --locked failed/);
+  assert.match(output, /unresolved link/);
+});
+
 test("pre-commit rejects an unformatted json! body in the root workspace", (t) => {
   const root = fixture(t);
   const body = 'pub fn value() -> u32 {\n    let v = json!({"a":1});\n    1\n}\n';

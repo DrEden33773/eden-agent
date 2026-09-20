@@ -5,6 +5,23 @@ import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const project = fileURLToPath(new URL("../", import.meta.url));
+// `missing_docs` reaches rustdoc through the workspace lint table, so a build
+// already fails on an undocumented item. These four catch what a build cannot:
+// a link to an item that moved, and doc text rustdoc cannot read. The "doc"
+// check documents the workspace only: a fixture author under tests/ that never
+// ships documentation is not what docs/development-checks.md covers.
+const DOC_LINTS = [
+  "-D",
+  "warnings",
+  "-D",
+  "rustdoc::broken_intra_doc_links",
+  "-D",
+  "rustdoc::bare_urls",
+  "-D",
+  "rustdoc::invalid_html_tags",
+  "-D",
+  "rustdoc::invalid_rust_codeblocks",
+].join(" ");
 function run(program, args, root, env) {
   const result = spawnSync(program, args, { cwd: root, env, stdio: "inherit" });
   if (result.error) throw result.error;
@@ -151,13 +168,21 @@ for dependency in config["dependency-groups"]["dev"]:
     );
     return;
   }
-  if (!["fmt", "format", "clippy", "clippy-fix", "test"].includes(kind))
+  if (!["fmt", "format", "clippy", "clippy-fix", "doc", "test"].includes(kind))
     throw new Error(`Unknown check: ${kind}`);
   const cargo = cargoFor(toolRoot);
   const rustEnv = withToolchainPath(
-    { ...env, CARGO_TARGET_DIR: env.CARGO_TARGET_DIR || join(root, "target") },
+    {
+      ...env,
+      CARGO_TARGET_DIR: env.CARGO_TARGET_DIR || join(root, "target"),
+      ...(kind === "doc" ? { RUSTDOCFLAGS: DOC_LINTS } : {}),
+    },
     cargo.directory,
   );
+  if (kind === "doc") {
+    run(cargo.program, ["doc", "--workspace", "--no-deps", "--locked"], root, rustEnv);
+    return;
+  }
   // `cargo test --workspace` covers the root workspace, so the test kind runs
   // only the independent author projects that workspace excludes.
   const selected =

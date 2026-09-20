@@ -28,6 +28,9 @@ function kindsFor(changed, push = false) {
   return [
     ...(all || changed.some(markdown) ? ["markdown"] : []),
     ...(all || changed.some(rust) ? [push ? "clippy" : "fmt"] : []),
+    // The doc check is part of the pushed Rust check: it is what catches a link
+    // to an item that moved, which no compile and no formatter can see.
+    ...(all || (push && changed.some(rust)) ? ["doc"] : []),
     ...(all || changed.some(python) ? ["python"] : []),
     ...(all || changed.some(javascript) ? ["javascript"] : []),
   ];

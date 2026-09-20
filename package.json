@@ -15,6 +15,7 @@
     "rust:test:authors": "node scripts/checks.mjs test",
     "clippy:check": "node scripts/checks.mjs clippy",
     "clippy:fix": "node scripts/checks.mjs clippy-fix",
+    "doc:check": "node scripts/checks.mjs doc",
     "python:format": "node scripts/checks.mjs python-format",
     "python:format:check": "node scripts/checks.mjs python-format-check",
     "python:lint": "node scripts/checks.mjs python-lint",

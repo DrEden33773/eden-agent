@@ -28,6 +28,32 @@ test("pre-push rejects Clippy errors in a non-HEAD ref without changing the chec
   assert.equal(git(remote, "for-each-ref", "--format=%(refname)", "refs/heads/topic"), "");
 });
 
+test("pre-push rejects a broken intra-doc link that compiles and formats cleanly", (t) => {
+  const root = fixture(t);
+  const remote = mkdtempSync(join(tmpdir(), "eden-hooks-remote-"));
+  t.after(() => rmSync(remote, { recursive: true, force: true }));
+  git(remote, "init", "--bare");
+  // A link to an item that does not exist is invisible to rustc, rustfmt and
+  // Clippy, so only the doc check can refuse this revision.
+  writeFileSync(
+    join(root, "src/lib.rs"),
+    "/// See [`moved_away`] for the contract.\npub fn value() -> u32 {\n    3\n}\n",
+  );
+  git(root, "add", "src/lib.rs");
+  git(root, "commit", "-m", "doc link should reject this");
+  const head = git(root, "rev-parse", "HEAD");
+  const index = git(root, "show", ":src/lib.rs");
+  const worktree = readFileSync(join(root, "src/lib.rs"), "utf8");
+  const result = command(root, "git", ["push", remote, "main:refs/heads/topic"]);
+  const output = result.stdout + result.stderr;
+  assert.notEqual(result.status, 0, "push accepted a revision with a broken doc link");
+  assert.match(output, /cargo doc --workspace --no-deps --locked failed/);
+  assert.match(output, /unresolved link/);
+  assert.equal(git(root, "rev-parse", "HEAD"), head);
+  unchanged(root, "src/lib.rs", index, worktree);
+  assert.equal(git(remote, "for-each-ref", "--format=%(refname)", "refs/heads/topic"), "");
+});
+
 test("standalone author crates participate in formatting and Clippy hooks", (t) => {
   const root = fixture(t);
   const author = join(root, "tests", "contract-authors", "new-author");

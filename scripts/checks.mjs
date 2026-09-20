@@ -7,12 +7,12 @@ import { fileURLToPath } from "node:url";
 const project = fileURLToPath(new URL("../", import.meta.url));
 // `missing_docs` reaches rustdoc through the workspace lint table, so a build
 // already fails on an undocumented item. These four catch what a build cannot:
-// a link to an item that moved, and doc text rustdoc cannot read. The "doc"
-// check documents the workspace only: a fixture author under tests/ that never
-// ships documentation is not what docs/development-checks.md covers.
+// a link to an item that moved, and doc text rustdoc cannot read. A RUSTDOCFLAGS
+// already in the environment is kept and the four lints are added to it, so a
+// contributor can change the baseline without losing what this check is for.
+// The "doc" check documents the workspace only: a fixture author under tests/
+// that never ships documentation is not what docs/development-checks.md covers.
 const DOC_LINTS = [
-  "-D",
-  "warnings",
   "-D",
   "rustdoc::broken_intra_doc_links",
   "-D",
@@ -22,6 +22,7 @@ const DOC_LINTS = [
   "-D",
   "rustdoc::invalid_rust_codeblocks",
 ].join(" ");
+const docFlags = (env) => [env.RUSTDOCFLAGS?.trim() || "-D warnings", DOC_LINTS].join(" ");
 function run(program, args, root, env) {
   const result = spawnSync(program, args, { cwd: root, env, stdio: "inherit" });
   if (result.error) throw result.error;
@@ -175,11 +176,12 @@ for dependency in config["dependency-groups"]["dev"]:
     {
       ...env,
       CARGO_TARGET_DIR: env.CARGO_TARGET_DIR || join(root, "target"),
-      ...(kind === "doc" ? { RUSTDOCFLAGS: DOC_LINTS } : {}),
+      ...(kind === "doc" ? { RUSTDOCFLAGS: docFlags(env) } : {}),
     },
     cargo.directory,
   );
   if (kind === "doc") {
+    console.log(`${kind}: cargo doc --workspace --no-deps --locked`);
     run(cargo.program, ["doc", "--workspace", "--no-deps", "--locked"], root, rustEnv);
     return;
   }

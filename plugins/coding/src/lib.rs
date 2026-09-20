@@ -401,14 +401,37 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
                     let result = match serde_json_decode(&arguments) {
                         Ok(arguments) => {
                             async {
-                                let original = ToolRequest { cwd:input.cwd.clone(),call_id:call_id.clone(),name,arguments };
-                                let execution = optional_call::<_, ToolRequest>(&cx, r::BEFORE_TOOL, &original).await?.unwrap_or_else(|| original.clone());
-                                if execution.call_id != original.call_id || execution.cwd != original.cwd {
-                                    return Err(Fault::new("InvalidInput", "before-tool", "hooks may change tool name and arguments, but not call identity or cwd"));
+                                let original = ToolRequest {
+                                    cwd: input.cwd.clone(),
+                                    call_id: call_id.clone(),
+                                    name,
+                                    arguments,
+                                };
+                                let execution =
+                                    optional_call::<_, ToolRequest>(&cx, r::BEFORE_TOOL, &original)
+                                        .await?
+                                        .unwrap_or_else(|| original.clone());
+                                if execution.call_id != original.call_id
+                                    || execution.cwd != original.cwd
+                                {
+                                    return Err(Fault::new(
+                                        "InvalidInput",
+                                        "before-tool",
+                                        concat!(
+                                            "hooks may change tool name and arguments, ",
+                                            "but not call identity or cwd",
+                                        ),
+                                    ));
                                 }
-                                append(&cx, "tool_execution_intent", json!({"original": original,"execution": execution})).await?;
+                                append(
+                                    &cx,
+                                    "tool_execution_intent",
+                                    json!({ "original": original, "execution": execution }),
+                                )
+                                .await?;
                                 cx.call::<_, ToolResult>(TOOL, &execution).await
-                            }.await
+                            }
+                            .await
                         }
                         Err(error) => Err(error),
                     };

@@ -6,12 +6,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+/// One recorded trust decision: a project root and whether it is trusted. The
+/// nearest recorded ancestor decides, so a nested grant can override a denial.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TrustEntry {
     pub root: PathBuf,
     pub trusted: bool,
 }
 
+/// What discovery is configured with: the global directory, an explicit trust
+/// answer that outranks the saved one, and settings the caller overrides.
 #[derive(Clone, Debug)]
 pub struct WorkspaceOptions {
     pub global_dir: PathBuf,
@@ -37,6 +41,10 @@ impl Default for WorkspaceOptions {
     }
 }
 
+/// The resolved workspace a session runs in: its cwd, its global directory,
+/// whether the project is trusted, the merged settings, and every diagnostic
+/// raised while resolving them — including the one that says why untrusted
+/// project resources were skipped.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Workspace {
     pub cwd: PathBuf,
@@ -47,6 +55,9 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    /// Resolve one directory into a workspace: read the global settings, apply
+    /// the project's only when its trust decision allows it, overlay the
+    /// caller's overrides, and report what was skipped instead of failing.
     pub fn discover(cwd: &Path, options: &WorkspaceOptions) -> Result<Self, Fault> {
         let cwd = canonical_dir(cwd)?;
         let global_dir = absolute(&options.global_dir)?;
@@ -139,6 +150,8 @@ fn read_trust(global_dir: &Path) -> Result<Vec<TrustEntry>, Fault> {
     Ok(entries)
 }
 
+/// Resolve a path to a real directory, so every later comparison is made on
+/// what the filesystem actually holds rather than on how it was spelled.
 pub fn canonical_dir(path: &Path) -> Result<PathBuf, Fault> {
     let path = std::fs::canonicalize(path).map_err(io_error)?;
     if !path.is_dir() {

@@ -111,6 +111,7 @@ pub struct Events {
     changed: tokio::sync::Notify,
 }
 impl Events {
+    /// Create the empty ledger for one session.
     pub fn new(session_id: u64) -> Arc<Self> {
         Arc::new(Self {
             session_id,
@@ -118,6 +119,8 @@ impl Events {
             changed: tokio::sync::Notify::new(),
         })
     }
+    /// Append one event and wake every reader waiting on it. The sequence
+    /// number is the ledger's own, so a producer never chooses one.
     pub fn push(&self, run_id: u64, kind: &str, payload: serde_json::Value) {
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         let sequence = entries.len() as u64 + 1;
@@ -130,12 +133,16 @@ impl Events {
         });
         self.changed.notify_waiters();
     }
+    /// Every event in order, as a copy the caller owns.
     pub fn snapshot(&self) -> Vec<Event> {
         self.entries
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
+    /// Wait for the events after `sequence`, returning as soon as any exist.
+    /// The registration happens before the snapshot, so an event committed
+    /// between the two is observed rather than lost.
     pub async fn after(&self, sequence: u64) -> Vec<Event> {
         loop {
             let changed = self.changed.notified();
@@ -319,6 +326,8 @@ async fn rollback_initialization(mut error: Fault, instances: &[Arc<NativeInstan
     error
 }
 impl Kernel {
+    /// Read and parse a composition file, then mount it with its own directory
+    /// as the base for relative library paths.
     pub async fn load(path: &Path, session_id: u64, events: Arc<Events>) -> Result<Self, Fault> {
         let bytes = std::fs::read(path)
             .map_err(|e| Fault::new("InvalidInput", "composition", e.to_string()))?;
@@ -455,12 +464,17 @@ impl Kernel {
             composition,
         })
     }
+    /// The composition this kernel mounted, including its role bindings.
     pub fn composition(&self) -> &Composition {
         &self.composition
     }
+    /// Route one request to the roles this composition selected, and settle it
+    /// with its cleanup. Cancellation is the caller's decision, passed in.
     pub async fn invoke(&self, request: Request, cancel: Cancellation) -> Terminal {
         self.router.invoke(request, cancel).await
     }
+    /// The instance selected for one role contract, for a caller that has to
+    /// know whether a role is bound to a particular package.
     pub fn role(&self, contract: &str) -> Result<Arc<NativeInstance>, Fault> {
         self.router
             .context
@@ -471,6 +485,9 @@ impl Kernel {
             .cloned()
             .ok_or_else(|| Fault::new("MissingDependency", "services", contract))
     }
+    /// Close admission, cancel every in-flight request, and run each instance's
+    /// finalizer before releasing its library. Await this before dropping the
+    /// kernel, because only it guarantees the disposal barrier was reached.
     pub async fn shutdown(&self) -> Result<(), Fault> {
         self.router.open.store(false, Ordering::Release);
         for instance in &self.instances {

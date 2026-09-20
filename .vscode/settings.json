@@ -10,32 +10,13 @@
     "editor.formatOnPaste": false
   },
   "[markdown]": {
-    "editor.formatOnSave": false,
-    "editor.formatOnPaste": false,
-    "editor.formatOnType": false,
     "editor.defaultFormatter": "DavidAnson.vscode-markdownlint",
-    "editor.codeActionsOnSave": {
-      "source.fixAll.markdownlint": "explicit"
-    }
+    "editor.formatOnSave": true
   },
   "[rust]": {
     "editor.defaultFormatter": "rust-lang.rust-analyzer",
     "editor.formatOnSave": true,
     "editor.formatOnPaste": false
   },
-  "[json]": {
-    "editor.formatOnSave": false,
-    "editor.formatOnPaste": false,
-    "editor.formatOnType": false
-  },
-  "[jsonc]": {
-    "editor.formatOnSave": false,
-    "editor.formatOnPaste": false,
-    "editor.formatOnType": false
-  },
-  "[yaml]": {
-    "editor.formatOnSave": false,
-    "editor.formatOnPaste": false,
-    "editor.formatOnType": false
-  }
+  "markdown.validate.enabled": true
 }

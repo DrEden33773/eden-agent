@@ -1,73 +1,36 @@
 //! Explicit dotenv parsing. No discovery, shell execution or environment mutation.
-use std::{ffi::OsString, fs::File, path::PathBuf};
+use std::ffi::OsString;
+use std::fs::File;
+use std::path::Path;
 
-pub struct Startup {
-    pub args: Vec<String>,
-    pub environment: Vec<(String, String)>,
-}
-/// Parse the entire selected file before installing any variables.
+/// Parse the entire selected file before any variable is installed.
 /// Existing process environment values win, including explicitly empty values.
 /// Keep file order when applying assignments: Windows compares keys without case.
-pub fn prepare(
-    args: Vec<String>,
+pub fn read(
+    path: &Path,
     inherited: impl Fn(&str) -> Option<OsString>,
-) -> Result<Startup, String> {
-    let mut selected = None;
-    let mut remaining = Vec::with_capacity(args.len());
-    let mut args = args.into_iter();
-    while let Some(arg) = args.next() {
-        if arg == "--env-file" {
-            if selected.is_some() {
-                return Err("--env-file may be specified only once".into());
-            }
-            let path = args.next().ok_or("--env-file needs a path")?;
-            if path.is_empty() {
-                return Err("--env-file needs a nonempty path".into());
-            }
-            selected = Some(PathBuf::from(path));
-        } else {
-            let takes_value = [
-                "--composition",
-                "--cwd",
-                "--session",
-                "--resume",
-                "--history",
-                "--attach",
-                "--image",
-                "--file",
-            ]
-            .contains(&arg.as_str());
-            remaining.push(arg);
-            if takes_value && let Some(value) = args.next() {
-                remaining.push(value);
-            }
-        }
+) -> Result<Vec<(String, String)>, String> {
+    if path.as_os_str().is_empty() {
+        return Err("--env-file needs a nonempty path".into());
     }
+    let file = File::open(path).map_err(|_| format!("cannot read env file {}", path.display()))?;
     let mut environment = Vec::new();
-    if let Some(path) = selected {
-        let file =
-            File::open(&path).map_err(|_| format!("cannot read env file {}", path.display()))?;
-        for (index, item) in dotenvy::from_read_iter(file).enumerate() {
-            // dotenvy parse errors can contain whole secret-bearing lines.
-            let (key, value) = item.map_err(|_| {
-                format!("invalid env file {} at entry {}", path.display(), index + 1)
-            })?;
-            if key.is_empty() || key.contains(['\0', '=']) || value.contains('\0') {
-                return Err(format!(
-                    "invalid env file {} at entry {}",
-                    path.display(),
-                    index + 1
-                ));
-            }
-            if inherited(&key).is_none() {
-                environment.push((key, value));
-            }
+    for (index, item) in dotenvy::from_read_iter(file).enumerate() {
+        // dotenvy parse errors can contain whole secret-bearing lines.
+        let (key, value) = item
+            .map_err(|_| format!("invalid env file {} at entry {}", path.display(), index + 1))?;
+        if key.is_empty() || key.contains(['\0', '=']) || value.contains('\0') {
+            return Err(format!(
+                "invalid env file {} at entry {}",
+                path.display(),
+                index + 1
+            ));
+        }
+        if inherited(&key).is_none() {
+            environment.push((key, value));
         }
     }
-    Ok(Startup {
-        args: remaining,
-        environment,
-    })
+    Ok(environment)
 }
 
 #[cfg(test)]
@@ -84,23 +47,14 @@ mod tests {
             ),
         )
         .unwrap();
-        let result = prepare(
-            vec![
-                "--env-file".into(),
-                path.to_string_lossy().into(),
-                "--version".into(),
-            ],
-            |key| match key {
-                "PRESERVED" => Some("process-value".into()),
-                "EMPTY" => Some("".into()),
-                _ => None,
-            },
-        )
+        let environment = read(&path, |key| match key {
+            "PRESERVED" => Some("process-value".into()),
+            "EMPTY" => Some("".into()),
+            _ => None,
+        })
         .unwrap();
         std::fs::remove_file(path).unwrap();
-        assert_eq!(result.args, vec!["--version"]);
-        let environment: std::collections::BTreeMap<_, _> =
-            result.environment.into_iter().collect();
+        let environment: std::collections::BTreeMap<_, _> = environment.into_iter().collect();
         assert!(!environment.contains_key("PRESERVED"));
         assert!(!environment.contains_key("EMPTY"));
         assert_eq!(environment["LITERAL"], "$(not a shell command)");

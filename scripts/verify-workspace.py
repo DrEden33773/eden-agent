@@ -362,6 +362,40 @@ def main() -> None:
         command("trust", "deny", project)
         (project / ".eden/settings.json").unlink()
         results["project_configuration_trust_gate"] = True
+        # A streamed run keeps the trust diagnostic on stderr, exactly once, and
+        # leaves stdout a clean event stream: one outlet owns every human line.
+        write(project / ".eden/settings.json", {"plugins": {}})
+        server = Server(lambda _body, _index: (200, complete(answer("UNTRUSTED-STREAM"))))
+        try:
+            streamed = run(
+                [
+                    host,
+                    "--composition",
+                    helpers["configure"](destination, selected, server, "untrusted-stream"),
+                    "--cwd",
+                    project,
+                    "--global-dir",
+                    global_dir,
+                    "--session",
+                    scratch / "untrusted-stream.jsonl",
+                    "--json",
+                    "Reply briefly",
+                ],
+                scratch,
+                check=False,
+            )
+        finally:
+            server.close()
+        (project / ".eden/settings.json").unlink()
+        diagnostics = [
+            line
+            for line in streamed.stderr.splitlines()
+            if "Untrusted project resources ignored" in line
+        ]
+        assert len(diagnostics) == 1, streamed.stderr
+        events = [json.loads(line) for line in streamed.stdout.splitlines() if line.strip()]
+        assert events and all(event["kind"] for event in events), streamed.stdout
+        results["json_stream_keeps_one_human_diagnostic"] = True
 
         bad = copy.deepcopy(selected)
         for p in bad["packages"]:

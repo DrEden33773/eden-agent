@@ -41,7 +41,6 @@ pub struct Parsed {
     about = "A Rust coding agent built from replaceable native plugins",
     disable_help_subcommand = true,
     subcommand_negates_reqs = true,
-    args_conflicts_with_subcommands = true,
     override_usage = "eden [OPTIONS] [PROMPT]\n       eden [OPTIONS] <COMMAND> [ARGS]...",
     next_display_order = 800,
     styles = style::styles(),
@@ -460,12 +459,40 @@ pub fn parse(args: &[OsString], color: ColorChoice) -> Parsed {
         Ok(matches) => matches,
         Err(error) => subcommand_hint(args, color, error).exit(),
     };
+    if matches.get_one::<String>("prompt").is_some()
+        && let Some(family) = matches.subcommand_name()
+    {
+        prompt_conflict(family).exit();
+    }
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     Parsed {
         cli,
         matches,
         color,
     }
+}
+
+/// Report a prompt written together with a command.
+///
+/// clap's `args_conflicts_with_subcommands` states the same rule, but it also
+/// rejects a global option written before the family — `eden -q resources
+/// list` and `eden --color always session info …` — which cargo accepts and
+/// which these new global options invite. Only the conflict that changes what
+/// the process would do is reported, in clap's own shape.
+fn prompt_conflict(family: &str) -> clap::Error {
+    let mut command = Cli::command();
+    let usage = command.render_usage();
+    let mut error = clap::Error::new(ErrorKind::ArgumentConflict).with_cmd(&command);
+    error.insert(
+        ContextKind::InvalidSubcommand,
+        ContextValue::String(family.to_owned()),
+    );
+    error.insert(
+        ContextKind::PriorArg,
+        ContextValue::String("[PROMPT]".to_owned()),
+    );
+    error.insert(ContextKind::Usage, ContextValue::StyledStr(usage));
+    error
 }
 
 /// The family names the root command accepts.
@@ -487,9 +514,6 @@ const FAMILIES: [&str; 7] = [
 /// back from the probe pass, and the hint only replaces an error that is
 /// already an error, so no accepted command changes behaviour.
 fn subcommand_hint(args: &[OsString], color: ColorChoice, error: clap::Error) -> clap::Error {
-    if error.kind() == ErrorKind::InvalidSubcommand {
-        return error;
-    }
     let Ok(matches) = probe_command().color(color).try_get_matches_from(args) else {
         return error;
     };

@@ -127,6 +127,32 @@ fn a_misspelled_family_suggests_the_family_it_meant() {
 }
 
 #[test]
+fn a_global_option_may_precede_the_family() {
+    // cargo accepts `cargo --color always build`; the new global options invite
+    // the same placement, so it must not be a conflict.
+    let colored = run(&["--color", "always", "session", "info", "--help"]);
+    assert_eq!(colored.status.code(), Some(0), "{}", stderr(&colored));
+    assert!(stdout(&colored).contains('\u{1b}'), "{}", stdout(&colored));
+    let quiet = run(&["-q", "session", "info", "--help"]);
+    assert_eq!(quiet.status.code(), Some(0), "{}", stderr(&quiet));
+    assert!(
+        stdout(&quiet).contains("Session history file"),
+        "{}",
+        stdout(&quiet)
+    );
+}
+
+#[test]
+fn a_prompt_written_with_a_command_is_a_conflict() {
+    // Without this, the stray word would be dropped and the command would run.
+    let output = run(&["anything", "session", "info", "task.jsonl"]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    let diagnostic = stderr(&output);
+    assert!(diagnostic.contains("cannot be used with"), "{diagnostic}");
+    assert!(diagnostic.contains("[PROMPT]"), "{diagnostic}");
+}
+
+#[test]
 fn a_misspelled_option_suggests_the_option_it_meant() {
     let output = run(&["--cwrd", "/tmp"]);
     assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));

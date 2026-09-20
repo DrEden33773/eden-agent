@@ -48,17 +48,22 @@ pub struct SessionOptions {
     pub history: Option<std::path::PathBuf>,
 }
 impl Session {
+    /// Open a memory-only session in the current directory. This is the
+    /// convenience form; no history file is created on any exit path.
     pub async fn open(composition: impl AsRef<Path>) -> Result<Self, Fault> {
         let cwd = std::env::current_dir()
             .map_err(|e| Fault::new("InvalidInput", "cwd", e.to_string()))?;
         Self::open_with(composition, SessionOptions { cwd, history: None }).await
     }
+    /// Open with explicit resources under the default workspace options.
     pub async fn open_with(
         composition: impl AsRef<Path>,
         options: SessionOptions,
     ) -> Result<Self, Fault> {
         Self::open_with_workspace(composition, options, WorkspaceOptions::default()).await
     }
+    /// Open with explicit resources and explicit workspace options, which is
+    /// how the CLI hands over its trust decision and setting overrides.
     pub async fn open_with_workspace(
         composition: impl AsRef<Path>,
         options: SessionOptions,
@@ -276,6 +281,7 @@ impl Session {
         }
         Ok(session)
     }
+    /// The identity saved history records share, and which copies replace.
     pub fn id(&self) -> u64 {
         self.0.id
     }
@@ -285,6 +291,8 @@ impl Session {
             text: prompt.into(),
         }])
     }
+    /// Accept multimodal content as one run. The blocks are carried as given,
+    /// so an attachment does not depend on its source file afterwards.
     pub fn submit_blocks(&self, content: Vec<c::Block>) -> Result<u64, Fault> {
         self.start_loop(content, false)
     }
@@ -400,6 +408,7 @@ impl Session {
         }
         Err(Fault::new("InvalidInput", "session", "unknown run"))
     }
+    /// The settled result of a run, without waiting for one that is still active.
     pub fn inspect(&self, run_id: u64) -> Option<Terminal> {
         self.0
             .state
@@ -409,6 +418,9 @@ impl Session {
             .get(&run_id)
             .cloned()
     }
+    /// Wait for a run to settle and return its terminal. The registration
+    /// happens before the state is read, so a run that settles in between is
+    /// reported rather than waited for.
     pub async fn wait(&self, run_id: u64) -> Result<Terminal, Fault> {
         loop {
             let settled = self.0.settled.notified();
@@ -426,9 +438,11 @@ impl Session {
             settled.await;
         }
     }
+    /// Every event this session has published, in order.
     pub fn events(&self) -> Vec<Event> {
         self.0.events.snapshot()
     }
+    /// Wait for the events after `sequence`, for a reader that keeps a cursor.
     pub async fn events_after(&self, sequence: u64) -> Vec<Event> {
         self.0.events.after(sequence).await
     }
@@ -610,6 +624,7 @@ impl Session {
         .await
         .map_err(|e| Fault::new("Unavailable", "queue", e.to_string()))?
     }
+    /// The pending submissions of the active branch, in delivery order.
     pub async fn queued(&self) -> Result<Vec<c::QueueEntry>, Fault> {
         self.service(0, c::QUEUE, &c::QueueRequest::Inspect).await
     }

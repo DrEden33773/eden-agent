@@ -7,16 +7,27 @@ use std::{
     path::PathBuf,
 };
 
+/// Which of the six copy families an operation performs. Each answers a
+/// different question about a source, and each has its own preservation rule.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CopyKind {
+    /// Copy the selected ancestry into an independent session.
     Fork,
+    /// Keep the whole tree and the active selection.
     Clone,
+    /// Take a session from an outside history file, as this installation's format.
     Import,
+    /// Convert a version 1 linear history to the current schema.
     Upgrade,
+    /// Salvage only the validated prefix of a damaged history.
     Recover,
+    /// Relocate a session and convert its extension state for a new layout.
     Migrate,
 }
+/// What one copy or migration operation was asked to do. `target` selects the
+/// node to copy from and `cwd` relocates the session, each only where the
+/// selected [`CopyKind`] supports it.
 #[derive(Clone, Debug)]
 pub struct CopyOptions {
     pub source: PathBuf,
@@ -583,6 +594,7 @@ impl Session {
         )
         .await
     }
+    /// The directory this session runs in.
     pub fn cwd(&self) -> &str {
         &self.0.cwd
     }
@@ -755,6 +767,8 @@ impl Session {
             .await?;
         Ok(Some(catalog.tools))
     }
+    /// Every command the installed packages contribute. This reads a catalog
+    /// and starts no run.
     pub async fn commands(&self) -> Result<eden_protocol::resources::CommandCatalog, Fault> {
         self.service(
             0,
@@ -765,6 +779,8 @@ impl Session {
         )
         .await
     }
+    /// Run one contributed command as a run of its own, so its result settles
+    /// like any other and reaches history with the same ordering.
     pub fn command(&self, name: String, arguments: Value) -> Result<u64, Fault> {
         self.start(true, move |session, run_id, cancel| async move {
             session
@@ -786,6 +802,8 @@ impl Session {
                 .await
         })
     }
+    /// Take the resource source's current snapshot, which is what the session
+    /// would load for a new request.
     pub async fn resources(&self) -> Result<eden_protocol::resources::Snapshot, Fault> {
         let reply: eden_protocol::resources::ResourceReply = self
             .service(
@@ -796,6 +814,7 @@ impl Session {
             .await?;
         Ok(reply.snapshot)
     }
+    /// Save the session's name and tags as a committed record.
     pub fn set_metadata(&self, name: String, tags: Vec<String>) -> Result<u64, Fault> {
         self.start(true, move |session, run_id, _| async move {
             as_terminal(
@@ -810,6 +829,7 @@ impl Session {
             )
         })
     }
+    /// Choose how the queue delivers steering and follow-up submissions.
     pub fn configure_queue(&self, steering: String, follow_up: String) -> Result<u64, Fault> {
         self.start(true, move |session, run_id, _| async move {
             as_terminal(

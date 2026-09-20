@@ -65,6 +65,8 @@ pub struct Bytes {
     pub len: usize,
 }
 impl Bytes {
+    /// Borrow a byte span for one synchronous call. Nothing is copied, so the
+    /// span has to stay readable for as long as the callee needs it.
     pub fn new(bytes: &[u8]) -> Self {
         Self {
             ptr: bytes.as_ptr(),

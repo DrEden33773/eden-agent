@@ -17,6 +17,8 @@ impl Default for Cancellation {
     }
 }
 impl Cancellation {
+    /// Request cancellation. Every holder of this signal observes it, and each
+    /// one has to cooperate; the call does not wait for them.
     pub fn cancel(&self) {
         self.0.send_replace(true);
     }
@@ -24,6 +26,7 @@ impl Cancellation {
     pub fn is_cancelled(&self) -> bool {
         *self.0.borrow()
     }
+    /// Wait until cancellation is requested or the signal is dropped.
     pub async fn cancelled(&self) {
         let mut receiver = self.0.subscribe();
         while !*receiver.borrow_and_update() {
@@ -64,9 +67,12 @@ impl Scope {
         }
         Ok(callback())
     }
+    /// The signal a child task or a long loop observes in order to stop.
     pub fn cancellation(&self) -> Cancellation {
         self.cancellation.clone()
     }
+    /// Admit a child task into this operation. Closing the scope rejects later
+    /// admission, so a child either belongs to the operation or never starts.
     pub fn spawn(
         &self,
         future: impl Future<Output = Result<(), Fault>> + Send + 'static,
@@ -78,6 +84,9 @@ impl Scope {
         state.children.push(tokio::spawn(future));
         Ok(())
     }
+    /// Register teardown to run after the root settles. Every registered future
+    /// is attempted even when an earlier one fails or panics, and a cleanup may
+    /// await real shutdown work, because cancellation does not bypass it.
     pub fn cleanup(
         &self,
         future: impl Future<Output = Result<(), Fault>> + Send + 'static,

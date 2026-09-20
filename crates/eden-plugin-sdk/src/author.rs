@@ -18,12 +18,16 @@ pub struct CallContext {
     pub(crate) request: Request,
 }
 impl CallContext {
+    /// The session this operation belongs to.
     pub fn session_id(&self) -> u64 {
         self.request.session_id
     }
+    /// The run this operation belongs to.
     pub fn run_id(&self) -> u64 {
         self.request.run_id
     }
+    /// Emit one observation during the active operation. An emission after the
+    /// operation's scope has closed is rejected rather than delivered late.
     pub fn emit(&self, kind: &str, payload: Value) -> Result<(), Fault> {
         let event = Request {
             session_id: self.session_id(),
@@ -113,12 +117,15 @@ impl CallContext {
             .map_err(|_| Fault::new("Unavailable", "bridge", "bridge lost"))??;
         serde_json::from_value(value).map_err(serialization)
     }
+    /// Call the context role for this loop's projected model input.
     pub async fn context(&self, input: &RunInput) -> Result<ModelInput, Fault> {
         self.call(p::CONTEXT, input).await
     }
+    /// Call the model provider for a completed reply.
     pub async fn model(&self, input: &ModelInput) -> Result<ModelReply, Fault> {
         self.call(p::PROVIDER, input).await
     }
+    /// Call the selected tool with the argument the loop chose.
     pub async fn tool(&self, input: &str) -> Result<String, Fault> {
         self.call(p::TOOL, &input).await
     }
@@ -174,6 +181,7 @@ pub struct Package {
     handlers: BTreeMap<String, Handler>,
 }
 impl Package {
+    /// Start a package with its name, version `0.1.0` and no roles yet.
     pub fn new(name: &str) -> Self {
         Self {
             descriptor: Descriptor {
@@ -209,6 +217,9 @@ impl Package {
             }),
         )
     }
+    /// Register the trait facade for one role contract. A new package registers
+    /// the explicitly versioned contract with [`Package::service`] instead,
+    /// because the facade fixes the contract this release ships.
     pub fn agent_loop(self, role: impl AgentLoop) -> Self {
         let role = Arc::new(role);
         self.add(
@@ -228,6 +239,8 @@ impl Package {
             }),
         )
     }
+    /// Register a trait facade for the context role, for a package written
+    /// against these facades rather than an explicitly versioned contract.
     pub fn context(self, role: impl ContextStrategy) -> Self {
         let role = Arc::new(role);
         self.add(
@@ -247,6 +260,8 @@ impl Package {
             }),
         )
     }
+    /// Register a trait facade for the provider role, for a package written
+    /// against these facades rather than an explicitly versioned contract.
     pub fn provider(self, role: impl ModelProvider) -> Self {
         let role = Arc::new(role);
         self.add(
@@ -266,6 +281,8 @@ impl Package {
             }),
         )
     }
+    /// Register a trait facade for the tool role, for a package written against
+    /// these facades rather than an explicitly versioned contract.
     pub fn tool(self, role: impl Tool) -> Self {
         let role = Arc::new(role);
         self.add(

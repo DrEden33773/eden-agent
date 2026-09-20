@@ -14,6 +14,10 @@ pub const LITERAL: Style = AnsiColor::BrightCyan.on_default().effects(Effects::B
 pub const PLACEHOLDER: Style = AnsiColor::Cyan.on_default();
 /// Failures.
 pub const ERROR: Style = AnsiColor::Red.on_default().effects(Effects::BOLD);
+/// Something was skipped or needs attention.
+pub const WARN: Style = AnsiColor::Yellow.on_default().effects(Effects::BOLD);
+/// A remark that is not a problem.
+pub const NOTE: Style = AnsiColor::Cyan.on_default().effects(Effects::BOLD);
 /// Input clap accepted.
 pub const VALID: Style = AnsiColor::Cyan.on_default().effects(Effects::BOLD);
 /// Input clap rejected.

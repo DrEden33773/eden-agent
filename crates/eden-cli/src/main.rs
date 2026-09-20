@@ -28,7 +28,7 @@ fn main() {
         }
     }
     let parsed = eden_cli::cli::parse(&args, startup.color);
-    let shell = Shell::new();
+    let shell = Shell::new(parsed.color);
     match start(parsed, &shell) {
         Ok(code) => std::process::exit(code),
         Err(error) => {
@@ -153,7 +153,7 @@ async fn prompt(parsed: &Parsed, shell: &Shell) -> Result<i32, Box<dyn std::erro
         history = Some(root.join(format!("{stamp}-{}.jsonl", std::process::id())));
     }
     if let Some(path) = &history {
-        shell.status(format_args!("Session: {}", path.display()));
+        shell.status("Session:", path.display());
     }
     let session = Session::open_with_workspace(
         composition,

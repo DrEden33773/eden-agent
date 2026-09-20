@@ -55,12 +55,17 @@ pub struct Terminal {
     pub cleanup_errors: Vec<Fault>,
 }
 impl Terminal {
+    /// A terminal that failed before any cleanup was registered, so it carries
+    /// no cleanup errors.
     pub fn failed(error: Fault) -> Self {
         Self {
             outcome: Outcome::Failed(error),
             cleanup_errors: vec![],
         }
     }
+    /// Reduce the terminal to a result. A cleanup error outranks the outcome,
+    /// because a run whose teardown failed is not a success; a cancelled run
+    /// without cleanup errors becomes the cancellation fault callers expect.
     pub fn into_result(self) -> Result<Value, Fault> {
         if let Some(error) = self.cleanup_errors.into_iter().next() {
             return Err(error);

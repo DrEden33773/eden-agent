@@ -4,6 +4,8 @@ use eden_protocol::{
     coding::{Record, decode_records},
 };
 use std::path::Path;
+/// Read every record of a history file, refusing one whose tail is damaged so a
+/// caller cannot mistake a truncated read for a complete history.
 pub fn read(path: &Path) -> Result<Vec<Record>, Fault> {
     let bytes = std::fs::read(path)
         .map_err(|e| Fault::new("PersistenceFailure", "public-history", e.to_string()))?;

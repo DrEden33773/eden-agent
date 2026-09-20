@@ -1,3 +1,4 @@
+//! The coding package's explicit configuration, with its documented defaults.
 use super::*;
 
 #[derive(Clone, Debug)]
@@ -20,7 +21,7 @@ impl Default for Settings {
     }
 }
 impl Settings {
-    pub fn parse(value: Value) -> Result<Self, Fault> {
+    pub(crate) fn parse(value: Value) -> Result<Self, Fault> {
         let mut settings = Self::default();
         if !value.is_null() && !value.is_object() {
             return Err(invalid("coding settings must be an object"));
@@ -63,7 +64,7 @@ impl Settings {
         }
         Ok(settings)
     }
-    pub fn summary_allowance(&self, split: bool, model_max: u32) -> u32 {
+    pub(crate) fn summary_allowance(&self, split: bool, model_max: u32) -> u32 {
         let fraction = if split { 5 } else { 8 };
         let allowance = self.reserve_tokens.saturating_mul(fraction) / 10;
         let allowance = u32::try_from(allowance).unwrap_or(u32::MAX).max(1);

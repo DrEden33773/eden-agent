@@ -34,6 +34,8 @@ pub struct Parsed {
     pub color: ColorChoice,
 }
 
+/// The whole command tree. Global arguments are accepted in every position;
+/// with no family, the positional prompt is what the process runs.
 #[derive(Debug, Parser)]
 #[command(
     name = "eden",
@@ -135,19 +137,23 @@ pub struct Cli {
     #[arg(value_name = "PROMPT")]
     pub prompt: Option<String>,
     #[command(subcommand)]
+    /// The command family to run; without one the positional prompt runs.
     pub family: Option<Family>,
 }
 
+/// The command families `eden` accepts.
 #[derive(Debug, Subcommand)]
 pub enum Family {
     /// Inspect or change saved project trust
     Trust {
         #[command(subcommand)]
+        /// Which trust change to make.
         action: TrustAction,
     },
     /// Print the resources a session would load
     Resources {
         #[command(subcommand)]
+        /// The resources action; listing is the default.
         action: Option<ResourcesAction>,
     },
     /// List the commands installed packages contribute
@@ -163,11 +169,13 @@ pub enum Family {
     /// Install, list, remove or resolve native packages
     Package {
         #[command(subcommand)]
+        /// Which package operation to perform.
         action: PackageAction,
     },
     /// Inspect or export a stored history file
     History {
         #[command(subcommand)]
+        /// Which history operation to perform.
         action: HistoryAction,
     },
     /// Inspect or change a stored session
@@ -180,10 +188,12 @@ pub enum Family {
     )]
     Session {
         #[command(subcommand)]
+        /// Which session operation to perform.
         action: SessionAction,
     },
 }
 
+/// Actions of the `trust` family: record, withdraw or inspect project trust.
 #[derive(Debug, Subcommand)]
 pub enum TrustAction {
     /// Trust a project directory
@@ -206,12 +216,14 @@ pub enum TrustAction {
     },
 }
 
+/// Actions of the `resources` family.
 #[derive(Debug, Subcommand)]
 pub enum ResourcesAction {
     /// Print the resource snapshot a session would load
     List,
 }
 
+/// Actions of the `package` family.
 #[derive(Debug, Subcommand)]
 pub enum PackageAction {
     /// Install a package from a local directory, archive or --source-json
@@ -246,6 +258,8 @@ pub enum PackageAction {
     },
 }
 
+/// Actions of the `history` family, which read a public history file without
+/// loading a storage or business plugin.
 #[derive(Debug, Subcommand)]
 pub enum HistoryAction {
     /// Print every stored record as a JSON line
@@ -280,6 +294,8 @@ pub struct CopyArgs {
     pub apply: bool,
 }
 
+/// Actions of the `session` family. Copy actions share [`CopyArgs`] and preview
+/// unless `--apply` is written.
 #[derive(Debug, Subcommand)]
 pub enum SessionAction {
     /// Print session identity, head and branch state
@@ -376,31 +392,37 @@ pub enum SessionAction {
     },
     /// Preview or create an independent copy that keeps the whole tree
     Fork {
+        /// The source, destination and options shared by every copy action.
         #[command(flatten)]
         copy: CopyArgs,
     },
     /// Preview or create an independent copy that keeps the whole tree
     Clone {
+        /// The source, destination and options shared by every copy action.
         #[command(flatten)]
         copy: CopyArgs,
     },
     /// Preview or create a copy from an outside history file
     Import {
+        /// The source, destination and options shared by every copy action.
         #[command(flatten)]
         copy: CopyArgs,
     },
     /// Preview or create a copy upgraded to the current schema
     Upgrade {
+        /// The source, destination and options shared by every copy action.
         #[command(flatten)]
         copy: CopyArgs,
     },
     /// Preview or create a copy recovered from a damaged tail
     Recover {
+        /// The source, destination and options shared by every copy action.
         #[command(flatten)]
         copy: CopyArgs,
     },
     /// Preview or create a copy migrated to the current layout
     Migrate {
+        /// The source, destination and options shared by every copy action.
         #[command(flatten)]
         copy: CopyArgs,
     },

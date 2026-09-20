@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use std::{error::Error, path::PathBuf};
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
+/// Run the `resources`, `trust`, `commands` and `package` families.
 pub async fn run(cli: &Cli, shell: &Shell) -> Result<i32> {
     let family = cli.family.as_ref().ok_or("workspace command required")?;
     if let Family::Trust { action } = family {

@@ -1,3 +1,6 @@
+//! Workspace resolution for a session: discovery, the settings handed to each
+//! package, composition preflight, path resolution and the package references
+//! the session records.
 use super::*;
 pub(crate) fn prepare(
     composition: &Path,

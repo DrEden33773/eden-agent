@@ -1,4 +1,7 @@
 //! Rust author API and exact-version C ABI for trusted native plugins.
+//!
+//! Register typed handlers with [`Package`] and export them with
+//! [`export_plugin!`].
 pub mod abi;
 
 pub mod author;
@@ -15,6 +18,9 @@ pub use tokio;
 #[macro_export]
 macro_rules! export_plugin {
     ($descriptor:path, $factory:path) => {
+        // The exported entry point is named by the ABI, not by an author writing
+        // documentation; the macro's own doc comment covers it.
+        #[allow(missing_docs)]
         #[unsafe(no_mangle)]
         pub extern "C" fn eden_plugin_v1() -> *const $crate::abi::Header {
             unsafe extern "C" fn describe(reply: $crate::abi::Reply) {

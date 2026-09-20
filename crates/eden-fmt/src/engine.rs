@@ -15,6 +15,8 @@ use std::str::FromStr;
 
 /// rustfmt settings shared by lowering, lifting and the rustfmt call itself.
 #[derive(Clone, Debug)]
+// Fields and variants state themselves; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct Options {
     pub edition: String,
     pub style_edition: String,
@@ -39,6 +41,8 @@ impl Default for Options {
 
 /// Every way formatting one file can fail. A failure never modifies the file.
 #[derive(Debug)]
+// Fields and variants state themselves; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub enum Error {
     Io(std::io::Error),
     Tokens(String),
@@ -71,6 +75,7 @@ impl Error {
         }
     }
 
+    /// Name a grammar problem at a byte offset in the file being formatted.
     pub fn grammar(index: &LineIndex, offset: usize, message: impl Into<String>) -> Self {
         Error::Grammar {
             line: index.line(offset),
@@ -351,6 +356,7 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// Emit every source byte before `offset` that has not been emitted yet.
     pub fn copy_to(&mut self, offset: usize) {
         if offset > self.at {
             self.out.push_str(&self.src[self.at..offset]);
@@ -358,12 +364,14 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// Skip the source up to `offset`, emitting nothing for it.
     pub fn skip_to(&mut self, offset: usize) {
         if offset > self.at {
             self.at = offset;
         }
     }
 
+    /// Emit text produced by this formatter rather than copied from the source.
     pub fn push(&mut self, text: &str) {
         self.out.push_str(text);
     }
@@ -382,10 +390,13 @@ impl<'a> Emitter<'a> {
         Ok(())
     }
 
+    /// Name a grammar problem at a byte offset of the text being emitted.
     pub fn error(&self, offset: usize, message: impl Into<String>) -> Error {
         Error::grammar(&self.index, offset, message)
     }
 
+    /// The byte offset a token position refers to, or a diagnostic when the
+    /// position does not describe this text.
     pub fn offset_of(&self, at: LineColumn) -> Result<usize, Error> {
         self.index.offset(at).ok_or_else(unlocated)
     }
@@ -502,6 +513,7 @@ impl<'a> Lifter<'a> {
         scratch
     }
 
+    /// Emit every source byte before `offset` that has not been emitted yet.
     pub fn copy_to(&mut self, offset: usize) {
         if offset > self.at {
             let piece = &self.text[self.at..offset];
@@ -511,12 +523,14 @@ impl<'a> Lifter<'a> {
         }
     }
 
+    /// Skip the source up to `offset`, emitting nothing for it.
     pub fn skip_to(&mut self, offset: usize) {
         if offset > self.at {
             self.at = offset;
         }
     }
 
+    /// Emit text produced by this formatter rather than copied from the source.
     pub fn push(&mut self, text: &str) {
         self.out.push_str(text);
         self.column = advance_column(self.column, text);
@@ -565,10 +579,13 @@ impl<'a> Lifter<'a> {
         Ok(())
     }
 
+    /// Name a grammar problem at a byte offset of the lifted text. A position
+    /// that does not describe this text is reported rather than guessed at.
     pub fn error(&self, offset: usize, message: impl Into<String>) -> Error {
         Error::grammar(&self.index, offset, message)
     }
 
+    /// The byte offset a token position refers to in the lifted text.
     pub fn offset_of(&self, at: LineColumn) -> Result<usize, Error> {
         self.index.offset(at).ok_or_else(unlocated)
     }
@@ -758,6 +775,8 @@ pub(crate) fn is_target(call: &MacroCall) -> bool {
 }
 
 /// The mode a set of files is formatted in.
+// Fields and variants state themselves; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub enum Mode {
     Check,
     Write,
@@ -765,6 +784,8 @@ pub enum Mode {
 }
 
 /// Result of formatting a set of files.
+// Fields and variants state themselves; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct Outcome {
     pub changed: Vec<PathBuf>,
     pub failed: Vec<(PathBuf, Error)>,
@@ -833,6 +854,8 @@ pub fn check_source(source: &str) -> Vec<Violation> {
 }
 
 /// What the style rule found in one file.
+// Fields and variants state themselves; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct Violation {
     pub line: usize,
     pub column: usize,

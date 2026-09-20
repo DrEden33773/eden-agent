@@ -1,3 +1,4 @@
+//! The Responses request and reply mapping, including what is dropped and why.
 use super::{Profile, RequestOptions};
 use eden_protocol::{
     Fault,

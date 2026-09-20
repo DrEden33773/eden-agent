@@ -15,6 +15,7 @@ pub struct LineIndex<'a> {
 }
 
 impl<'a> LineIndex<'a> {
+    /// Build the line-start table for one text.
     pub fn new(text: &'a str) -> Self {
         let mut starts = vec![0];
         for (offset, byte) in text.bytes().enumerate() {

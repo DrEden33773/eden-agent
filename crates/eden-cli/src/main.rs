@@ -1,3 +1,4 @@
+//! The `eden` process entry point: it installs the explicit environment file, parses, and dispatches.
 use base64::Engine;
 use eden_agent::{Outcome, Session, SessionOptions};
 use eden_cli::cli::{AttachmentKind, Family, Parsed};

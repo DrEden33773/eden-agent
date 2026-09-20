@@ -1,3 +1,4 @@
+//! The search worker's own process entry point and request loop.
 mod engine;
 mod history;
 mod scope;

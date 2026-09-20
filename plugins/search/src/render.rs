@@ -1,3 +1,4 @@
+//! Human-readable rendering of a search result payload.
 use eden_plugin_sdk::serde_json::{self, Value, json};
 /// One path per group; metadata is separate from the compact line stream.
 pub fn render(value: &Value) -> String {

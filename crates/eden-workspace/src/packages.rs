@@ -10,9 +10,14 @@ fn fail(e: impl std::fmt::Display) -> Fault {
     Fault::new("PackageIntegrity", "packages", e.to_string())
 }
 
+/// The content digest of an installed package tree, taken over sorted relative
+/// paths and file bytes. `receipt.json` is excluded, because it has to be
+/// writable without changing the digest it records.
 pub fn digest(root: &Path) -> Result<String, Fault> {
     digest_with(root, &mut || Ok(()))
 }
+/// The same digest with a cancellation check consulted while the tree is read,
+/// so a large package cannot make a stopped request uninterruptible.
 pub fn digest_with(
     root: &Path,
     check: &mut dyn FnMut() -> Result<(), Fault>,
@@ -70,6 +75,9 @@ pub fn digest_with(
     visit(root, root, &mut hash, check)?;
     Ok(format!("{:x}", hash.finalize()))
 }
+/// Check one installed package against its receipt, and return the receipt. A
+/// package root reached through a link, or whose digest no longer matches, is
+/// rejected rather than loaded.
 pub fn verify(root: &Path) -> Result<Value, Fault> {
     if std::fs::symlink_metadata(root)
         .map_err(fail)?
@@ -95,6 +103,9 @@ pub fn verify(root: &Path) -> Result<Value, Fault> {
     }
     Ok(receipt)
 }
+/// Check every package of a composition before any library is loaded: each
+/// managed package must match its installed receipt, and a library inside the
+/// store without a receipt is refused rather than treated as a loose one.
 pub fn validate(composition: &Composition, store: &Path) -> Result<(), Fault> {
     let packages = store.join("packages");
     let packages = std::fs::canonicalize(packages).ok();
@@ -156,11 +167,15 @@ pub fn resolve_paths(
     }
     Ok(())
 }
+/// Record that a session uses this composition, so its libraries are retained
+/// while it exists. Use this once the selection is committed.
 pub fn register(store: &Path, history: &Path, composition: &Composition) -> Result<(), Fault> {
     register_pending(store, history, composition, false)
 }
-/// Before a binding commit, retain both the previous and proposed libraries.
-/// After it commits, replace the reference with the committed composition.
+
+/// Record a session's package references before the binding commit: both the
+/// previous and the proposed libraries are retained, so a failure between the
+/// two writes cannot leave the session naming a package that is already gone.
 pub fn register_pending(
     store: &Path,
     history: &Path,
@@ -316,6 +331,8 @@ fn register_at(
     .map_err(fail)?;
     std::fs::rename(temporary, target).map_err(fail)
 }
+/// The sessions whose saved references name this target, which is what decides
+/// whether an installed package version may be removed.
 pub fn references(store: &Path, target: &Path) -> Result<Vec<String>, Fault> {
     let mut output = vec![];
     let target = std::fs::canonicalize(target).map_err(fail)?;

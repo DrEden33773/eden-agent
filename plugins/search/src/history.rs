@@ -30,7 +30,7 @@ fn lock_error(error: std::fs::TryLockError) -> String {
         std::fs::TryLockError::Error(error) => format!("search history lock failed: {error}"),
     }
 }
-pub fn record(
+pub(crate) fn record(
     directory: &Path,
     cwd: &Path,
     path: &Path,
@@ -55,7 +55,11 @@ pub fn record(
         .and_then(|_| output.sync_data())
         .map_err(|e| e.to_string())
 }
-pub fn scores(directory: &Path, cwd: &Path, query: &str) -> Result<BTreeMap<PathBuf, f64>, String> {
+pub(crate) fn scores(
+    directory: &Path,
+    cwd: &Path,
+    query: &str,
+) -> Result<BTreeMap<PathBuf, f64>, String> {
     use std::io::BufRead;
     let input = match std::fs::File::open(file(directory, cwd)) {
         Ok(file) => file,

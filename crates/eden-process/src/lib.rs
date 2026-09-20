@@ -21,6 +21,8 @@
 //! A member that exits while cleanup enumerates it is a normal race, not a
 //! failure: enumeration reports the surviving members and never fails because
 //! one of them finished first.
+
+/// A fault owned by this module's process-domain boundary.
 fn fault(code: &str, message: impl Into<String>) -> Fault {
     Fault::new(code, "process", message)
 }
@@ -52,7 +54,10 @@ pub enum Termination {
 /// failure before the leader started also reports no exit code.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Stop {
+    // The contract above is what a caller has to read; the names state the values.
+    #[allow(missing_docs)]
     pub exit_code: Option<i32>,
+    #[allow(missing_docs)]
     pub termination: Option<Termination>,
 }
 
@@ -79,6 +84,12 @@ impl Stop {
     }
 }
 
+/// Launch one shell as the foreground leader of a fresh cleanup domain.
+///
+/// The shell is started in its own domain — a process group on Unix, a job
+/// object on Windows — before any caller can observe it, so no descendant it
+/// creates can escape cleanup. A configuration failure reaps the child rather
+/// than returning a leader whose domain was never established.
 pub async fn spawn(shell: &str, args: &[&str], cwd: &Path) -> Result<(Child, Tree), Fault> {
     #[cfg(windows)]
     let shell = &resolve_windows_shell(shell, cwd)?;
@@ -149,6 +160,7 @@ pub use platform::Tree;
 mod platform {
     use super::*;
     use crate::unix_exit::observe;
+    /// The cleanup domain of one running shell: its Unix process group.
     pub struct Tree {
         /// Process group id, which equals the leader's pid because the shell is
         /// created with `process_group(0)`.
@@ -318,6 +330,8 @@ mod platform {
             },
         },
     };
+    /// The cleanup domain of one running shell: the Windows job object that
+    /// owns it and its descendants.
     pub struct Tree {
         job: Arc<OwnedHandle>,
         /// The shell itself. Descendant cleanup excludes it so completing a

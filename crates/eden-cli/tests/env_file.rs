@@ -1,3 +1,6 @@
+//! Tests are outside the doc comment standard; see docs/development-checks.md#doc-comments.
+#![allow(missing_docs)]
+
 use std::{
     fs,
     process::Command,

@@ -510,9 +510,10 @@ const FAMILIES: [&str; 7] = [
 ///
 /// clap cannot suggest this on its own: the root also has a `PROMPT`
 /// positional, so a misspelled family is consumed as that positional and the
-/// failure surfaces as a conflicting second argument instead. The word is read
-/// back from the probe pass, and the hint only replaces an error that is
-/// already an error, so no accepted command changes behaviour.
+/// failure is reported against whatever follows it — `eden resorces list`
+/// blames `list` and suggests `history`. The word is read back from the probe
+/// pass, and the hint only replaces an error that is already an error, so no
+/// accepted command changes behaviour.
 fn subcommand_hint(args: &[OsString], color: ColorChoice, error: clap::Error) -> clap::Error {
     let Ok(matches) = probe_command().color(color).try_get_matches_from(args) else {
         return error;

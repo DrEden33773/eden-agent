@@ -1,4 +1,5 @@
-//! Native plugin host.
+//! Front end of the `eden` executable: argument and environment parsing, the
+//! command families, and the one outlet every human-readable message leaves by.
 
 /// Declarative command surface of the `eden` executable.
 pub mod cli;

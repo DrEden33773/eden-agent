@@ -21,6 +21,8 @@
 //! A member that exits while cleanup enumerates it is a normal race, not a
 //! failure: enumeration reports the surviving members and never fails because
 //! one of them finished first.
+
+/// A fault owned by this module's process-domain boundary.
 fn fault(code: &str, message: impl Into<String>) -> Fault {
     Fault::new(code, "process", message)
 }

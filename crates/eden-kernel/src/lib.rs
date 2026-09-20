@@ -1,4 +1,5 @@
-//! Native loading, explicit role selection and host-owned lifecycle.
+//! Composition preflight, native loading, explicit role selection, the event
+//! ledger, and host-owned lifecycle.
 pub mod history;
 mod native;
 use cordis_core::{Context, FiberHandle, Plugin, PreparedPlugin, Service};

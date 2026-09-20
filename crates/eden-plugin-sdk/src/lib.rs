@@ -1,4 +1,7 @@
 //! Rust author API and exact-version C ABI for trusted native plugins.
+//!
+//! Register typed handlers with [`Package`] and export them with
+//! [`export_plugin!`].
 pub mod abi;
 
 pub mod author;

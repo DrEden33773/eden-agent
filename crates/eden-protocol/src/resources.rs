@@ -29,6 +29,41 @@ pub struct Resource {
     pub path: String,
     pub model_invocable: bool,
 }
+/// How much attention one diagnostic deserves.
+///
+/// The enum is non-exhaustive, so a reader must handle a level its own release
+/// does not define. Additivity in the data path comes from the pairing string
+/// rather than from that attribute: derived deserialization rejects a level it
+/// does not know, and a producer can only send one this pairing defines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum Level {
+    Info,
+    Warning,
+    Error,
+}
+
+/// One resource-loading diagnostic with the level its producer chose.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Diagnostic {
+    pub level: Level,
+    pub message: String,
+}
+
+impl Diagnostic {
+    pub fn new(level: Level, message: impl Into<String>) -> Self {
+        Self {
+            level,
+            message: message.into(),
+        }
+    }
+    /// A resource that was skipped without failing the load.
+    pub fn warning(message: impl Into<String>) -> Self {
+        Self::new(Level::Warning, message)
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Snapshot {
     pub revision: u64,
@@ -38,7 +73,7 @@ pub struct Snapshot {
     pub sources: Vec<String>,
     pub skills: Vec<Resource>,
     pub templates: Vec<Resource>,
-    pub diagnostics: Vec<String>,
+    pub diagnostics: Vec<Diagnostic>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]

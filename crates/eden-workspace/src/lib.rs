@@ -1,6 +1,7 @@
 //! Data-only workspace bootstrap. No library, shell or credential command is executed here.
 pub mod packages;
 use eden_protocol::Fault;
+use eden_protocol::resources::Diagnostic;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -42,7 +43,7 @@ pub struct Workspace {
     pub global_dir: PathBuf,
     pub trusted: bool,
     pub settings: Value,
-    pub diagnostics: Vec<String>,
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 impl Workspace {
@@ -70,10 +71,10 @@ impl Workspace {
             || cwd.join(".eden/skills").exists()
             || cwd.join(".agents/skills").exists()
         {
-            diagnostics.push(format!(
+            diagnostics.push(Diagnostic::warning(format!(
                 "Untrusted project resources ignored: {}",
                 cwd.display()
-            ));
+            )));
         }
         if !options.overrides.is_object() {
             return Err(invalid("CLI settings must be a JSON object"));

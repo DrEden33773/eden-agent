@@ -18,6 +18,16 @@ The CLI creates a new JSONL file under the selected cwd's `.eden/sessions` direc
 
 `--json` emits ordered live events to stdout. `accepted` identifies the admitted run; `committed` identifies confirmed records; model delta events are transient. `settled` includes the fixed outcome and any cleanup/persistence errors. A successfully accepted or partially streamed run can still fail. Failed operations exit nonzero; cancelled runs exit 130; stdout failures trigger session shutdown. Ctrl-C requests cancellation and waits for cleanup.
 
+## Command line
+
+Every command and option is declared once in a clap command tree, so the tree is the only place an accepted spelling exists. Help is layered and derived from it: `eden --help` lists the command families, `eden session --help` lists the actions of a family, and `eden session fork --help` describes one action's arguments and options. `-h`, `--help`, `-V` and `--version` write to stdout and exit 0.
+
+A usage error — an unknown option, a misspelled action, a value a flag does not accept, or two options that contradict each other — is reported before anything runs, exits **2**, and names the closest accepted spelling when there is one. A run that started and failed exits **1**. `eden history inspect` on a damaged tail still exits **2** after printing the records it validated, and a cancelled run exits **130**.
+
+stdout always carries machine-readable results. Human-readable text, including resource diagnostics, goes to stderr, so `--json` output stays a clean event stream while the reason a project's resources were ignored remains visible. `--color auto|always|never` chooses whether human-readable output is colored: `auto` colors only a terminal, and `never` removes color even there.
+
+`-q`/`--quiet` suppresses status lines, warnings and notes; it never suppresses an error, because a failure is a result rather than narration. `-v`/`--verbose` is accepted and repeatable, and reserves the channel for detail; nothing emits detail yet. `--json` and `--quiet` answer different questions. The first keeps stdout machine-readable and touches nothing else; the second empties the human channel, so a run that succeeds under `--json --quiet` writes nothing at all to stderr while the same diagnostics stay readable as events. A run that fails still prints its error.
+
 ## Explicit environment files and DeepSeek
 
 The CLI accepts `--env-file PATH`. Relative paths are resolved against the invoking process cwd, independently of `--cwd`. Only that file is parsed; neither the project nor parent directories are searched. Parsing treats the file as dotenv data and never executes shell commands. The entire file is validated before variables are installed, and this happens before the async runtime or plugins start. Parse diagnostics omit file contents.

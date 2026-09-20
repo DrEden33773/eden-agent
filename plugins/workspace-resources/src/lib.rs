@@ -238,10 +238,13 @@ fn discover(
         .unwrap_or("");
     if is_skill && description.trim().is_empty() {
         if path.file_name().is_some_and(|n| n == "SKILL.md") {
-            loaded.snapshot.diagnostics.push(format!(
-                "Skill without description ignored: {}",
-                path.display()
-            ));
+            loaded
+                .snapshot
+                .diagnostics
+                .push(Diagnostic::warning(format!(
+                    "Skill without description ignored: {}",
+                    path.display()
+                )));
         }
         return Ok(());
     }
@@ -277,10 +280,13 @@ fn discover(
         &mut loaded.templates
     };
     if bodies.contains_key(&name) {
-        loaded.snapshot.diagnostics.push(format!(
-            "Duplicate resource {name}; first source wins, ignored {}",
-            path.display()
-        ));
+        loaded
+            .snapshot
+            .diagnostics
+            .push(Diagnostic::warning(format!(
+                "Duplicate resource {name}; first source wins, ignored {}",
+                path.display()
+            )));
         return Ok(());
     }
     let description = if description.is_empty() {

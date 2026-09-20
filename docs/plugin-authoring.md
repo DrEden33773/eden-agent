@@ -1,6 +1,6 @@
 # Author a native plugin
 
-Use the SDK source from the same eden-agent release and Rust 1.98.1. Host and plugin must match `eden-native-0.1.0`, ABI version 1 and the target triple. There is no cross-release ABI compatibility promise.
+Use the SDK source from the same eden-agent release and Rust 1.98.1. Host and plugin must match `eden-native-0.2.0`, ABI version 1 and the target triple. There is no cross-release ABI compatibility promise.
 
 ## Independent build
 
@@ -19,6 +19,8 @@ For example, the loop calls `cx.context(&input).await`, `cx.model(&model_input).
 
 The default roles are `eden.coding-loop.v2`, `eden.coding-context.v2`, `eden.coding-provider.v1`, `eden.coding-tool.v1`, `eden.session-store.v2` and `eden.submission-queue.v2`. `RunInput` carries cwd and owned multimodal blocks; the context maps `ContextInput` to `ModelInput`; a provider maps that input to complete `ModelReply` items while optionally emitting transient deltas. The tool receives `ToolRequest` and returns structured `ToolResult`. Storage accepts `StoreRequest` and returns `StoreReply` only after local public commit. See [coding sessions](coding.md) for ordering, recovery and queue semantics.
 
+`Snapshot.diagnostics` carries one record per skipped resource: a `level` of `info`, `warning` or `error`, plus the human-readable `message`. The level enum is non-exhaustive, so match it with a wildcard arm. A level your release does not define cannot arrive without a different pairing string, and the loader rejects the mismatched plugin before it is called. `eden-native-0.2.0` is the release that introduced this element shape; a plugin built against `eden-native-0.1.0` is rejected at load rather than deserialized into the new records.
+
 `Package::service` infers serialized input/output types from a handler, for example `Package::new("my-context").service(eden_plugin_sdk::protocol::coding::CONTEXT, project)`, where `project(input: ContextInput, cx: CallContext)` returns `Result<ModelInput, Fault>` asynchronously. Native memory ownership and scope cleanup are identical to the original role facades. Only one selected implementation supplies each role; adding an implementation does not alter the host.
 
 The [coding replacement author](../tests/contract-authors/coding-replacements) independently replaces provider, context, tool and storage. Build it with its own manifest and lockfile. The installed coding verifier checks downstream requests, real tool results and independent readability of the replacement store's local history after unloading that composition.
@@ -34,8 +36,8 @@ Copy the compiled `.dll`, `.so` or `.dylib` into a new version directory in the 
     "version": "0.1.0",
     "provides": ["eden.agent-loop.v1"]
   },
-  "host": "eden-native-0.1.0",
-  "sdk": "eden-native-0.1.0",
+  "host": "eden-native-0.2.0",
+  "sdk": "eden-native-0.2.0",
   "target": "x86_64-unknown-linux-gnu",
   "library": "plugins/loop-a/0.1.0/libauthor_loop_a.so",
   "config": null

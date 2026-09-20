@@ -31,8 +31,10 @@ pub struct Resource {
 }
 /// How much attention one diagnostic deserves.
 ///
-/// New levels stay additive: a reader that only knows the current three keeps
-/// working, which is why the enum is non-exhaustive on both sides.
+/// The enum is non-exhaustive, so a reader must handle a level its own release
+/// does not define. Additivity in the data path comes from the pairing string
+/// rather than from that attribute: derived deserialization rejects a level it
+/// does not know, and a producer can only send one this pairing defines.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]

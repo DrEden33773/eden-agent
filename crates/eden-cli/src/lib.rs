@@ -64,8 +64,8 @@ pub fn prompt_options(cli: &cli::Cli) -> eden_agent::WorkspaceOptions {
 /// The structured diagnostic a `resource_diagnostic` event carries.
 ///
 /// A payload without a level is still printed: its message becomes a warning
-/// rather than disappearing, so a producer that has not moved to the level
-/// form cannot make a diagnostic invisible.
+/// rather than disappearing, so a producer that writes only the message cannot
+/// make a diagnostic invisible.
 pub fn resource_diagnostic(payload: &serde_json::Value) -> eden_protocol::resources::Diagnostic {
     use eden_protocol::resources::{Diagnostic, Level};
     if let Ok(diagnostic) = serde_json::from_value::<Diagnostic>(payload.clone()) {

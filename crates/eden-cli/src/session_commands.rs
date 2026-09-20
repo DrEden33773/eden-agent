@@ -12,14 +12,14 @@ use std::{
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 pub async fn run(cli: &Cli, shell: &Shell) -> Result<i32> {
-    let (json_output, action) = match cli.family.as_ref() {
-        Some(Family::History { action, .. }) => {
+    let action = match cli.family.as_ref() {
+        Some(Family::History { action }) => {
             return match action {
                 HistoryAction::Inspect { path } => inspect(path, shell),
                 HistoryAction::Export { path, destination } => export(path, destination),
             };
         }
-        Some(Family::Session { json, action }) => (*json, action),
+        Some(Family::Session { action }) => action,
         _ => return Err("session command required".into()),
     };
     match action {
@@ -30,7 +30,7 @@ pub async fn run(cli: &Cli, shell: &Shell) -> Result<i32> {
     if let Some((kind, arguments)) = copy_action(action) {
         return copy_session(cli, kind, arguments).await;
     }
-    control(cli, shell, json_output, action).await
+    control(cli, shell, action).await
 }
 
 /// The copy kind a session action performs, if it copies a session.
@@ -155,12 +155,8 @@ async fn copy_session(cli: &Cli, kind: CopyKind, copy: &CopyArgs) -> Result<i32>
     Ok(0)
 }
 
-async fn control(
-    cli: &Cli,
-    shell: &Shell,
-    json_output: bool,
-    action: &SessionAction,
-) -> Result<i32> {
+async fn control(cli: &Cli, shell: &Shell, action: &SessionAction) -> Result<i32> {
+    let json_output = cli.json;
     let path = action_path(action).ok_or("session action needs a history path")?;
     let cwd = match &cli.cwd {
         Some(cwd) => cwd.clone(),

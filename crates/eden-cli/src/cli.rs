@@ -93,9 +93,9 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub history: Option<PathBuf>,
     /// Stream ordered events as JSON lines on stdout
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub json: bool,
-    /// Print the settled result to stdout
+    /// Accepted for compatibility; the settled result already goes to stdout
     #[arg(long)]
     pub print: bool,
     /// Enable only the named coding tools
@@ -167,9 +167,6 @@ pub enum Family {
     },
     /// Inspect or export a stored history file
     History {
-        /// Stream ordered events as JSON lines
-        #[arg(long, global = true)]
-        json: bool,
         #[command(subcommand)]
         action: HistoryAction,
     },
@@ -182,9 +179,6 @@ pub enum Family {
         )
     )]
     Session {
-        /// Stream ordered events as JSON lines
-        #[arg(long, global = true)]
-        json: bool,
         #[command(subcommand)]
         action: SessionAction,
     },
@@ -437,7 +431,14 @@ pub fn probe(args: &[OsString]) -> Result<Startup, clap::Error> {
         .into_iter()
         .flatten()
         .cloned();
-    let env_file = files.next();
+    let env_file = match files.next() {
+        Some(path) => Some(path),
+        // clap stops at the first error it ignores, so a file written after an
+        // argument clap could not read would go unread. Fall back to the
+        // literal token only when clap found none, which keeps clap's knowledge
+        // of which options take a value authoritative everywhere else.
+        None => literal_env_file(args),
+    };
     if files.next().is_some() {
         return Err(Cli::command().error(
             ErrorKind::TooManyValues,
@@ -452,11 +453,28 @@ pub fn probe(args: &[OsString]) -> Result<Startup, clap::Error> {
     Ok(Startup { env_file, color })
 }
 
+/// The path after a literal `--env-file`, when clap's probe found none.
+fn literal_env_file(args: &[OsString]) -> Option<PathBuf> {
+    let mut tokens = args.iter().skip(1);
+    while let Some(token) = tokens.next() {
+        if token == "--env-file" {
+            return tokens
+                .next()
+                .filter(|value| !value.to_string_lossy().starts_with('-'))
+                .map(PathBuf::from);
+        }
+    }
+    None
+}
+
 /// Parse the process arguments, or print clap's help, version or usage error.
 pub fn parse(args: &[OsString], color: ColorChoice) -> Parsed {
     let command = Cli::command().color(color);
     let matches = match command.try_get_matches_from(args) {
         Ok(matches) => matches,
+        // A display request is not an error to improve on: `--help` next to a
+        // misspelled word still asks for help.
+        Err(error) if is_display(&error) => error.exit(),
         Err(error) => subcommand_hint(args, color, error).exit(),
     };
     if matches.get_one::<String>("prompt").is_some()
@@ -470,6 +488,14 @@ pub fn parse(args: &[OsString], color: ColorChoice) -> Parsed {
         matches,
         color,
     }
+}
+
+/// Whether clap's error is really a request to print and exit successfully.
+fn is_display(error: &clap::Error) -> bool {
+    matches!(
+        error.kind(),
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+    )
 }
 
 /// Report a prompt written together with a command.
@@ -495,17 +521,6 @@ fn prompt_conflict(family: &str) -> clap::Error {
     error
 }
 
-/// The family names the root command accepts.
-const FAMILIES: [&str; 7] = [
-    "trust",
-    "resources",
-    "commands",
-    "command",
-    "package",
-    "history",
-    "session",
-];
-
 /// Offer the closest family when the first word is a near miss for one.
 ///
 /// clap cannot suggest this on its own: the root also has a `PROMPT`
@@ -521,14 +536,36 @@ fn subcommand_hint(args: &[OsString], color: ColorChoice, error: clap::Error) ->
     let Some(word) = matches.get_one::<String>("prompt") else {
         return error;
     };
-    let candidate = FAMILIES
-        .iter()
-        .copied()
-        .filter(|family| *family != word.as_str())
-        .map(|family| (distance(word, family), family))
-        .filter(|(distance, _)| *distance <= 3)
-        .min_by_key(|(distance, _)| *distance);
-    let Some((_, closest)) = candidate else {
+    let Some(index) = matches
+        .indices_of("prompt")
+        .and_then(|mut indices| indices.next())
+    else {
+        return error;
+    };
+    let next = args.get(index + 1).map(|token| token.to_string_lossy());
+    let closest = {
+        let mut command = Cli::command();
+        command.build();
+        let candidate = command
+            .get_subcommands()
+            .filter(|family| family.get_name() != word)
+            .map(|family| (distance(word, family.get_name()), family))
+            .filter(|(distance, _)| *distance <= 3)
+            .min_by_key(|(distance, _)| *distance);
+        candidate.and_then(|(_, family)| {
+            // Only a word followed by one of that family's own actions is a
+            // plausible command line. Without this, an ordinary prompt that
+            // happens to be near a family name would be rewritten into
+            // "did you mean …".
+            let action = next.as_deref().is_some_and(|next| {
+                family
+                    .get_subcommands()
+                    .any(|action| action.get_name() == next)
+            });
+            action.then(|| family.get_name().to_owned())
+        })
+    };
+    let Some(closest) = closest else {
         return error;
     };
     // Build the error the way clap builds its own subcommand error: no message
@@ -543,7 +580,7 @@ fn subcommand_hint(args: &[OsString], color: ColorChoice, error: clap::Error) ->
     );
     hinted.insert(
         ContextKind::SuggestedSubcommand,
-        ContextValue::Strings(vec![closest.to_owned()]),
+        ContextValue::Strings(vec![closest]),
     );
     hinted.insert(ContextKind::Usage, ContextValue::StyledStr(usage));
     hinted
@@ -653,15 +690,28 @@ mod tests {
     }
 
     #[test]
-    fn a_value_that_looks_like_an_option_is_not_the_environment_file() {
+    fn the_environment_file_is_found_wherever_it_is_written() {
         assert_eq!(
             env_file(&["--env-file", "a.env", "--version"]),
             Some("a.env".into())
         );
-        // `--env-file` here is the value of `--cwd`, which only clap's own
-        // knowledge of which options take a value can tell.
-        assert_eq!(env_file(&["--cwd", "--env-file", "--version"]), None);
+        assert_eq!(
+            env_file(&["session", "info", "x", "--env-file", "a.env"]),
+            Some("a.env".into())
+        );
+        // A flag is not a path, because clap refuses hyphen-leading values.
+        assert_eq!(env_file(&["--env-file", "--version"]), None);
         assert_eq!(env_file(&["--version"]), None);
+    }
+
+    #[test]
+    fn an_argument_clap_cannot_read_does_not_hide_the_environment_file() {
+        // clap stops at the first error it ignores, so the literal token is the
+        // fallback that keeps the file from going unread.
+        assert_eq!(
+            env_file(&["--badflag", "--env-file", "a.env"]),
+            Some("a.env".into())
+        );
     }
 
     #[test]

@@ -26,7 +26,7 @@ A usage error — an unknown option, a misspelled action, a value a flag does no
 
 stdout always carries machine-readable results. Human-readable text, including resource diagnostics, goes to stderr, so `--json` output stays a clean event stream while the reason a project's resources were ignored remains visible. `--color auto|always|never` chooses whether human-readable output is colored: `auto` colors only a terminal, and `never` removes color even there.
 
-`-q`/`--quiet` suppresses status lines, warnings and notes; it never suppresses an error, because a failure is a result rather than narration. `-v`/`--verbose` is accepted and repeatable, and reserves the channel for detail; nothing emits detail yet. `--json` and `--quiet` answer different questions: the first keeps stdout machine-readable, the second empties the human channel, and `--json --quiet` leaves stderr empty while the same diagnostics stay readable as events.
+`-q`/`--quiet` suppresses status lines, warnings and notes; it never suppresses an error, because a failure is a result rather than narration. `-v`/`--verbose` is accepted and repeatable, and reserves the channel for detail; nothing emits detail yet. `--json` and `--quiet` answer different questions. The first keeps stdout machine-readable and touches nothing else; the second empties the human channel, so a run that succeeds under `--json --quiet` writes nothing at all to stderr while the same diagnostics stay readable as events. A run that fails still prints its error.
 
 ## Explicit environment files and DeepSeek
 

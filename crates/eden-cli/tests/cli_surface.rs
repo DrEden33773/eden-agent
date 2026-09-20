@@ -2,8 +2,11 @@
 //!
 //! These assert observable behaviour — exit codes, stream choice and the words
 //! a reader needs — never the layout of a help page. clap documents help and
-//! error rendering as unstable across releases, so a snapshot here would fail
-//! on a dependency update without anything about eden changing.
+//! error rendering as unstable across releases, so a whole-page snapshot here
+//! would fail on a dependency update without anything about eden changing. The
+//! few substring assertions below pin wording this CLI promises (a usage error
+//! names a suggestion, a conflict says so); if clap rewords one, the contract
+//! moved and the assertion should be updated with it.
 use std::{
     fs,
     path::Path,
@@ -165,12 +168,46 @@ fn a_misspelled_option_suggests_the_option_it_meant() {
 
 #[test]
 fn an_ordinary_prompt_is_never_read_as_a_misspelled_family() {
-    // Two positionals are still a usage error, but the first one is a prompt
-    // and must not be rewritten into a subcommand suggestion.
-    let output = run(&["resorce this file", "extra"]);
-    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    // A prompt that is near a family name is only rewritten when the word
+    // after it is one of that family's own actions.
+    for args in [
+        vec!["resorce this file", "extra"],
+        vec!["resource this file"],
+        vec!["test session"],
+    ] {
+        let output = run(&args);
+        assert_ne!(output.status.code(), Some(0), "{}", stderr(&output));
+        assert!(
+            !stderr(&output).contains("'resources'"),
+            "{args:?} was rewritten: {}",
+            stderr(&output)
+        );
+        assert!(
+            !stderr(&output).contains("'trust'"),
+            "{args:?} was rewritten: {}",
+            stderr(&output)
+        );
+    }
+}
+
+#[test]
+fn a_display_request_wins_over_a_misspelled_word() {
+    for args in [vec!["--help", "resorce"], vec!["--version", "resorce"]] {
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        assert!(!output.stdout.is_empty());
+        assert!(output.stderr.is_empty(), "{}", stderr(&output));
+    }
+}
+
+#[test]
+fn json_may_precede_the_family() {
+    // The flag is global, so writing it first must reach the run rather than
+    // parse into a root value the family never reads.
+    let output = run(&["--json", "session", "info", "/nonexistent-history"]);
+    assert_ne!(output.status.code(), Some(2), "{}", stderr(&output));
     assert!(
-        !stderr(&output).contains("a similar subcommand"),
+        stderr(&output).contains("PersistenceFailure"),
         "{}",
         stderr(&output)
     );

@@ -1,3 +1,4 @@
+//! The search engine: indexes, pagination and cached result views.
 use super::scope::Stamp;
 use fff_search::{
     FFFMode, FFFQuery, FilePicker, FilePickerOptions, FuzzyQuery, FuzzySearchOptions, GrepMode,

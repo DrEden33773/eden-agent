@@ -1,3 +1,4 @@
+//! Record projection and compact or summary requests for the default context role.
 use super::*;
 use eden_plugin_sdk::protocol::history::active_path;
 use std::collections::BTreeMap;

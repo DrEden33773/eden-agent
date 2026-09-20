@@ -1,3 +1,4 @@
+//! Tool selection, contribution merging and read-only enforcement.
 use super::*;
 use eden_plugin_sdk::{
     CallContext,

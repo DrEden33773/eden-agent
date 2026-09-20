@@ -1,3 +1,4 @@
+//! The pending-input queue: branch kinds, acceptance, delivery and consumption records.
 use super::*;
 use std::collections::BTreeMap;
 

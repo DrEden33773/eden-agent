@@ -1,3 +1,4 @@
+//! The tool schemas this package publishes to the model.
 use eden_plugin_sdk::{protocol::coding::ToolDefinition, serde_json::json};
 pub(super) fn tools() -> Vec<ToolDefinition> {
     [

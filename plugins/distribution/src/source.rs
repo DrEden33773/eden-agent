@@ -1,3 +1,4 @@
+//! Package sources: local directories, archives and builds, resolved before installation.
 use super::{
     files,
     manager::{Source, error, io},

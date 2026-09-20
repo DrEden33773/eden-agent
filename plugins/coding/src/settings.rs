@@ -1,3 +1,4 @@
+//! The coding package's explicit configuration, with its documented defaults.
 use super::*;
 
 #[derive(Clone, Debug)]

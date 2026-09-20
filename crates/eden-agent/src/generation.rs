@@ -1,3 +1,4 @@
+//! The active composition generation, replaced only by an explicit switch.
 use super::*;
 use std::sync::RwLock;
 /// The current generation can be absent after a failed explicit switch.

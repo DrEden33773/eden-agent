@@ -1,3 +1,4 @@
+//! Workspace resolution for a session: validation, package references and the initial snapshot.
 use super::*;
 pub(crate) fn prepare(
     composition: &Path,

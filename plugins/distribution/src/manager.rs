@@ -1,3 +1,4 @@
+//! Installed-package records, receipts and the install, list, resolve and remove operations.
 use eden_plugin_sdk::{
     Cancellation,
     protocol::{Fault, PackageManifest},

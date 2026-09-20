@@ -1,3 +1,4 @@
+//! Path containment and file copying for package installation.
 use super::manager::{error, io};
 use eden_plugin_sdk::protocol::Fault;
 use std::{

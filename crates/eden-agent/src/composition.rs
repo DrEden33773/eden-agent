@@ -1,3 +1,4 @@
+//! Composition binding records: what a session's packages were when it was written.
 use super::*;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};

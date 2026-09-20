@@ -21,8 +21,13 @@ const python = (path) => /\.py$/.test(path) || ["pyproject.toml", "uv.lock"].inc
 const javascript = (path) =>
   /\.mjs$/.test(path) ||
   ["biome.json", "biome.jsonc", "package.json", "pnpm-lock.yaml"].includes(path);
+// A change to the hook implementation, the checks it runs, or a scenario that
+// exercises them makes every family relevant: those tests exist to pin how each
+// check behaves, so a commit that edits them has to run what they assert.
 const infrastructure = (path) =>
-  path.startsWith(".githooks/") || ["scripts/checks.mjs", "scripts/hooks.mjs"].includes(path);
+  path.startsWith(".githooks/") ||
+  path.startsWith("tests/development-hooks-") ||
+  ["scripts/checks.mjs", "scripts/hooks.mjs"].includes(path);
 function kindsFor(changed, push = false) {
   const all = changed.some(infrastructure);
   return [

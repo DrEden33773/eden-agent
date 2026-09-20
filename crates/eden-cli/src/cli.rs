@@ -34,6 +34,8 @@ pub struct Parsed {
     pub color: ColorChoice,
 }
 
+/// The whole command tree. Global arguments are accepted in every position;
+/// with no family, the positional prompt is what the process runs.
 #[derive(Debug, Parser)]
 #[command(
     name = "eden",
@@ -138,6 +140,7 @@ pub struct Cli {
     pub family: Option<Family>,
 }
 
+/// The command families `eden` accepts.
 #[derive(Debug, Subcommand)]
 pub enum Family {
     /// Inspect or change saved project trust
@@ -184,6 +187,7 @@ pub enum Family {
     },
 }
 
+/// Actions of the `trust` family: record, withdraw or inspect project trust.
 #[derive(Debug, Subcommand)]
 pub enum TrustAction {
     /// Trust a project directory
@@ -206,12 +210,14 @@ pub enum TrustAction {
     },
 }
 
+/// Actions of the `resources` family.
 #[derive(Debug, Subcommand)]
 pub enum ResourcesAction {
     /// Print the resource snapshot a session would load
     List,
 }
 
+/// Actions of the `package` family.
 #[derive(Debug, Subcommand)]
 pub enum PackageAction {
     /// Install a package from a local directory, archive or --source-json
@@ -246,6 +252,8 @@ pub enum PackageAction {
     },
 }
 
+/// Actions of the `history` family, which read a public history file without
+/// loading a storage or business plugin.
 #[derive(Debug, Subcommand)]
 pub enum HistoryAction {
     /// Print every stored record as a JSON line
@@ -280,6 +288,8 @@ pub struct CopyArgs {
     pub apply: bool,
 }
 
+/// Actions of the `session` family. Copy actions share [`CopyArgs`] and preview
+/// unless `--apply` is written.
 #[derive(Debug, Subcommand)]
 pub enum SessionAction {
     /// Print session identity, head and branch state

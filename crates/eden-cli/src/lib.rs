@@ -11,6 +11,7 @@ pub mod session_commands;
 pub mod shell;
 /// Terminal palette shared by clap's rendering and runtime messages.
 pub mod style;
+/// Resources, explicit project trust and contributed commands.
 pub mod workspace_commands;
 
 /// Workspace options implied by the shared command-line arguments.

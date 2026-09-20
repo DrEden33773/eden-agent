@@ -11,6 +11,7 @@ use std::{
 };
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
+/// Run the `history` and `session` families.
 pub async fn run(cli: &Cli, shell: &Shell) -> Result<i32> {
     let action = match cli.family.as_ref() {
         Some(Family::History { action }) => {

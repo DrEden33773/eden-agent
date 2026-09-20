@@ -854,7 +854,7 @@ pub fn collect(paths: &[PathBuf], skips: &[PathBuf]) -> Result<Vec<PathBuf>, Err
     let skips: Vec<PathBuf> = skips.iter().map(|skip| normalize(skip)).collect();
     let mut files = Vec::new();
     for path in paths {
-        collect_into(path, &mut files, &skips)?;
+        collect_into(path, &mut files, &skips, &[], &[])?;
     }
     files.sort();
     files.dedup();
@@ -873,7 +873,15 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
-fn collect_into(path: &Path, files: &mut Vec<PathBuf>, skips: &[PathBuf]) -> Result<(), Error> {
+/// `relative` is the path walked so far below the manifest that owns
+/// `declared`, so a declaration is judged against the directory it names.
+fn collect_into(
+    path: &Path,
+    files: &mut Vec<PathBuf>,
+    skips: &[PathBuf],
+    inherited: &[String],
+    relative: &[String],
+) -> Result<(), Error> {
     let metadata = std::fs::metadata(path)?;
     if metadata.is_file() {
         if path.extension().is_some_and(|extension| extension == "rs") {
@@ -885,7 +893,12 @@ fn collect_into(path: &Path, files: &mut Vec<PathBuf>, skips: &[PathBuf]) -> Res
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .collect();
     entries.sort();
-    let declared = declared_paths(path);
+    // A directory that owns a manifest owns its own view; anything else stays
+    // under the manifest above it.
+    let (declared, relative) = match declared_paths(path) {
+        Some(local) => (local, Vec::new()),
+        None => (inherited.to_vec(), relative.to_vec()),
+    };
     for entry in entries {
         let name = entry
             .file_name()
@@ -895,41 +908,52 @@ fn collect_into(path: &Path, files: &mut Vec<PathBuf>, skips: &[PathBuf]) -> Res
         if entry.is_dir() && is_skipped(&name) {
             continue;
         }
-        // A leading dot means "not source" only until the manifest beside the
-        // directory names something inside it: Cargo compiles that file.
-        if entry.is_dir() && name.starts_with('.') && !declares(&declared, &name) {
+        let walked: Vec<String> = relative
+            .iter()
+            .cloned()
+            .chain(std::iter::once(name.clone()))
+            .collect();
+        // A leading dot means "not source" only until the manifest above names
+        // something inside it: Cargo compiles that file.
+        if entry.is_dir() && name.starts_with('.') && !declares(&declared, &walked) {
             continue;
         }
         if skips.iter().any(|skip| normalize(&entry).starts_with(skip)) {
             continue;
         }
-        collect_into(&entry, files, skips)?;
+        collect_into(&entry, files, skips, &declared, &walked)?;
     }
     Ok(())
 }
 
-/// Whether the manifest named the directory `name`, directly or through a path.
-fn declares(declared: &[String], name: &str) -> bool {
-    declared
-        .iter()
-        .any(|path| path == name || path.starts_with(&format!("{name}/")))
+/// Whether a declared path covers the directory walked so far.
+///
+/// A star matches one component, so a workspace written as
+/// members = ["crates/*"] covers crates/.hidden exactly as Cargo reads it.
+fn declares(declared: &[String], walked: &[String]) -> bool {
+    declared.iter().any(|entry| {
+        let parts: Vec<&str> = entry.split('/').collect();
+        parts.len() >= walked.len()
+            && walked
+                .iter()
+                .zip(&parts)
+                .all(|(here, declared)| *declared == "*" || declared == here)
+    })
 }
 
-/// Every path the `Cargo.toml` in this directory names.
+/// Every path the Cargo.toml in this directory names, if it has one.
 ///
-/// Only the two spellings that introduce a path are read: `path = "…"` for a
-/// target and the entries of `members`/`exclude` for a nested project. A
-/// manifest that spells a path another way loses the exemption for a dot
-/// directory, never a check: a directory outside the skip list is walked
+/// Only the spellings that introduce a path are read: a path key for a
+/// target, and the entries of a members list for a nested project. The
+/// manifest is read as text, so a spelling this misses loses the exemption for
+/// a dot directory, never a check: a directory outside the skip list is walked
 /// whether or not the manifest mentions it.
-fn declared_paths(directory: &Path) -> Vec<String> {
-    let Ok(manifest) = std::fs::read_to_string(directory.join("Cargo.toml")) else {
-        return Vec::new();
-    };
+fn declared_paths(directory: &Path) -> Option<Vec<String>> {
+    let manifest = std::fs::read_to_string(directory.join("Cargo.toml")).ok()?;
     let mut declared = Vec::new();
     let mut listing = false;
     for line in manifest.lines() {
-        let line = line.trim();
+        let line = without_comment(line).trim();
         if listing {
             declared.extend(quoted(line));
             listing = !line.contains(']');
@@ -940,29 +964,65 @@ fn declared_paths(directory: &Path) -> Vec<String> {
         };
         match key.trim() {
             "path" => declared.extend(quoted(value)),
-            "members" | "exclude" if value.contains('[') => {
+            // A workspace exclude list is the opposite of membership and does
+            // not decide what Cargo compiles, so it names nothing here.
+            "members" if value.contains('[') => {
                 declared.extend(quoted(value));
                 listing = !value.contains(']');
             }
             _ => {}
         }
     }
-    declared
-        .into_iter()
-        .map(|path| path.replace('\\', "/"))
-        .map(|path| path.strip_prefix("./").map(str::to_owned).unwrap_or(path))
-        .collect()
+    Some(
+        declared
+            .into_iter()
+            .map(|path| path.replace('\\', "/"))
+            .map(|path| path.strip_prefix("./").map(str::to_owned).unwrap_or(path))
+            .filter(|path| !path.is_empty())
+            .collect(),
+    )
 }
 
-/// The quoted parts of a manifest line, in order.
+/// The quoted parts of a manifest line, in both TOML spellings, in order.
 fn quoted(line: &str) -> Vec<String> {
-    line.split('"')
-        .skip(1)
-        .step_by(2)
-        .map(str::to_owned)
-        .collect()
+    let mut parts = Vec::new();
+    let mut open: Option<(char, String)> = None;
+    for character in line.chars() {
+        match &mut open {
+            Some((delimiter, text)) => {
+                if character == *delimiter {
+                    parts.push(std::mem::take(text));
+                    open = None;
+                } else {
+                    text.push(character);
+                }
+            }
+            None if character == '"' || character == '\'' => {
+                open = Some((character, String::new()));
+            }
+            None => {}
+        }
+    }
+    parts
 }
 
+/// A manifest line up to its comment, so quoted text in a comment is not read.
+fn without_comment(line: &str) -> &str {
+    let mut open = None;
+    for (at, character) in line.char_indices() {
+        match open {
+            Some(delimiter) => {
+                if character == delimiter {
+                    open = None;
+                }
+            }
+            None if character == '"' || character == '\'' => open = Some(character),
+            None if character == '#' => return &line[..at],
+            None => {}
+        }
+    }
+    line
+}
 fn is_skipped(name: &str) -> bool {
     matches!(
         name,

@@ -885,13 +885,19 @@ fn collect_into(path: &Path, files: &mut Vec<PathBuf>, skips: &[PathBuf]) -> Res
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .collect();
     entries.sort();
+    let declared = declared_paths(path);
     for entry in entries {
         let name = entry
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
-        if entry.is_dir() && (name.starts_with('.') || is_skipped(&name)) {
+        if entry.is_dir() && is_skipped(&name) {
+            continue;
+        }
+        // A leading dot means "not source" only until the manifest beside the
+        // directory names something inside it: Cargo compiles that file.
+        if entry.is_dir() && name.starts_with('.') && !declares(&declared, &name) {
             continue;
         }
         if skips.iter().any(|skip| normalize(&entry).starts_with(skip)) {
@@ -900,6 +906,61 @@ fn collect_into(path: &Path, files: &mut Vec<PathBuf>, skips: &[PathBuf]) -> Res
         collect_into(&entry, files, skips)?;
     }
     Ok(())
+}
+
+/// Whether the manifest named the directory `name`, directly or through a path.
+fn declares(declared: &[String], name: &str) -> bool {
+    declared
+        .iter()
+        .any(|path| path == name || path.starts_with(&format!("{name}/")))
+}
+
+/// Every path the `Cargo.toml` in this directory names.
+///
+/// Only the two spellings that introduce a path are read: `path = "…"` for a
+/// target and the entries of `members`/`exclude` for a nested project. A
+/// manifest that spells a path another way loses the exemption for a dot
+/// directory, never a check: a directory outside the skip list is walked
+/// whether or not the manifest mentions it.
+fn declared_paths(directory: &Path) -> Vec<String> {
+    let Ok(manifest) = std::fs::read_to_string(directory.join("Cargo.toml")) else {
+        return Vec::new();
+    };
+    let mut declared = Vec::new();
+    let mut listing = false;
+    for line in manifest.lines() {
+        let line = line.trim();
+        if listing {
+            declared.extend(quoted(line));
+            listing = !line.contains(']');
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key.trim() {
+            "path" => declared.extend(quoted(value)),
+            "members" | "exclude" if value.contains('[') => {
+                declared.extend(quoted(value));
+                listing = !value.contains(']');
+            }
+            _ => {}
+        }
+    }
+    declared
+        .into_iter()
+        .map(|path| path.replace('\\', "/"))
+        .map(|path| path.strip_prefix("./").map(str::to_owned).unwrap_or(path))
+        .collect()
+}
+
+/// The quoted parts of a manifest line, in order.
+fn quoted(line: &str) -> Vec<String> {
+    line.split('"')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_owned)
+        .collect()
 }
 
 fn is_skipped(name: &str) -> bool {

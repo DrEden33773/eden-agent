@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncReadExt;
-pub async fn command(
+pub(crate) async fn command(
     executable: &str,
     args: &[&str],
     cwd: &Path,
@@ -74,7 +74,7 @@ pub async fn command(
         format!("{executable} exited {status}: {stdout}\n{stderr}"),
     ))
 }
-pub async fn prepare(
+pub(crate) async fn prepare(
     source: &Source,
     destination: &Path,
     cancel: &Cancellation,
@@ -213,7 +213,7 @@ pub async fn prepare(
         }
     }
 }
-pub fn check_cancel(cancel: &Cancellation) -> Result<(), Fault> {
+pub(crate) fn check_cancel(cancel: &Cancellation) -> Result<(), Fault> {
     if cancel.is_cancelled() {
         Err(error(
             "Cancelled",
@@ -223,7 +223,7 @@ pub fn check_cancel(cancel: &Cancellation) -> Result<(), Fault> {
         Ok(())
     }
 }
-pub fn client(ca: Option<&std::path::Path>) -> Result<reqwest::Client, Fault> {
+pub(crate) fn client(ca: Option<&std::path::Path>) -> Result<reqwest::Client, Fault> {
     let mut builder =
         reqwest::Client::builder().redirect(reqwest::redirect::Policy::custom(|attempt| {
             if attempt.url().scheme() != "https" {

@@ -30,7 +30,7 @@ struct Cached {
     fallback: bool,
 }
 #[derive(Default)]
-pub struct Engine {
+pub(crate) struct Engine {
     indexes: BTreeMap<(PathBuf, bool), Index>,
     pages: BTreeMap<String, (String, usize)>,
     results: BTreeMap<String, Cached>,
@@ -56,7 +56,7 @@ fn stamp(path: &Path, follow: bool, excluded: &[PathBuf]) -> Result<Stamp, Strin
     super::scope::stamp(path, follow, excluded)
 }
 impl Engine {
-    pub fn with_progress(progress: fn(&str)) -> Self {
+    pub(crate) fn with_progress(progress: fn(&str)) -> Self {
         Self {
             progress: Some(progress),
             ..Default::default()
@@ -126,7 +126,7 @@ impl Engine {
         }
         Ok(&self.indexes[&key])
     }
-    pub fn query(&mut self, request: &Value) -> Result<Value, String> {
+    pub(crate) fn query(&mut self, request: &Value) -> Result<Value, String> {
         let args = &request["arguments"];
         if request["name"] == "__record_read" {
             if let Some(directory) = args["_history_dir"].as_str() {

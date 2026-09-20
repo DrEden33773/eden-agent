@@ -6,8 +6,8 @@ use std::{
     path::{Path, PathBuf},
     time::SystemTime,
 };
-pub type Stamp = BTreeMap<PathBuf, (PathBuf, u64, Option<SystemTime>)>;
-pub fn stamp(path: &Path, follow: bool, excluded: &[PathBuf]) -> Result<Stamp, String> {
+pub(crate) type Stamp = BTreeMap<PathBuf, (PathBuf, u64, Option<SystemTime>)>;
+pub(crate) fn stamp(path: &Path, follow: bool, excluded: &[PathBuf]) -> Result<Stamp, String> {
     let mut output = BTreeMap::new();
     let is_git = path.ancestors().any(|parent| parent.join(".git").exists());
     let mut builder = ignore::WalkBuilder::new(path);

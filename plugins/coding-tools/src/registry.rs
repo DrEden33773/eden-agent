@@ -12,7 +12,7 @@ pub(super) struct Registry {
     read_only: bool,
 }
 impl Registry {
-    pub fn new(config: &Value) -> Result<Self, Fault> {
+    pub(crate) fn new(config: &Value) -> Result<Self, Fault> {
         let mut selected = match config.get("tools") {
             Some(value) => names(value, "tools")?,
             None => ["read", "write", "edit", "bash"].map(String::from).into(),
@@ -55,7 +55,7 @@ impl Registry {
             read_only,
         })
     }
-    pub async fn catalog(
+    pub(crate) async fn catalog(
         &self,
         cx: &CallContext,
         cwd: &str,

@@ -7,29 +7,29 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Source {
+pub(crate) enum Source {
     Local { path: PathBuf },
     Git { url: String, revision: String },
     Https { url: String, sha256: String },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Bundle {
+pub(crate) struct Bundle {
     pub manifest: PackageManifest,
     #[serde(default)]
     pub dependencies: Vec<Source>,
     pub build: Option<Build>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Build {
+pub(crate) struct Build {
     pub manifest_path: PathBuf,
     pub artifact: PathBuf,
 }
-pub struct Manager {
+pub(crate) struct Manager {
     pub root: PathBuf,
     pub client: reqwest::Client,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Receipt {
+pub(crate) struct Receipt {
     pub path: PathBuf,
     pub manifest: PackageManifest,
     pub source: Value,
@@ -46,10 +46,10 @@ impl Drop for Staging {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
-pub fn error(code: &str, message: impl Into<String>) -> Fault {
+pub(crate) fn error(code: &str, message: impl Into<String>) -> Fault {
     Fault::new(code, "distribution", message)
 }
-pub fn io(error_value: std::io::Error) -> Fault {
+pub(crate) fn io(error_value: std::io::Error) -> Fault {
     error("PackageFailure", error_value.to_string())
 }
 impl Manager {
@@ -65,7 +65,7 @@ impl Manager {
             .map_err(|e| error("PackageBusy", e.to_string()))?;
         Ok(file)
     }
-    pub async fn install(
+    pub(crate) async fn install(
         &self,
         source: Source,
         build: bool,
@@ -331,7 +331,7 @@ impl Manager {
             Ok(receipt)
         })
     }
-    pub fn list(&self) -> Result<Vec<Receipt>, Fault> {
+    pub(crate) fn list(&self) -> Result<Vec<Receipt>, Fault> {
         let mut output = vec![];
         let root = self.root.join("packages");
         if !root.exists() {
@@ -357,7 +357,7 @@ impl Manager {
         output.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(output)
     }
-    pub fn resolve(
+    pub(crate) fn resolve(
         &self,
         base: eden_plugin_sdk::protocol::Composition,
         selections: &Value,
@@ -484,7 +484,7 @@ impl Manager {
         }
         Ok(json!({ "path": path, "id": id, "composition": composition }))
     }
-    pub fn remove(&self, name: &str, version: &str, force: bool) -> Result<Value, Fault> {
+    pub(crate) fn remove(&self, name: &str, version: &str, force: bool) -> Result<Value, Fault> {
         let _lock = self.lock()?;
         super::files::component(name)?;
         super::files::component(version)?;

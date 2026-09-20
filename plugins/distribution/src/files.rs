@@ -4,7 +4,7 @@ use std::{
     io::Read,
     path::{Component, Path, PathBuf},
 };
-pub fn relative(path: &Path) -> Result<&Path, Fault> {
+pub(crate) fn relative(path: &Path) -> Result<&Path, Fault> {
     if path.as_os_str().is_empty()
         || path.is_absolute()
         || path
@@ -18,7 +18,7 @@ pub fn relative(path: &Path) -> Result<&Path, Fault> {
     }
     Ok(path)
 }
-pub fn component(value: &str) -> Result<&str, Fault> {
+pub(crate) fn component(value: &str) -> Result<&str, Fault> {
     if value.is_empty()
         || value == "."
         || value == ".."
@@ -33,7 +33,7 @@ pub fn component(value: &str) -> Result<&str, Fault> {
     }
     Ok(value)
 }
-pub fn copy(
+pub(crate) fn copy(
     source: &Path,
     destination: &Path,
     cancel: &eden_plugin_sdk::Cancellation,
@@ -75,7 +75,7 @@ pub fn copy(
     }
     Ok(())
 }
-pub fn unpack(
+pub(crate) fn unpack(
     source: &Path,
     destination: &Path,
     cancel: &eden_plugin_sdk::Cancellation,
@@ -110,7 +110,7 @@ pub fn unpack(
     }
     Ok(())
 }
-pub fn bundle_root(root: &Path) -> Result<PathBuf, Fault> {
+pub(crate) fn bundle_root(root: &Path) -> Result<PathBuf, Fault> {
     if root.join("package.json").is_file() {
         return Ok(root.into());
     }
@@ -129,10 +129,10 @@ pub fn bundle_root(root: &Path) -> Result<PathBuf, Fault> {
         "package.json must be at archive root or inside its sole top-level directory",
     ))
 }
-pub fn digest(root: &Path, cancel: &eden_plugin_sdk::Cancellation) -> Result<String, Fault> {
+pub(crate) fn digest(root: &Path, cancel: &eden_plugin_sdk::Cancellation) -> Result<String, Fault> {
     eden_workspace::packages::digest_with(root, &mut || super::source::check_cancel(cancel))
 }
-pub fn write_json(path: &Path, value: &impl serde::Serialize) -> Result<(), Fault> {
+pub(crate) fn write_json(path: &Path, value: &impl serde::Serialize) -> Result<(), Fault> {
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
         .create_new(true)

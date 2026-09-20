@@ -210,18 +210,37 @@ impl Session {
                 let identity = serde_json::json!({
                     "cwd": cwd,
                     "roles": binding.roles,
-                    "packages": binding.packages.iter().map(|p| &p.descriptor).collect::<Vec<_>>()
+                    "packages": binding
+                        .packages
+                        .iter()
+                        .map(|p| &p.descriptor)
+                        .collect::<Vec<_>>(),
                 });
                 let locked = desired;
-                let saved_lock = reply.records.iter().rev().find(|r|r.kind == "composition_lock");
-                if let Some(saved) = saved_lock && !rebind && !composition::equivalent(&saved.payload, &locked) {
- return Err(Fault::new("Unavailable",
-"composition",
-"saved package binding differs; explicitly switch the saved session composition"));
-
-}
+                let saved_lock = reply
+                    .records
+                    .iter()
+                    .rev()
+                    .find(|r| r.kind == "composition_lock");
+                if let Some(saved) = saved_lock
+                    && !rebind
+                    && !composition::equivalent(&saved.payload, &locked)
+                {
+                    return Err(Fault::new(
+                        "Unavailable",
+                        "composition",
+                        concat!(
+                            "saved package binding differs; explicitly switch ",
+                            "the saved session composition",
+                        ),
+                    ));
+                }
                 if let Some(record) = reply.records.first() {
-                    if record.kind != "session" || (!rebind && saved_lock.is_none() && !compatible_binding(&record.payload, &identity)) {
+                    if record.kind != "session"
+                        || (!rebind
+                            && saved_lock.is_none()
+                            && !compatible_binding(&record.payload, &identity))
+                    {
                         return Err(Fault::new(
                             "Unavailable",
                             "session",
@@ -235,7 +254,11 @@ impl Session {
                     .service(0, c::QUEUE, &c::QueueRequest::Restore)
                     .await?;
                 workspace_setup::register(&session, &binding, true)?;
-                if rebind || saved_lock.is_none_or(|saved| saved.payload["library_locations"] != locked["library_locations"]) {
+                if rebind
+                    || saved_lock.is_none_or(|saved| {
+                        saved.payload["library_locations"] != locked["library_locations"]
+                    })
+                {
                     session.commit(0, "composition_lock", locked).await?;
                 }
                 workspace_setup::register(&session, &binding, false)?;

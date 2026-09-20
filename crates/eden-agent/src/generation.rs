@@ -32,7 +32,10 @@ impl Generation {
     pub fn take(&self) -> Option<Arc<Kernel>> {
         self.0.write().unwrap_or_else(|e| e.into_inner()).take()
     }
-    /// Make a newly loaded kernel the active generation.
+    /// Make a newly loaded kernel the active generation, replacing any current
+    /// one. The replaced kernel is dropped, not shut down, so a caller switching
+    /// compositions has to await its [`shutdown`](eden_kernel::Kernel::shutdown)
+    /// first — dropping it does not reach the disposal barrier.
     pub fn install(&self, kernel: Kernel) {
         *self.0.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(kernel));
     }

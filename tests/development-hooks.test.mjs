@@ -58,6 +58,27 @@ test("pre-commit runs every family when the hook sources themselves change", (t)
   assert.match(output, /unresolved link/);
 });
 
+test("the doc check keeps a RUSTDOCFLAGS it was given and adds its own lints", (t) => {
+  const root = fixture(t);
+  // `inner` is private, so rustdoc documents nothing in it and the default check
+  // cannot see the broken link. Only a RUSTDOCFLAGS the contributor supplied can
+  // reach it, which is how this pins that the environment is kept rather than
+  // replaced: the first run passes and the second one has to fail.
+  writeFileSync(
+    join(root, "src/inner.rs"),
+    "/// See [`missing_link`].\npub(crate) fn helper() -> u32 {\n    1\n}\n",
+  );
+  writeFileSync(join(root, "src/lib.rs"), "mod inner;\n\npub fn value() -> u32 {\n    1\n}\n");
+  let result = command(root, process.execPath, ["scripts/checks.mjs", "doc"]);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  result = command(root, process.execPath, ["scripts/checks.mjs", "doc"], {
+    env: { ...process.env, RUSTDOCFLAGS: "-D warnings --document-private-items" },
+  });
+  const output = result.stdout + result.stderr;
+  assert.notEqual(result.status, 0, "the doc check dropped the RUSTDOCFLAGS it was given");
+  assert.match(output, /unresolved link/);
+});
+
 test("pre-commit rejects an unformatted json! body in the root workspace", (t) => {
   const root = fixture(t);
   const body = 'pub fn value() -> u32 {\n    let v = json!({"a":1});\n    1\n}\n';

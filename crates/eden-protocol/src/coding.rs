@@ -95,7 +95,9 @@ pub struct ContextInput {
     /// The tool schemas to advertise. `None` asks the context role to publish its own.
     #[serde(default)]
     pub tools: Option<Vec<ToolDefinition>>,
-    /// `""`, `"compact"` or `"summarize"`; an unknown value is a producer bug.
+    /// `""` or `"project"` for a normal projection, `"compact"` for compaction,
+    /// and `"branch_summary"` to carry work across a branch change. A producer
+    /// that sends anything else is refused by the context role.
     #[serde(default)]
     pub action: String,
     #[serde(default)]
@@ -177,7 +179,9 @@ pub struct ToolResult {
     pub error: Option<Fault>,
 }
 /// One public history node: its identity, its place in the branch, and the
-/// payload of its kind. A record is written once and never rewritten.
+/// payload of its kind. A record is written once and never rewritten — but a
+/// copy renumbers its records, so a sequence is this file's ordering rather
+/// than a value that survives being copied elsewhere.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Record {
     /// The node this one descends from; absent only on a session's first node.
@@ -192,7 +196,8 @@ pub struct Record {
     // Its name and type are the whole meaning; see docs/development-checks.md#doc-comments.
     #[allow(missing_docs)]
     pub session_id: u64,
-    // Its name and type are the whole meaning; see docs/development-checks.md#doc-comments.
+    // A 1-based position within its session, renumbered by a copy; see the
+    // item's own note.
     #[allow(missing_docs)]
     pub sequence: u64,
     // Its name and type are the whole meaning; see docs/development-checks.md#doc-comments.
@@ -256,6 +261,8 @@ pub struct StoreReply {
     #[serde(default = "main_branch")]
     pub active_branch: String,
     pub session_id: u64,
+    /// The committed record count after this reply — the new cursor, not the
+    /// last record's number and not the size of one append.
     pub sequence: u64,
     pub records: Vec<Record>,
 }

@@ -30,25 +30,41 @@ pub enum CopyKind {
 /// selected [`CopyKind`] supports it.
 #[derive(Clone, Debug)]
 pub struct CopyOptions {
+    /// The history file to read. It is never modified.
     pub source: PathBuf,
+    /// The file to create; an existing destination is refused.
     pub destination: PathBuf,
+    /// Which copy or conversion this operation performs.
     pub kind: CopyKind,
+    /// The node to copy from, for the kinds that copy an ancestry.
     pub target: Option<u64>,
+    /// The directory the copy records, for a relocation.
     pub cwd: Option<PathBuf>,
+    /// Omit installation-private records, leaving public history only.
     pub public_only: bool,
 }
 /// Preview is bound to the exact source bytes. Applying a stale preview fails.
 #[derive(Clone, Debug, Serialize)]
 pub struct CopyPlan {
+    /// The exact source this preview was computed from.
     pub source: PathBuf,
+    /// The file the reviewed plan would create.
     pub destination: PathBuf,
+    /// Which copy or conversion this preview describes.
     pub kind: CopyKind,
+    /// The identity the source records carry.
     pub source_session: u64,
+    /// The fresh identity the copy will carry.
     pub new_session: u64,
+    /// The source's committed head when the preview was taken.
     pub source_sequence: u64,
+    /// The node the copy departs from, when the kind selects one.
     pub selected_node: Option<u64>,
+    /// The directory the copy will record as its own.
     pub cwd: String,
+    /// What the copy keeps, for a reviewer to read before applying.
     pub preserved: Vec<String>,
+    /// What the copy drops or cannot convert.
     pub losses: Vec<String>,
     #[serde(skip)]
     pub(crate) bytes: Vec<u8>,

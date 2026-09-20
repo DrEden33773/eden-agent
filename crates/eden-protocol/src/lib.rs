@@ -18,6 +18,8 @@ pub const INSTANCE_STOP: &str = "eden.instance-stop.v1";
 
 /// Structured failure with its owning source.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+// Field and variant names state the payload; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct Fault {
     pub code: String,
     pub source: String,
@@ -43,6 +45,8 @@ impl std::error::Error for Fault {}
 /// Root outcome, fixed before cleanup starts.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "status", content = "value", rename_all = "snake_case")]
+// Field and variant names state the payload; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub enum Outcome {
     Completed(Value),
     Failed(Fault),
@@ -50,6 +54,8 @@ pub enum Outcome {
 }
 /// One operation's result after registered cleanup completes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+// Field and variant names state the payload; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct Terminal {
     pub outcome: Outcome,
     pub cleanup_errors: Vec<Fault>,
@@ -80,6 +86,8 @@ impl Terminal {
 
 /// Every invocation belongs to a host-assigned session and run.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+// Field and variant names state the payload; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct Request {
     pub session_id: u64,
     pub run_id: u64,
@@ -88,6 +96,8 @@ pub struct Request {
 }
 /// Ordered, inspectable session event.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+// Field and variant names state the payload; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct Event {
     pub sequence: u64,
     pub session_id: u64,
@@ -97,6 +107,8 @@ pub struct Event {
 }
 /// Metadata returned by a library and matched against its installation manifest.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+// Field and variant names state the payload; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct Descriptor {
     pub package: String,
     pub version: String,
@@ -104,6 +116,8 @@ pub struct Descriptor {
 }
 /// One explicitly enabled local package.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+// Field and variant names state the payload; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct PackageManifest {
     pub descriptor: Descriptor,
     pub host: String,
@@ -118,17 +132,23 @@ pub struct PackageManifest {
 }
 /// Resolved local composition. Paths are relative to this file, never caller cwd.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+// Field and variant names state the payload; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct Composition {
     pub packages: Vec<PackageManifest>,
     pub roles: std::collections::BTreeMap<String, String>,
 }
 /// Input to the loop and context strategy.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+// Field and variant names state the payload; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct RunInput {
     pub prompt: String,
 }
 /// Model-visible context and prior tool results.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+// Field and variant names state the payload; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct ModelInput {
     pub text: String,
     pub tool_result: Option<String>,
@@ -136,6 +156,8 @@ pub struct ModelInput {
 /// Controlled provider response.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "text", rename_all = "snake_case")]
+// Field and variant names state the payload; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub enum ModelReply {
     ToolCall(String),
     Answer(String),

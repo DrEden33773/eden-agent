@@ -44,7 +44,10 @@ pub struct Session(Arc<Inner>);
 /// Explicit session resources. `history: None` is memory-only.
 #[derive(Clone, Debug)]
 pub struct SessionOptions {
+    /// The directory the session runs in and resolves relative paths against.
     pub cwd: std::path::PathBuf,
+    /// The history file to open or create; `None` keeps the session in memory
+    /// and writes no file on any exit path.
     pub history: Option<std::path::PathBuf>,
 }
 impl Session {

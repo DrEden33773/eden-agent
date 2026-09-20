@@ -137,6 +137,7 @@ pub struct Cli {
     #[arg(value_name = "PROMPT")]
     pub prompt: Option<String>,
     #[command(subcommand)]
+    /// The command family to run; without one the positional prompt runs.
     pub family: Option<Family>,
 }
 
@@ -146,11 +147,13 @@ pub enum Family {
     /// Inspect or change saved project trust
     Trust {
         #[command(subcommand)]
+        /// Which trust change to make.
         action: TrustAction,
     },
     /// Print the resources a session would load
     Resources {
         #[command(subcommand)]
+        /// The resources action; listing is the default.
         action: Option<ResourcesAction>,
     },
     /// List the commands installed packages contribute
@@ -166,11 +169,13 @@ pub enum Family {
     /// Install, list, remove or resolve native packages
     Package {
         #[command(subcommand)]
+        /// Which package operation to perform.
         action: PackageAction,
     },
     /// Inspect or export a stored history file
     History {
         #[command(subcommand)]
+        /// Which history operation to perform.
         action: HistoryAction,
     },
     /// Inspect or change a stored session
@@ -183,6 +188,7 @@ pub enum Family {
     )]
     Session {
         #[command(subcommand)]
+        /// Which session operation to perform.
         action: SessionAction,
     },
 }
@@ -386,31 +392,37 @@ pub enum SessionAction {
     },
     /// Preview or create an independent copy that keeps the whole tree
     Fork {
+        /// The source, destination and options shared by every copy action.
         #[command(flatten)]
         copy: CopyArgs,
     },
     /// Preview or create an independent copy that keeps the whole tree
     Clone {
+        /// The source, destination and options shared by every copy action.
         #[command(flatten)]
         copy: CopyArgs,
     },
     /// Preview or create a copy from an outside history file
     Import {
+        /// The source, destination and options shared by every copy action.
         #[command(flatten)]
         copy: CopyArgs,
     },
     /// Preview or create a copy upgraded to the current schema
     Upgrade {
+        /// The source, destination and options shared by every copy action.
         #[command(flatten)]
         copy: CopyArgs,
     },
     /// Preview or create a copy recovered from a damaged tail
     Recover {
+        /// The source, destination and options shared by every copy action.
         #[command(flatten)]
         copy: CopyArgs,
     },
     /// Preview or create a copy migrated to the current layout
     Migrate {
+        /// The source, destination and options shared by every copy action.
         #[command(flatten)]
         copy: CopyArgs,
     },

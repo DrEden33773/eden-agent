@@ -13,6 +13,7 @@ use std::{collections::BTreeMap, future::Future, sync::Arc};
 /// An invocation's identity, managed scope and asynchronous service access.
 #[derive(Clone)]
 pub struct CallContext {
+    /// The admission and cleanup owner of this operation.
     pub scope: Scope,
     pub(crate) host: HostApi,
     pub(crate) request: Request,
@@ -144,6 +145,7 @@ fn serialization(error: serde_json::Error) -> Fault {
 
 /// Loop policy owns service ordering and the final result.
 pub trait AgentLoop: Send + Sync + 'static {
+    /// Own the run: choose the order of the other roles and return the result text.
     fn run(
         &self,
         input: RunInput,
@@ -152,6 +154,7 @@ pub trait AgentLoop: Send + Sync + 'static {
 }
 /// Context strategy projects the input seen by the provider.
 pub trait ContextStrategy: Send + Sync + 'static {
+    /// Project the run into the model input this provider will receive.
     fn project(
         &self,
         input: RunInput,
@@ -160,6 +163,7 @@ pub trait ContextStrategy: Send + Sync + 'static {
 }
 /// Provider consumes the context strategy's actual model input.
 pub trait ModelProvider: Send + Sync + 'static {
+    /// Answer one model input, optionally emitting deltas through the context.
     fn generate(
         &self,
         input: ModelInput,
@@ -168,6 +172,7 @@ pub trait ModelProvider: Send + Sync + 'static {
 }
 /// Tool consumes a loop-selected argument and returns its result.
 pub trait Tool: Send + Sync + 'static {
+    /// Execute one loop-selected argument and return its result text.
     fn execute(
         &self,
         input: String,

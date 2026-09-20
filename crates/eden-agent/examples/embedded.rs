@@ -1,3 +1,4 @@
+//! Embedding the library: open a session, submit one prompt and settle it.
 use eden_agent::Session;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

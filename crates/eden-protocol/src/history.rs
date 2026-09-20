@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 /// A validated committed prefix and, if present, the first damage diagnostic.
 /// The original bytes are never changed, and records after damage are never used.
 #[derive(Clone, Debug)]
+// Field and variant names state the payload; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct HistoryScan {
     pub records: Vec<Record>,
     pub diagnostic: Option<String>,

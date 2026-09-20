@@ -204,6 +204,8 @@ pub fn sentinel_present(tokens: &TokenStream) -> Option<String> {
 }
 
 /// A sentinel match expression, e.g. `match __EdenJsonP { .. }`.
+// Fields and variants state themselves; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct SentinelMatch {
     pub prefix: &'static str,
     pub name: String,

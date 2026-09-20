@@ -27,6 +27,9 @@ clap = { version = "4.6.7", features = ["derive", "wrap_help"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
+# See docs/development-checks.md#doc-comments for what has to be documented and
+# what to do with an item that cannot be explained.
+missing_docs = "deny"
 
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "deny"

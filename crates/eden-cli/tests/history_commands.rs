@@ -1,3 +1,6 @@
+//! Tests are outside the doc comment standard; see docs/development-checks.md#doc-comments.
+#![allow(missing_docs)]
+
 use std::process::Command;
 #[test]
 fn independent_history_reads_prefix_without_plugins_or_original_cwd() {

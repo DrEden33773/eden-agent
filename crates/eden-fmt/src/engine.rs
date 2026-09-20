@@ -15,6 +15,8 @@ use std::str::FromStr;
 
 /// rustfmt settings shared by lowering, lifting and the rustfmt call itself.
 #[derive(Clone, Debug)]
+// Fields and variants state themselves; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct Options {
     pub edition: String,
     pub style_edition: String,
@@ -39,6 +41,8 @@ impl Default for Options {
 
 /// Every way formatting one file can fail. A failure never modifies the file.
 #[derive(Debug)]
+// Fields and variants state themselves; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub enum Error {
     Io(std::io::Error),
     Tokens(String),
@@ -771,6 +775,8 @@ pub(crate) fn is_target(call: &MacroCall) -> bool {
 }
 
 /// The mode a set of files is formatted in.
+// Fields and variants state themselves; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub enum Mode {
     Check,
     Write,
@@ -778,6 +784,8 @@ pub enum Mode {
 }
 
 /// Result of formatting a set of files.
+// Fields and variants state themselves; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct Outcome {
     pub changed: Vec<PathBuf>,
     pub failed: Vec<(PathBuf, Error)>,
@@ -846,6 +854,8 @@ pub fn check_source(source: &str) -> Vec<Violation> {
 }
 
 /// What the style rule found in one file.
+// Fields and variants state themselves; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct Violation {
     pub line: usize,
     pub column: usize,

@@ -21,6 +21,8 @@ pub const SEARCH: &str = "eden.search-tool.v1";
 /// directory, whether the project is trusted, and the settings to apply.
 /// Discovery reads the filesystem itself; the host hands over no file contents.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+// Field and variant names state the payload; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct SourceConfig {
     pub cwd: String,
     pub global_dir: String,
@@ -34,6 +36,8 @@ pub struct SourceConfig {
 }
 /// One skill or template a source publishes.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+// Field and variant names state the payload; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct Resource {
     pub name: String,
     pub description: String,
@@ -49,6 +53,8 @@ pub struct Resource {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
+// Field and variant names state the payload; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub enum Level {
     Info,
     Warning,
@@ -57,6 +63,8 @@ pub enum Level {
 
 /// One resource-loading diagnostic with the level its producer chose.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+// Field and variant names state the payload; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct Diagnostic {
     pub level: Level,
     pub message: String,
@@ -81,6 +89,8 @@ impl Diagnostic {
 /// inventories, and every diagnostic raised while loading. `revision` advances
 /// on each reload and is what a later input hook reports it acted on.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+// Field and variant names state the payload; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct Snapshot {
     pub revision: u64,
     pub instructions: String,
@@ -95,6 +105,8 @@ pub struct Snapshot {
 /// from disk, expand template text, or expand one skill by name.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
+// Field and variant names state the payload; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub enum ResourceRequest {
     Snapshot,
     Reload,
@@ -103,23 +115,31 @@ pub enum ResourceRequest {
 }
 /// The snapshot after an operation, plus the text an expansion produced.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+// Field and variant names state the payload; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct ResourceReply {
     pub snapshot: Snapshot,
     pub text: Option<String>,
 }
 /// A request for the tool inventory of one project directory.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+// Field and variant names state the payload; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct CatalogRequest {
     pub cwd: String,
 }
 /// The tools one catalog contributes to the model request.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+// Field and variant names state the payload; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct Catalog {
     pub tools: Vec<ToolDefinition>,
 }
 /// What a before-input hook receives: the submitted content and the resource
 /// revision it is being applied to.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+// Field and variant names state the payload; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct InputHook {
     pub content: Vec<Block>,
     pub resource_revision: u64,
@@ -127,6 +147,8 @@ pub struct InputHook {
 
 /// One contributed command, described well enough for a caller to spell it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+// Field and variant names state the payload; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct CommandDefinition {
     pub name: String,
     pub description: String,
@@ -134,6 +156,8 @@ pub struct CommandDefinition {
 }
 /// One invocation of a contributed command with its JSON arguments.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+// Field and variant names state the payload; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct CommandRequest {
     pub cwd: String,
     pub name: String,
@@ -141,6 +165,8 @@ pub struct CommandRequest {
 }
 /// Every command the installed packages contribute.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+// Field and variant names state the payload; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct CommandCatalog {
     pub commands: Vec<CommandDefinition>,
 }

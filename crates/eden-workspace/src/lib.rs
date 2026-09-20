@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 /// One recorded trust decision: a project root and whether it is trusted. The
 /// nearest recorded ancestor decides, so a nested grant can override a denial.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+// Field names and types state the payload; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct TrustEntry {
     pub root: PathBuf,
     pub trusted: bool,
@@ -17,6 +19,8 @@ pub struct TrustEntry {
 /// What discovery is configured with: the global directory, an explicit trust
 /// answer that outranks the saved one, and settings the caller overrides.
 #[derive(Clone, Debug)]
+// Field names and types state the payload; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct WorkspaceOptions {
     pub global_dir: PathBuf,
     pub project_trust: Option<bool>,
@@ -46,6 +50,8 @@ impl Default for WorkspaceOptions {
 /// raised while resolving them — including the one that says why untrusted
 /// project resources were skipped.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+// Field names and types state the payload; see docs/development-checks.md#doc-comments.
+#[allow(missing_docs)]
 pub struct Workspace {
     pub cwd: PathBuf,
     pub global_dir: PathBuf,

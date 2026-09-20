@@ -54,7 +54,10 @@ pub enum Termination {
 /// failure before the leader started also reports no exit code.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Stop {
+    // The contract above is what a caller has to read; the names state the values.
+    #[allow(missing_docs)]
     pub exit_code: Option<i32>,
+    #[allow(missing_docs)]
     pub termination: Option<Termination>,
 }
 

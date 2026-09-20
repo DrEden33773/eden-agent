@@ -28,7 +28,7 @@ fn main() {
         }
     }
     let parsed = eden_cli::cli::parse(&args, startup.color);
-    let shell = Shell::new(parsed.color);
+    let shell = Shell::new(parsed.color, parsed.cli.quiet, parsed.cli.verbose);
     match start(parsed, &shell) {
         Ok(code) => std::process::exit(code),
         Err(error) => {

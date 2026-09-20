@@ -75,6 +75,12 @@ pub struct Cli {
         value_parser = ["auto", "always", "never"]
     )]
     pub color: String,
+    /// Do not print status, warnings or notes
+    #[arg(long, short, global = true)]
+    pub quiet: bool,
+    /// Print more detail; repeatable
+    #[arg(long, short, global = true, action = clap::ArgAction::Count)]
+    pub verbose: u8,
     /// Continue a saved session instead of submitting a new prompt
     #[arg(long = "continue", requires = "session", conflicts_with = "prompt")]
     pub continue_session: bool,

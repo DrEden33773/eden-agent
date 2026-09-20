@@ -26,6 +26,8 @@ A usage error — an unknown option, a misspelled action, a value a flag does no
 
 stdout always carries machine-readable results. Human-readable text, including resource diagnostics, goes to stderr, so `--json` output stays a clean event stream while the reason a project's resources were ignored remains visible. `--color auto|always|never` chooses whether human-readable output is colored: `auto` colors only a terminal, and `never` removes color even there.
 
+`-q`/`--quiet` suppresses status lines, warnings and notes; it never suppresses an error, because a failure is a result rather than narration. `-v`/`--verbose` is accepted and repeatable, and reserves the channel for detail; nothing emits detail yet. `--json` and `--quiet` answer different questions: the first keeps stdout machine-readable, the second empties the human channel, and `--json --quiet` leaves stderr empty while the same diagnostics stay readable as events.
+
 ## Explicit environment files and DeepSeek
 
 The CLI accepts `--env-file PATH`. Relative paths are resolved against the invoking process cwd, independently of `--cwd`. Only that file is parsed; neither the project nor parent directories are searched. Parsing treats the file as dotenv data and never executes shell commands. The entire file is validated before variables are installed, and this happens before the async runtime or plugins start. Parse diagnostics omit file contents.

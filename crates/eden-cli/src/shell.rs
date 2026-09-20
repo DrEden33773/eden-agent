@@ -14,17 +14,21 @@ use std::fmt::Display;
 #[derive(Clone, Copy, Debug)]
 pub struct Shell {
     color: bool,
+    quiet: bool,
+    verbose: u8,
 }
 
 impl Shell {
     /// Create the outlet for this process.
     ///
-    /// The decision is made once, so a redirected stderr cannot change the
+    /// The decisions are made once, so a redirected stderr cannot change the
     /// shape of the messages half way through a run.
-    pub fn new(choice: ColorChoice) -> Self {
+    pub fn new(choice: ColorChoice, quiet: bool, verbose: u8) -> Self {
         use std::io::IsTerminal;
         Self {
             color: colored(choice, std::io::stderr().is_terminal()),
+            quiet,
+            verbose,
         }
     }
     /// A resource diagnostic, rendered at the level its producer chose.
@@ -48,11 +52,31 @@ impl Shell {
         self.line(style::WARN, "warning:", message);
     }
     /// A failure, whether it ends this process or one operation in it.
+    ///
+    /// Errors are never silenced: `--quiet` asks for less narration, not for a
+    /// failure to disappear.
     pub fn error(&self, message: impl Display) {
-        self.line(style::ERROR, "error:", message);
+        self.paint(style::ERROR, "error:", message);
     }
-    /// One labeled line, with the label colored when this outlet colors.
+    /// Detail that only `--verbose` asks for.
+    ///
+    /// Nothing emits detail yet. The pipe exists so a later message can be
+    /// added without inventing one to fill it.
+    pub fn verbose(&self, message: impl Display) {
+        if self.verbose == 0 || self.quiet {
+            return;
+        }
+        eprintln!("{message}");
+    }
+    /// One labeled line, suppressed by `--quiet`.
     fn line(&self, style: Style, label: &str, detail: impl Display) {
+        if self.quiet {
+            return;
+        }
+        self.paint(style, label, detail);
+    }
+    /// One labeled line, colored when this outlet colors.
+    fn paint(&self, style: Style, label: &str, detail: impl Display) {
         if self.color {
             eprintln!("{}{label}{} {detail}", style.render(), style.render_reset());
         } else {

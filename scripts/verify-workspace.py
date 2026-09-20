@@ -402,6 +402,38 @@ def main() -> None:
         assert reports[0]["payload"]["level"] == "warning", reports[0]
         assert "Untrusted project resources ignored" in reports[0]["payload"]["message"], reports[0]
         results["json_stream_keeps_one_level_diagnostic"] = True
+        # --quiet silences the human channel entirely while the same diagnostic
+        # stays in the event stream: the two switches answer different questions.
+        write(project / ".eden/settings.json", {"plugins": {}})
+        server = Server(lambda _body, _index: (200, complete(answer("UNTRUSTED-QUIET"))))
+        try:
+            quiet = run(
+                [
+                    host,
+                    "--composition",
+                    helpers["configure"](destination, selected, server, "untrusted-quiet"),
+                    "--cwd",
+                    project,
+                    "--global-dir",
+                    global_dir,
+                    "--session",
+                    scratch / "untrusted-quiet.jsonl",
+                    "--json",
+                    "--quiet",
+                    "Reply briefly",
+                ],
+                scratch,
+                check=False,
+            )
+        finally:
+            server.close()
+        (project / ".eden/settings.json").unlink()
+        assert quiet.stderr == "", quiet.stderr
+        quiet_events = [json.loads(line) for line in quiet.stdout.splitlines() if line.strip()]
+        assert [event for event in quiet_events if event["kind"] == "resource_diagnostic"], (
+            quiet.stdout
+        )
+        results["quiet_empties_stderr_and_keeps_the_event"] = True
 
         bad = copy.deepcopy(selected)
         for p in bad["packages"]:

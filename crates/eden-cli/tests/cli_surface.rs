@@ -185,3 +185,45 @@ fn color_always_survives_a_pipe_and_color_never_removes_it() {
     assert_eq!(rejected.status.code(), Some(2), "{}", stderr(&rejected));
     assert!(stderr(&rejected).contains("auto"), "{}", stderr(&rejected));
 }
+
+/// A composition that names no packages: opening it reaches the status line and
+/// then fails in preflight, so one process prints both kinds of message without
+/// needing a native plugin.
+fn bare_run(scratch: &Scratch, extra: &[&str]) -> Output {
+    let composition = scratch.path().join("composition.json");
+    fs::write(&composition, br#"{"packages":[],"roles":{}}"#).unwrap();
+    let session = scratch.path().join("task.jsonl");
+    eden()
+        .current_dir(scratch.path())
+        .args([
+            "--composition",
+            composition.to_str().unwrap(),
+            "--session",
+            session.to_str().unwrap(),
+        ])
+        .args(extra)
+        .arg("prompt")
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn quiet_drops_status_but_never_a_failure() {
+    let scratch = Scratch::new();
+    let plain = stderr(&bare_run(&scratch, &[]));
+    assert!(plain.contains("Session:"), "{plain}");
+    assert!(plain.contains("error:"), "{plain}");
+    let quiet = stderr(&bare_run(&scratch, &["--quiet"]));
+    assert!(!quiet.contains("Session:"), "{quiet}");
+    assert!(quiet.contains("error:"), "{quiet}");
+    // -q is the same request, and --verbose is accepted without inventing output.
+    let short = stderr(&bare_run(&scratch, &["-q"]));
+    assert!(!short.contains("Session:"), "{short}");
+    let verbose = bare_run(&scratch, &["-vv"]);
+    assert_eq!(verbose.status.code(), bare_run(&scratch, &[]).status.code());
+    assert!(
+        stderr(&verbose).contains("Session:"),
+        "{}",
+        stderr(&verbose)
+    );
+}

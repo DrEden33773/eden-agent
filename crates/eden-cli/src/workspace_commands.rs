@@ -46,11 +46,7 @@ pub async fn run(cli: &Cli, shell: &Shell) -> Result<i32> {
         .iter()
         .filter(|event| event.kind == "resource_diagnostic")
     {
-        shell.diagnostic(
-            event.payload["message"]
-                .as_str()
-                .unwrap_or("resource diagnostic"),
-        );
+        shell.diagnostic(&crate::resource_diagnostic(&event.payload));
     }
     let result = async {
         match family {

@@ -392,10 +392,16 @@ def main() -> None:
             for line in streamed.stderr.splitlines()
             if "Untrusted project resources ignored" in line
         ]
-        assert len(diagnostics) == 1, streamed.stderr
+        assert len(diagnostics) == 1 and diagnostics[0].startswith("warning: "), streamed.stderr
         events = [json.loads(line) for line in streamed.stdout.splitlines() if line.strip()]
         assert events and all(event["kind"] for event in events), streamed.stdout
-        results["json_stream_keeps_one_human_diagnostic"] = True
+        # The level is in the data, not only in the rendering, so a --json
+        # consumer reads the same judgement the terminal shows.
+        reports = [event for event in events if event["kind"] == "resource_diagnostic"]
+        assert len(reports) == 1, streamed.stdout
+        assert reports[0]["payload"]["level"] == "warning", reports[0]
+        assert "Untrusted project resources ignored" in reports[0]["payload"]["message"], reports[0]
+        results["json_stream_keeps_one_level_diagnostic"] = True
 
         bad = copy.deepcopy(selected)
         for p in bad["packages"]:

@@ -61,6 +61,25 @@ pub fn prompt_options(cli: &cli::Cli) -> eden_agent::WorkspaceOptions {
     options
 }
 
+/// The structured diagnostic a `resource_diagnostic` event carries.
+///
+/// A payload without a level is still printed: its message becomes a warning
+/// rather than disappearing, so a producer that has not moved to the level
+/// form cannot make a diagnostic invisible.
+pub fn resource_diagnostic(payload: &serde_json::Value) -> eden_protocol::resources::Diagnostic {
+    use eden_protocol::resources::{Diagnostic, Level};
+    if let Ok(diagnostic) = serde_json::from_value::<Diagnostic>(payload.clone()) {
+        return diagnostic;
+    }
+    Diagnostic::new(
+        Level::Warning,
+        payload["message"]
+            .as_str()
+            .unwrap_or("resource diagnostic")
+            .to_owned(),
+    )
+}
+
 /// Comma-separated tool names without the empty entries a trailing comma leaves.
 fn names(values: &[String]) -> Vec<&str> {
     values
@@ -98,11 +117,7 @@ pub async fn wait_for_run(
         .iter()
         .filter(|event| event.kind == "resource_diagnostic")
     {
-        shell.diagnostic(
-            event.payload["message"]
-                .as_str()
-                .unwrap_or("resource diagnostic"),
-        );
+        shell.diagnostic(&resource_diagnostic(&event.payload));
     }
     if !json {
         return Ok(session.wait(run).await?);

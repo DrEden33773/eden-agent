@@ -8,13 +8,16 @@ use std::path::PathBuf;
 
 fn main() {
     let args: Vec<OsString> = std::env::args_os().collect();
-    let environment = match eden_cli::cli::env_file(&args) {
-        Ok(Some(path)) => match eden_cli::environment::read(&path, |key| std::env::var_os(key)) {
+    let startup = match eden_cli::cli::probe(&args) {
+        Ok(startup) => startup,
+        Err(error) => error.exit(),
+    };
+    let environment = match &startup.env_file {
+        Some(path) => match eden_cli::environment::read(path, |key| std::env::var_os(key)) {
             Ok(environment) => environment,
             Err(error) => eden_cli::cli::fail(error),
         },
-        Ok(None) => vec![],
-        Err(error) => error.exit(),
+        None => vec![],
     };
     for (key, value) in environment {
         // SAFETY: This synchronous process entry runs before constructing Tokio
@@ -24,7 +27,7 @@ fn main() {
             std::env::set_var(key, value);
         }
     }
-    let parsed = eden_cli::cli::parse(&args);
+    let parsed = eden_cli::cli::parse(&args, startup.color);
     let shell = Shell::new();
     match start(parsed, &shell) {
         Ok(code) => std::process::exit(code),

@@ -135,7 +135,7 @@ mod tests {
     fn parse(args: &[&str]) -> cli::Parsed {
         let mut line = vec![OsString::from("eden")];
         line.extend(args.iter().map(OsString::from));
-        cli::parse(&line)
+        cli::parse(&line, clap::ColorChoice::Never)
     }
 
     #[test]

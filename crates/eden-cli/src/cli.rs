@@ -5,8 +5,10 @@
 //! reads typed arguments instead of rescanning one shared string vector, so an
 //! option cannot drift between the families that accept it.
 use crate::style;
-use clap::error::ErrorKind;
-use clap::{Arg, ArgMatches, Args, CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap::error::{ContextKind, ContextValue, ErrorKind};
+use clap::{
+    Arg, ArgMatches, Args, ColorChoice, CommandFactory, FromArgMatches, Parser, Subcommand,
+};
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -28,6 +30,8 @@ pub struct Parsed {
     pub cli: Cli,
     /// Raw matches, kept so attachments can be restored to command-line order.
     pub matches: ArgMatches,
+    /// The color choice the command was built with.
+    pub color: ColorChoice,
 }
 
 #[derive(Debug, Parser)]
@@ -62,6 +66,15 @@ pub struct Cli {
     /// Load environment variables from an explicit file
     #[arg(long, global = true, value_name = "PATH")]
     pub env_file: Vec<PathBuf>,
+    /// When to color human-readable output
+    #[arg(
+        long,
+        global = true,
+        value_name = "WHEN",
+        default_value = "auto",
+        value_parser = ["auto", "always", "never"]
+    )]
+    pub color: String,
     /// Continue a saved session instead of submitting a new prompt
     #[arg(long = "continue", requires = "session", conflicts_with = "prompt")]
     pub continue_session: bool,
@@ -394,19 +407,134 @@ pub enum SessionAction {
     },
 }
 
-/// Parse the process arguments, installing any explicit environment file first.
+/// What the probe pass reads before the authoritative parse.
+#[derive(Clone, Debug)]
+pub struct Startup {
+    /// The explicit environment file, if the command line names one.
+    pub env_file: Option<PathBuf>,
+    /// When to color clap's own help, version and usage errors.
+    pub color: ColorChoice,
+}
+
+/// Read the arguments that have to take effect before the authoritative parse.
 ///
 /// `--env-file` is deliberately not an ordinary option: its values are
-/// installed before the authoritative parse, so an unreadable file is reported
-/// instead of any later argument problem. The probe pass is the same command
-/// with errors ignored, which is also what keeps "which option takes a value"
-/// as clap's knowledge rather than a second hand-written list.
-pub fn parse(args: &[OsString]) -> Parsed {
-    let matches = Cli::command()
-        .try_get_matches_from(args)
-        .unwrap_or_else(|error| error.exit());
+/// installed before the parse, so a file that cannot be read is reported
+/// instead of any later argument problem. `--color` has to be known before the
+/// command is built, because clap renders its own help and usage errors with
+/// the choice the command carries. The probe is the same command with errors
+/// ignored, which is also what keeps "which option takes a value" as clap's
+/// knowledge rather than a second hand-written list.
+pub fn probe(args: &[OsString]) -> Result<Startup, clap::Error> {
+    let matches = probe_command().try_get_matches_from(args)?;
+    let mut files = matches
+        .get_many::<PathBuf>("env_file")
+        .into_iter()
+        .flatten()
+        .cloned();
+    let env_file = files.next();
+    if files.next().is_some() {
+        return Err(Cli::command().error(
+            ErrorKind::TooManyValues,
+            "the argument '--env-file <PATH>' cannot be used multiple times",
+        ));
+    }
+    let color = match matches.get_one::<String>("color").map(String::as_str) {
+        Some("always") => ColorChoice::Always,
+        Some("never") => ColorChoice::Never,
+        _ => ColorChoice::Auto,
+    };
+    Ok(Startup { env_file, color })
+}
+
+/// Parse the process arguments, or print clap's help, version or usage error.
+pub fn parse(args: &[OsString], color: ColorChoice) -> Parsed {
+    let command = Cli::command().color(color);
+    let matches = match command.try_get_matches_from(args) {
+        Ok(matches) => matches,
+        Err(error) => subcommand_hint(args, color, error).exit(),
+    };
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
-    Parsed { cli, matches }
+    Parsed {
+        cli,
+        matches,
+        color,
+    }
+}
+
+/// The family names the root command accepts.
+const FAMILIES: [&str; 7] = [
+    "trust",
+    "resources",
+    "commands",
+    "command",
+    "package",
+    "history",
+    "session",
+];
+
+/// Offer the closest family when the first word is a near miss for one.
+///
+/// clap cannot suggest this on its own: the root also has a `PROMPT`
+/// positional, so a misspelled family is consumed as that positional and the
+/// failure surfaces as a conflicting second argument instead. The word is read
+/// back from the probe pass, and the hint only replaces an error that is
+/// already an error, so no accepted command changes behaviour.
+fn subcommand_hint(args: &[OsString], color: ColorChoice, error: clap::Error) -> clap::Error {
+    if error.kind() == ErrorKind::InvalidSubcommand {
+        return error;
+    }
+    let Ok(matches) = probe_command().color(color).try_get_matches_from(args) else {
+        return error;
+    };
+    let Some(word) = matches.get_one::<String>("prompt") else {
+        return error;
+    };
+    let candidate = FAMILIES
+        .iter()
+        .copied()
+        .filter(|family| *family != word.as_str())
+        .map(|family| (distance(word, family), family))
+        .filter(|(distance, _)| *distance <= 3)
+        .min_by_key(|(distance, _)| *distance);
+    let Some((_, closest)) = candidate else {
+        return error;
+    };
+    // Build the error the way clap builds its own subcommand error: no message
+    // of its own, only the contexts its formatter renders, so the suggestion
+    // and the usage line come out in the usual shape.
+    let mut command = Cli::command();
+    let usage = command.render_usage();
+    let mut hinted = clap::Error::new(ErrorKind::InvalidSubcommand).with_cmd(&command);
+    hinted.insert(
+        ContextKind::InvalidSubcommand,
+        ContextValue::String(word.clone()),
+    );
+    hinted.insert(
+        ContextKind::SuggestedSubcommand,
+        ContextValue::Strings(vec![closest.to_owned()]),
+    );
+    hinted.insert(ContextKind::Usage, ContextValue::StyledStr(usage));
+    hinted
+}
+
+/// Levenshtein distance, used only to decide whether a word is a near miss.
+fn distance(left: &str, right: &str) -> usize {
+    let right: Vec<char> = right.chars().collect();
+    let mut previous: Vec<usize> = (0..=right.len()).collect();
+    for (row, character) in left.chars().enumerate() {
+        let mut current = vec![row + 1];
+        for (column, other) in right.iter().enumerate() {
+            let substitute = previous[column] + usize::from(character != *other);
+            current.push(
+                substitute
+                    .min(previous[column + 1] + 1)
+                    .min(current[column] + 1),
+            );
+        }
+        previous = current;
+    }
+    previous[right.len()]
 }
 
 /// The probe command: the real tree with every non-parse outcome neutralized.
@@ -436,27 +564,6 @@ fn probe_command() -> clap::Command {
                 .global(true)
                 .hide(true),
         )
-}
-
-/// The one explicit environment file, if the command line names it.
-///
-/// The probe ignores parse errors, so a file that cannot be read is still
-/// reported before the authoritative parse and before any display request.
-pub fn env_file(args: &[OsString]) -> Result<Option<PathBuf>, clap::Error> {
-    let matches = probe_command().try_get_matches_from(args)?;
-    let mut files = matches
-        .get_many::<PathBuf>("env_file")
-        .into_iter()
-        .flatten()
-        .cloned();
-    let selected = files.next();
-    if files.next().is_some() {
-        return Err(Cli::command().error(
-            ErrorKind::TooManyValues,
-            "the argument '--env-file <PATH>' cannot be used multiple times",
-        ));
-    }
-    Ok(selected)
 }
 
 /// Report a startup failure in clap's own usage-error shape and exit.
@@ -506,29 +613,51 @@ mod tests {
         line
     }
 
-    fn probe(args: &[&str]) -> Option<PathBuf> {
-        env_file(&command_line(args)).unwrap()
+    fn env_file(args: &[&str]) -> Option<PathBuf> {
+        startup(args).env_file
+    }
+
+    fn startup(args: &[&str]) -> Startup {
+        probe(&command_line(args)).unwrap()
     }
 
     #[test]
     fn a_value_that_looks_like_an_option_is_not_the_environment_file() {
         assert_eq!(
-            probe(&["--env-file", "a.env", "--version"]),
+            env_file(&["--env-file", "a.env", "--version"]),
             Some("a.env".into())
         );
         // `--env-file` here is the value of `--cwd`, which only clap's own
         // knowledge of which options take a value can tell.
-        assert_eq!(probe(&["--cwd", "--env-file", "--version"]), None);
-        assert_eq!(probe(&["--version"]), None);
+        assert_eq!(env_file(&["--cwd", "--env-file", "--version"]), None);
+        assert_eq!(env_file(&["--version"]), None);
     }
 
     #[test]
     fn a_repeated_environment_file_is_rejected() {
-        assert!(env_file(&command_line(&["--env-file", "a", "--env-file", "b"])).is_err());
+        assert!(probe(&command_line(&["--env-file", "a", "--env-file", "b"])).is_err());
     }
 
     #[test]
     fn a_missing_environment_file_value_is_not_a_parse_failure_for_the_probe() {
-        assert_eq!(probe(&["--env-file"]), None);
+        assert_eq!(env_file(&["--env-file"]), None);
+    }
+
+    #[test]
+    fn the_color_choice_comes_from_the_probe() {
+        let choices = ["auto", "always", "never"].map(|when| {
+            let color = startup(&["--color", when, "prompt"]).color;
+            (when, color)
+        });
+        assert!(matches!(choices[0].1, ColorChoice::Auto), "{choices:?}");
+        assert!(matches!(choices[1].1, ColorChoice::Always), "{choices:?}");
+        assert!(matches!(choices[2].1, ColorChoice::Never), "{choices:?}");
+    }
+
+    #[test]
+    fn distance_separates_a_near_miss_from_an_unrelated_word() {
+        assert!(distance("resorces", "resources") <= 3);
+        assert!(distance("prompt", "session") > 3);
+        assert_eq!(distance("session", "session"), 0);
     }
 }

@@ -16,6 +16,29 @@ async fn connection(listener: &TcpListener, expected: &str) -> Result<BufReader<
     assert_eq!(line.trim(), expected);
     Ok(stream)
 }
+async fn root_and_child(streams: [TcpStream; 2]) -> Result<[BufReader<TcpStream>; 2], Error> {
+    // The greeting identifies ownership; listener arrival order is not a lifecycle barrier.
+    let mut root = None;
+    let mut child = None;
+    for stream in streams {
+        let mut stream = BufReader::new(stream);
+        let mut line = String::new();
+        stream.read_line(&mut line).await?;
+        let slot = match line.trim() {
+            "root" => &mut root,
+            "child" => &mut child,
+            identity => return Err(format!("unexpected lifecycle identity: {identity:?}").into()),
+        };
+        if slot.is_some() {
+            return Err(format!("duplicate lifecycle identity: {:?}", line.trim()).into());
+        }
+        *slot = Some(stream);
+    }
+    Ok([
+        root.ok_or("root connection missing")?,
+        child.ok_or("child connection missing")?,
+    ])
+}
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     let args: Vec<_> = std::env::args().collect();
@@ -48,8 +71,8 @@ async fn probe(path: &Path, mode: &str) -> Result<(), Error> {
     let role = session.role(AGENT_LOOP)?;
     let run = session.submit("hello")?;
     assert!(session.submit("overlap").is_err());
-    let mut root = connection(&listener, "root").await?;
-    let mut child = connection(&listener, "child").await?;
+    let streams = [listener.accept().await?.0, listener.accept().await?.0];
+    let [mut root, mut child] = root_and_child(streams).await?;
     let mut sequence = 0;
     loop {
         let events = session.events_after(sequence).await;
@@ -182,4 +205,58 @@ async fn probe(path: &Path, mode: &str) -> Result<(), Error> {
         })
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn pair(first: &str, second: &str) -> [TcpStream; 2] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut first_client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let first_stream = listener.accept().await.unwrap().0;
+        first_client.write_all(first.as_bytes()).await.unwrap();
+        let mut second_client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let second_stream = listener.accept().await.unwrap().0;
+        second_client.write_all(second.as_bytes()).await.unwrap();
+        [first_stream, second_stream]
+    }
+
+    #[tokio::test]
+    async fn matches_both_arrival_orders_and_preserves_following_bytes() {
+        for greetings in [
+            ["root\nR", "child\nchild-stopping\n"],
+            ["child\nchild-stopping\n", "root\nR"],
+        ] {
+            let [mut root, mut child] = root_and_child(pair(greetings[0], greetings[1]).await)
+                .await
+                .unwrap();
+            let mut byte = [0];
+            root.read_exact(&mut byte).await.unwrap();
+            assert_eq!(byte, *b"R");
+            let mut line = String::new();
+            child.read_line(&mut line).await.unwrap();
+            assert_eq!(line, "child-stopping\n");
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_duplicate_and_unknown_identities() {
+        for greetings in [
+            ["root\n", "root\n"],
+            ["child\n", "child\n"],
+            ["unknown\n", "child\n"],
+            ["root\n", "unknown\n"],
+        ] {
+            assert!(
+                root_and_child(pair(greetings[0], greetings[1]).await)
+                    .await
+                    .is_err()
+            );
+        }
+    }
 }

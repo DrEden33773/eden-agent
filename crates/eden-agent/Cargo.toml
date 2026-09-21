@@ -16,3 +16,7 @@ serde.workspace = true
 tokio.workspace = true
 [lints]
 workspace = true
+
+[[example]]
+name = "contract_probe"
+test = true

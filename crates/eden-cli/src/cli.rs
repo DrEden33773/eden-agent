@@ -150,6 +150,12 @@ pub struct Cli {
 /// The command families `eden` accepts.
 #[derive(Debug, Subcommand)]
 pub enum Family {
+    /// Inspect and manage a llama.cpp router
+    Router {
+        #[command(subcommand)]
+        /// Remote lifecycle operation.
+        action: RouterAction,
+    },
     /// Discover, select and refresh models
     Models {
         #[command(subcommand)]
@@ -825,4 +831,29 @@ mod tests {
         assert!(distance("prompt", "session") > 3);
         assert_eq!(distance("session", "session"), 0);
     }
+}
+
+/// Remote mutations wait for completion; Ctrl-C requests remote stop before exiting.
+#[derive(Debug, Subcommand)]
+#[allow(missing_docs)]
+pub enum RouterAction {
+    List,
+    Reconnect,
+    Search {
+        query: String,
+    },
+    Download {
+        model: String,
+    },
+    Load {
+        model: String,
+        #[arg(long)]
+        unload_others: bool,
+    },
+    Unload {
+        model: String,
+    },
+    Cancel {
+        model: String,
+    },
 }

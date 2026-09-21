@@ -4,7 +4,7 @@
 //! Messages, Gemini, Vertex, Bedrock, Azure Responses, native Mistral Chat, Codex,
 //! Copilot and Radius pi-messages; the
 //! legacy configuration retains OpenAI and DeepSeek Responses access.
-//! Catalog and credential services are independently replaceable. Each catalog-selected
+//! Catalog, credential and router-management services are independently replaceable. Each catalog-selected
 //! inference call consumes a frozen model target and obtains credentials through the private
 //! credential service, keeping secrets out of model targets and persisted history.
 //! HTTP clients, request bodies and streaming decoders live in the call future;
@@ -34,6 +34,7 @@ mod mistral;
 mod oauth;
 mod pi_messages;
 mod projection;
+mod router;
 mod routes;
 mod subscription;
 mod targeted;
@@ -178,6 +179,7 @@ fn descriptor() -> Descriptor {
         version: "0.1.0".into(),
         provides: vec![
             eden_protocol::models::MODEL_CATALOG.into(),
+            eden_protocol::models::MODEL_MANAGER.into(),
             eden_protocol::models::CREDENTIAL_SOURCE.into(),
             eden_protocol::models::AUTH.into(),
             MODEL_INFO.into(),
@@ -187,7 +189,10 @@ fn descriptor() -> Descriptor {
 }
 fn create(config: Value) -> Result<Package, Fault> {
     let package = credentials::register(
-        catalog::register(Package::new("model-access"), &config)?,
+        router::register(
+            catalog::register(Package::new("model-access"), &config)?,
+            &config,
+        )?,
         &config,
     )?;
     let config: Config = serde_json::from_value(if config.is_null() {

@@ -293,6 +293,49 @@ enum Persist {
     Cache(String),
 }
 impl Catalog {
+    fn apply_provider_override(
+        &self,
+        target: &mut ModelTarget,
+        provider: &str,
+    ) -> Result<(), Fault> {
+        if let Some(overrides) = self.config.providers.get(provider) {
+            if let Some(base_url) = &overrides.base_url {
+                validate_source(base_url)?;
+                target.base_url = base_url.clone();
+                if !target.compat.is_object() {
+                    target.compat = serde_json::json!({});
+                }
+                target.compat["endpointExplicit"] = serde_json::json!(true);
+            }
+            if let Some(api) = &overrides.api {
+                target.api = api.clone();
+            }
+            if let Some(headers) = &overrides.headers {
+                if headers.keys().any(|k| private_header(k)) {
+                    return Err(fault(
+                        "authentication headers belong in private credentials configuration",
+                    ));
+                }
+                target.headers.extend(headers.clone());
+            }
+            if let Some(compat) = &overrides.compat {
+                if !target.compat.is_object() {
+                    target.compat = serde_json::json!({});
+                }
+                if let Some(fields) = compat.as_object() {
+                    for (key, value) in fields {
+                        target.compat[key] = value.clone();
+                    }
+                }
+            }
+            target.source = CatalogSource {
+                kind: "explicit".into(),
+                location: "configuration".into(),
+                updated_at: None,
+            };
+        }
+        Ok(())
+    }
     async fn persist(&self, inner: &mut Inner, update: Persist) -> Result<(), Fault> {
         use std::io::Write;
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -431,42 +474,7 @@ impl Catalog {
             }
         }
         for ((provider, _), (target, _)) in &mut models {
-            if let Some(overrides) = self.config.providers.get(provider) {
-                if let Some(base_url) = &overrides.base_url {
-                    validate_source(base_url)?;
-                    target.base_url = base_url.clone();
-                    if !target.compat.is_object() {
-                        target.compat = serde_json::json!({});
-                    }
-                    target.compat["endpointExplicit"] = serde_json::json!(true);
-                }
-                if let Some(api) = &overrides.api {
-                    target.api = api.clone();
-                }
-                if let Some(headers) = &overrides.headers {
-                    if headers.keys().any(|k| private_header(k)) {
-                        return Err(fault(
-                            "authentication headers belong in private credentials configuration",
-                        ));
-                    }
-                    target.headers.extend(headers.clone());
-                }
-                if let Some(compat) = &overrides.compat {
-                    if !target.compat.is_object() {
-                        target.compat = serde_json::json!({});
-                    }
-                    if let Some(fields) = compat.as_object() {
-                        for (key, value) in fields {
-                            target.compat[key] = value.clone();
-                        }
-                    }
-                }
-                target.source = CatalogSource {
-                    kind: "explicit".into(),
-                    location: "configuration".into(),
-                    updated_at: None,
-                };
-            }
+            self.apply_provider_override(target, provider)?;
         }
         for t in &self.config.models {
             validate_target(t)?;
@@ -800,6 +808,17 @@ impl Catalog {
                 crate::subscription::catalog_scope(&credential),
             );
         }
+        let manager: ManagerReply = if self.config.offline {
+            ManagerReply::default()
+        } else {
+            match cx.call(MODEL_MANAGER, &ManagerRequest::List).await {
+                Ok(reply) => reply,
+                Err(_) => ManagerReply {
+                    status: "disconnected".into(),
+                    ..Default::default()
+                },
+            }
+        };
         let mut inner = self.inner.lock().await;
         if let CatalogRequest::SetSource { url } = &request {
             validate_source(url)?;
@@ -883,6 +902,43 @@ impl Catalog {
                 }
                 .into();
             }
+        }
+        // Consume the selected manager role, not an in-process default implementation.
+        // A disconnected manager contributes no stale selectable targets.
+        for mut model in manager.models {
+            if !model.selectable {
+                models.retain(|entry| {
+                    entry.target.provider != model.target.provider
+                        || entry.target.model != model.target.model
+                });
+                continue;
+            }
+            let explicit = models
+                .iter()
+                .find(|e| {
+                    e.target.provider == model.target.provider
+                        && e.target.model == model.target.model
+                        && e.target.source.kind == "explicit"
+                })
+                .map(|e| e.target.clone());
+            let provider = model.target.provider.clone();
+            self.apply_provider_override(&mut model.target, &provider)?;
+            if let Some(explicit) = explicit {
+                model.target = explicit;
+            }
+            validate_target(&model.target)?;
+            let excluded = self.config.allowed_models.as_ref().is_some_and(|allowed| {
+                !allowed.contains(&format!("{}/{}", model.target.provider, model.target.model))
+            });
+            auth.insert(model.target.provider.clone(), true);
+            models.retain(|e| {
+                e.target.provider != model.target.provider || e.target.model != model.target.model
+            });
+            models.push(CatalogEntry {
+                name: model.id,
+                target: model.target,
+                status: if excluded { "excluded" } else { "configured" }.into(),
+            });
         }
         let selection = match &request {
             CatalogRequest::Resolve { selection } => selection

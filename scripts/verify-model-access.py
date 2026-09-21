@@ -21,6 +21,7 @@ from verification import author_artifact, installed, prepare
 
 CATALOG = "eden.model-catalog.v1"
 CREDENTIALS = "eden.credential-source.v1"
+MANAGER = "eden.model-manager.v1"
 PROVIDER = "eden.coding-provider.v1"
 SECRET = "G1-PRIVATE-CANARY-stdin-key"
 AUTHOR_SECRET = "G1-PRIVATE-CANARY-independent-key"
@@ -360,7 +361,7 @@ def main() -> None:
     shutil.copy2(author_artifact("model-services"), folder / lib)
     author = package(
         "model-services",
-        [PROVIDER, CATALOG, CREDENTIALS],
+        [PROVIDER, CATALOG, MANAGER, CREDENTIALS],
         f"plugins/model-services/0.1.0/{lib}",
         target(),
     )

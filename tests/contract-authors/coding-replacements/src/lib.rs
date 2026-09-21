@@ -335,6 +335,9 @@ async fn tool(input: ToolRequest, _: CallContext) -> Result<ToolResult, Fault> {
     let path = std::path::Path::new(&input.cwd).join("author-tool-effect.txt");
     std::fs::write(path, format!("{}:{}", input.name, input.call_id)).map_err(fault)?;
     Ok(ToolResult {
+        content: vec![],
+        details: serde_json::Value::Null,
+        artifacts: vec![],
         text: "INDEPENDENT_TOOL_RESULT".into(),
         exit_code: Some(0),
         truncated: false,

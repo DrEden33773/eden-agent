@@ -59,6 +59,10 @@ async fn main() -> Result<()> {
                 ("follow_up", "follow-one"),
                 ("follow_up", "follow-two"),
             ]
+        } else if mode == "during" {
+            vec![("steering", "steer-one"), ("follow_up", "follow-one")]
+        } else if mode == "cancel_resource" {
+            vec![("steering", "/queued sample")]
         } else {
             vec![("steering", "queued-causal-input")]
         } {
@@ -77,7 +81,10 @@ async fn main() -> Result<()> {
     } else {
         session.submit("context probe")?
     };
-    if matches!(mode, "cancel_pre" | "cancel_post" | "compact_cancel") {
+    if matches!(
+        mode,
+        "cancel_pre" | "cancel_post" | "cancel_resource" | "compact_cancel" | "during"
+    ) {
         let expected = if mode != "cancel_post" {
             "gate-0"
         } else {
@@ -115,7 +122,19 @@ async fn main() -> Result<()> {
                     .any(|r| r.kind == "queue_consumed" && r.payload["id"] == ids[0])
             );
         }
-        session.cancel(run)?;
+        if mode == "during" {
+            for (kind, text) in [("steering", "steer-two"), ("follow_up", "follow-two")] {
+                ids.push(
+                    session
+                        .enqueue(kind, vec![Block::Text { text: text.into() }])
+                        .await?
+                        .id,
+                );
+            }
+            mark(&args[5], "release").await?;
+        } else {
+            session.cancel(run)?;
+        }
     }
     let terminal =
         tokio::time::timeout(std::time::Duration::from_secs(60), session.wait(run)).await??;
@@ -129,7 +148,7 @@ async fn main() -> Result<()> {
         );
     }
     let pending = session.queued().await?;
-    if mode == "cancel_pre" {
+    if matches!(mode, "cancel_pre" | "cancel_resource") {
         assert_eq!(
             pending.iter().map(|entry| entry.id).collect::<Vec<_>>(),
             ids

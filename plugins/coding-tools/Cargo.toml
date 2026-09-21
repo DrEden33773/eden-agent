@@ -9,8 +9,10 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+base64 = "0.22.1"
 eden-process.workspace = true
 eden-plugin-sdk.workspace = true
+eden-workspace.workspace = true
 serde.workspace = true
 tokio = { workspace = true, features = ["process", "fs"] }
 

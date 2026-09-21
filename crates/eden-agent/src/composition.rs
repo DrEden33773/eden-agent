@@ -29,7 +29,7 @@ pub(crate) fn binding(composition: &eden_protocol::Composition, cwd: &str) -> Re
             }),
         );
     }
-    Ok(json!({
+    let mut binding = json!({
         "cwd": cwd,
         "roles": composition.roles,
         "packages": packages,
@@ -37,8 +37,19 @@ pub(crate) fn binding(composition: &eden_protocol::Composition, cwd: &str) -> Re
             .packages
             .iter()
             .map(|p| &p.library)
+            .chain(composition.resource_packages.iter().map(|p| &p.root))
             .collect::<Vec<_>>(),
-    }))
+    });
+    if !composition.resource_packages.is_empty() {
+        binding["resource_packages"] = json!(
+            composition
+                .resource_packages
+                .iter()
+                .map(|package| json!({ "manifest": package.manifest, "digest": package.digest }))
+                .collect::<Vec<_>>()
+        );
+    }
+    Ok(binding)
 }
 /// Locations support data-only copy reference tracking, but are not package identity.
 pub(crate) fn equivalent(left: &Value, right: &Value) -> bool {
@@ -185,5 +196,49 @@ impl Session {
         self.0.kernel.install(kernel);
         self.0.events.push(run_id, "composition_switched", locked);
         Ok(json!({ "available": true, "composition": path }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resource_bindings_require_same_content_but_allow_package_relocation() {
+        let mut composition: eden_protocol::Composition = serde_json::from_value(json!({
+            "packages": [],
+            "roles": {},
+            "resource_packages": [{
+                "manifest": {
+                    "name": "text",
+                    "version": "1.0.0",
+                    "skills": ["skills"],
+                    "templates": [],
+                },
+                "root": "/old/package",
+                "digest": "locked-content",
+            }],
+        }))
+        .unwrap();
+        let original = binding(&composition, "/project").unwrap();
+        composition.resource_packages[0].root = "/new/package".into();
+        let moved = binding(&composition, "/project").unwrap();
+        assert!(equivalent(&original, &moved));
+        assert_eq!(moved["library_locations"], json!(["/new/package"]));
+        composition.resource_packages[0].digest = "different-content".into();
+        assert!(!equivalent(
+            &original,
+            &binding(&composition, "/project").unwrap()
+        ));
+    }
+
+    #[test]
+    fn legacy_empty_resource_binding_keeps_its_serialized_shape() {
+        let composition = serde_json::from_value(json!({ "packages": [], "roles": {} })).unwrap();
+        let current = binding(&composition, "/project").unwrap();
+        assert!(equivalent(
+            &current,
+            &json!({ "cwd": "/project", "roles": {}, "packages": {}, "library_locations": [] })
+        ));
     }
 }

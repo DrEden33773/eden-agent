@@ -102,6 +102,8 @@ class Server:
                 owner.markers.append({"path": self.path, "requests": len(owner.requests)})
                 self.send_response(200)
                 self.end_headers()
+                if self.path == "/release":
+                    owner.release.set()
 
             def do_POST(self) -> None:
                 try:
@@ -192,6 +194,12 @@ def main() -> None:
     results: dict[str, Any] = {}
     with tempfile.TemporaryDirectory(prefix="eden-context-") as temp:
         scratch = pathlib.Path(temp)
+        os.environ["EDEN_AGENT_DIR"] = str(scratch / "global")
+        (scratch / "global").mkdir()
+        write(
+            scratch / "global/settings.json",
+            {"discover_skills": False, "discover_templates": False},
+        )
         caller = scratch / "unrelated caller 工作目录"
         caller.mkdir()
         project = scratch / "project"
@@ -388,7 +396,7 @@ def main() -> None:
 
         # Seed ordinary complete history, then independently lower the declared window.
         threshold_history = scratch / "threshold.jsonl"
-        server = Server(lambda *_: (200, complete(answer("long context " + "a" * 100000))))
+        server = Server(lambda *_: (200, complete(answer("long context " + "a" * 100000), 60000)))
         try:
             config = configure(destination, composition, server, "threshold-seed")
             task(config, threshold_history, "First long turn")
@@ -407,6 +415,14 @@ def main() -> None:
             assert summary(server.requests[0]) and not summary(server.requests[-1])
             assert "threshold-summary" in json.dumps(server.requests[-1]["input"])
             assert any(r["kind"] == "compaction" for r in records(threshold_history))
+            request_ids = [
+                r["payload"]["request_id"]
+                for r in records(threshold_history)
+                if r["kind"] == "model_request"
+            ]
+            assert len(request_ids) == len(set(request_ids)), (
+                "summary and ordinary requests need distinct durable identities"
+            )
             results["threshold"] = {
                 "configured_window": 50000,
                 "requests": len(server.requests),
@@ -415,12 +431,12 @@ def main() -> None:
         finally:
             server.close()
 
-        for mode in ["overflow", "length", "retry_after_tool", "usage_overflow"]:
+        for mode in ["overflow", "length", "retry_after_tool", "usage_overflow", "usage_reserve"]:
             recovery_history = scratch / f"{mode}.jsonl"
             count_file = project / "execution-count.txt"
             if count_file.exists():
                 count_file.unlink()
-            if mode in ["overflow", "length", "usage_overflow"]:
+            if mode in ["overflow", "length", "usage_overflow", "usage_reserve"]:
                 seed = Server(
                     lambda *_: (
                         200,
@@ -468,12 +484,20 @@ def main() -> None:
                         return 503, {"error": {"code": "server_error"}}
                 return 200, complete(
                     answer("recovery-summary" if summary(body) else "recovered"),
-                    total=1100000 if mode == "usage_overflow" and index == 0 else 15,
+                    total=(900000 if mode == "usage_reserve" else 1100000)
+                    if mode in ["usage_overflow", "usage_reserve"] and index == 0
+                    else 15,
                 )
 
             server = Server(respond)
             try:
-                config = configure(destination, composition, server, mode)
+                config = configure(
+                    destination,
+                    composition,
+                    server,
+                    mode,
+                    window=916000 if mode == "usage_reserve" else 1000000,
+                )
                 data = task(config, recovery_history)
                 durable = records(recovery_history)
                 if mode in ["overflow", "length"]:
@@ -502,8 +526,15 @@ def main() -> None:
             finally:
                 server.close()
 
-        for mode in ["one", "all", "cancel_pre", "cancel_post"]:
+        for mode in ["one", "all", "during", "cancel_pre", "cancel_post", "cancel_resource"]:
             queue_history = scratch / f"queue-{mode}.jsonl"
+            queue_composition = copy.deepcopy(composition)
+            resource_template = scratch / "queued.md"
+            if mode == "cancel_resource":
+                resource_template.write_text("QUEUED-ORIGINAL $1", encoding="utf-8")
+                for package in queue_composition["packages"]:
+                    if package["descriptor"]["package"] == "workspace-resources":
+                        package["config"] = {"template_paths": [str(resource_template)]}
             count_file = project / "execution-count.txt"
             if count_file.exists():
                 count_file.unlink()
@@ -516,10 +547,14 @@ def main() -> None:
                         else answer("queue response")
                     ),
                 ),
-                gate=0 if mode == "cancel_pre" else 1 if mode == "cancel_post" else None,
+                gate=0
+                if mode in ["cancel_pre", "cancel_resource", "during"]
+                else 1
+                if mode == "cancel_post"
+                else None,
             )
             try:
-                config = configure(destination, composition, server, f"queue-{mode}")
+                config = configure(destination, queue_composition, server, f"queue-{mode}")
                 result = json.loads(
                     run(
                         [probe, config, project, queue_history, mode, server.address],
@@ -527,18 +562,29 @@ def main() -> None:
                     ).stdout
                 )
                 durable = records(queue_history)
+                if mode.startswith("cancel_"):
+                    attempts = [r["payload"] for r in durable if r["kind"] == "model_attempt"]
+                    assert len(attempts) == 1
+                    assert attempts[0]["text"] == (
+                        "gate-1" if mode == "cancel_post" else "gate-0"
+                    ), (mode, attempts)
+                    assert attempts[0]["status"] == "cancelled"
+                    assert attempts[0]["request_id"] in {
+                        r["payload"]["request_id"] for r in durable if r["kind"] == "model_request"
+                    }
                 ids = result["ids"]
-                if mode in ["one", "all"]:
-                    assert len(server.requests) == (3 if mode == "one" else 2)
+                if mode in ["one", "all", "during"]:
+                    assert len(server.requests) == (2 if mode == "all" else 4)
                     consumed = [r for r in durable if r["kind"] == "queue_consumed"]
                     assert sorted(r["payload"]["id"] for r in consumed) == sorted(ids)
                     admissions = [
                         r["payload"]["queue_ids"] for r in durable if r["kind"] == "model_request"
                     ]
+                    ordered_ids = [ids[0], ids[2], ids[1], ids[3]] if mode == "during" else ids
                     expected = (
-                        [[ids[0]], [ids[1], ids[2]], [ids[3]]]
-                        if mode == "one"
-                        else [ids[:2], ids[2:]]
+                        [ordered_ids[:2], ordered_ids[2:]]
+                        if mode == "all"
+                        else [[entry] for entry in ordered_ids]
                     )
                     assert [sorted(group) for group in admissions] == [
                         sorted(group) for group in expected
@@ -568,9 +614,20 @@ def main() -> None:
                             "follow-two",
                         ]
                     )
+                    labels = ["steer-one", "steer-two", "follow-one", "follow-two"]
+                    previous = set()
+                    delivered = []
+                    for request in server.requests:
+                        body = json.dumps(request["input"])
+                        seen = {label for label in labels if label in body}
+                        delivered.append([label for label in labels if label in seen - previous])
+                        previous = seen
+                    assert delivered == (
+                        [[label] for label in labels] if mode != "all" else [labels[:2], labels[2:]]
+                    )
                     first_input = json.dumps(server.requests[0]["input"])
                     assert ("steer-two" in first_input) is (mode == "all")
-                elif mode == "cancel_pre":
+                elif mode in ["cancel_pre", "cancel_resource"]:
                     assert len(server.requests) == 1
                     assert not any(
                         r["kind"] in ["queue_consumed", "model_response", "tool_intent"]
@@ -580,6 +637,17 @@ def main() -> None:
                         r["payload"]["id"] for r in durable if r["kind"] == "queue_returned"
                     ]
                     assert returned == ids
+                    if mode == "cancel_resource":
+                        prepared = next(
+                            r["payload"] for r in durable if r["kind"] == "queue_returned"
+                        )
+                        assert prepared["original_content"] == [
+                            {"type": "text", "text": "/queued sample"}
+                        ]
+                        assert "QUEUED-ORIGINAL sample" in json.dumps(prepared["content"])
+                        assert prepared["resource_revision"] == 1
+                        assert "QUEUED-ORIGINAL sample" in json.dumps(server.requests[0]["input"])
+                        resource_template.write_text("QUEUED-CHANGED $1", encoding="utf-8")
                 else:
                     assert len(server.requests) == 2
                     assert count_file.read_text() == "x"
@@ -595,7 +663,7 @@ def main() -> None:
             if mode.startswith("cancel_"):
                 reopened = Server(lambda *_: (200, complete(answer("explicit continuation"))))
                 try:
-                    config = configure(destination, composition, reopened, f"reopen-{mode}")
+                    config = configure(destination, queue_composition, reopened, f"reopen-{mode}")
                     result = json.loads(
                         run(
                             [
@@ -610,9 +678,18 @@ def main() -> None:
                         ).stdout
                     )
                     assert reopened.markers == [{"path": "/opened", "requests": 0}]
-                    assert result["ids"] == (ids if mode == "cancel_pre" else [])
+                    assert result["ids"] == (
+                        ids if mode in ["cancel_pre", "cancel_resource"] else []
+                    )
                     assert len(reopened.requests) == 1
-                    assert "queued-causal-input" in json.dumps(reopened.requests[0]["input"])
+                    resumed_input = json.dumps(reopened.requests[0]["input"])
+                    if mode == "cancel_resource":
+                        assert "QUEUED-ORIGINAL sample" in resumed_input
+                        assert "QUEUED-CHANGED" not in resumed_input
+                    else:
+                        assert "queued-causal-input" in resumed_input
+                    assert "gate-0" not in json.dumps(reopened.requests[0]["input"])
+                    assert "gate-1" not in json.dumps(reopened.requests[0]["input"])
                     if mode == "cancel_post":
                         assert count_file.read_text() == "x"
                         assert sum(r["kind"] == "tool_intent" for r in records(queue_history)) == 1

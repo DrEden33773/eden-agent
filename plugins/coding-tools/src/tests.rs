@@ -1,5 +1,5 @@
 use super::*;
-use eden_plugin_sdk::serde_json::{Value, json};
+use eden_plugin_sdk::serde_json::{self, Value, json};
 use std::{
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
@@ -468,4 +468,366 @@ async fn foreground_exit_waits_for_descendant_that_closed_stdio() {
     assert_eq!(result.exit_code, Some(0));
     assert!(result.error.is_none(), "{result:?}");
     assert_closed_now(socket.into_std().unwrap());
+}
+
+#[test]
+fn skill_resource_uri_uses_frozen_source_and_enforces_tool_selection() {
+    use eden_plugin_sdk::{
+        abi::{Bytes, HostApi, Reply},
+        protocol::{Outcome, Request, Terminal, resources as r},
+        runtime,
+    };
+    use std::sync::mpsc;
+
+    unsafe extern "C" fn receive(context: usize, bytes: Bytes) {
+        // SAFETY: The test retains this sender until the instance is destroyed.
+        let sender = unsafe { &*(context as *const mpsc::Sender<Value>) };
+        // SAFETY: The runtime borrows the serialized reply for this callback.
+        let value = unsafe { bytes.decode::<Value>() }.unwrap();
+        sender.send(value).unwrap();
+    }
+    unsafe extern "C" fn resource(context: usize, bytes: Bytes, reply: Reply) -> u64 {
+        // SAFETY: The test retains immutable source data through instance destruction.
+        let source = unsafe { &*(context as *const r::ResourceReply) };
+        // SAFETY: The SDK owns this request span throughout this synchronous call.
+        let request: Request = unsafe { bytes.decode() }.unwrap();
+        let result = if request.contract == r::SOURCE {
+            let request: r::ResourceRequest = serde_json::from_value(request.payload).unwrap();
+            let mut response = source.clone();
+            if matches!(request, r::ResourceRequest::Snapshot) {
+                response.text = None;
+            }
+            Terminal {
+                outcome: Outcome::Completed(serde_json::to_value(response).unwrap()),
+                cleanup_errors: vec![],
+            }
+        } else {
+            Terminal::failed(fault("UnexpectedService", request.contract))
+        };
+        // SAFETY: The SDK supplied one live completion receiver for this request.
+        unsafe { reply.send(&result) };
+        1
+    }
+    unsafe extern "C" fn cancel(_: usize, _: u64) {}
+    unsafe extern "C" fn event(_: usize, _: Bytes) {}
+
+    let project = Project::new();
+    let disk = project.0.join("SKILL.md");
+    std::fs::write(&disk, "CHANGED DISK BODY").unwrap();
+    let mut source = r::ResourceReply {
+        snapshot: r::Snapshot {
+            revision: 7,
+            skills: vec![r::Resource {
+                name: "frozen".into(),
+                description: "read frozen instructions".into(),
+                path: disk.display().to_string(),
+                model_invocable: true,
+            }],
+            ..Default::default()
+        },
+        text: Some("FROZEN SOURCE BODY".into()),
+    };
+    for (selected, invocable, expected_error) in [
+        (true, true, None),
+        (true, false, Some("InvalidInput")),
+        (false, true, Some("UnknownTool")),
+    ] {
+        source.snapshot.skills[0].model_invocable = invocable;
+        let (sender, receiver) = mpsc::channel::<Value>();
+        let reply = Reply {
+            context: &sender as *const _ as usize,
+            call: receive,
+        };
+        let host = HostApi {
+            context: &source as *const _ as usize,
+            request: resource,
+            cancel,
+            event,
+        };
+        let config = serde_json::to_vec(&json!({
+            "read_only": true,
+            "tools": if selected {
+                    vec!["read"]
+                } else {
+                    vec![]
+                },
+        }))
+        .unwrap();
+        // SAFETY: Configuration, callbacks and source data remain valid until destruction.
+        let instance =
+            unsafe { runtime::create(create, descriptor, host, Bytes::new(&config), reply) };
+        assert_ne!(instance, 0);
+        let request = Request {
+            session_id: 1,
+            run_id: 1,
+            contract: TOOL.into(),
+            payload: serde_json::to_value(
+                project.request("read", json!({ "path": "eden-resource://skill/frozen" })),
+            )
+            .unwrap(),
+        };
+        let bytes = serde_json::to_vec(&request).unwrap();
+        // SAFETY: The instance is live and start borrows request bytes synchronously.
+        let operation = unsafe { runtime::start(instance, Bytes::new(&bytes), reply) };
+        let completed = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
+        // SAFETY: Completion was received; release precedes exclusive destruction.
+        unsafe {
+            runtime::release(instance, operation);
+            runtime::destroy(instance);
+        }
+        let terminal: Terminal = serde_json::from_value(completed).unwrap();
+        match expected_error {
+            Some(code) => assert_eq!(terminal.into_result().unwrap_err().code, code),
+            None => {
+                let result: ToolResult =
+                    serde_json::from_value(terminal.into_result().unwrap()).unwrap();
+                assert_eq!(result.text, "FROZEN SOURCE BODY");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn image_read_returns_self_contained_content() {
+    use eden_plugin_sdk::protocol::coding::Block;
+    let project = Project::new();
+    let bytes = b"\x89PNG\r\n\x1a\nimage payload";
+    std::fs::write(project.0.join("picture.dat"), bytes).unwrap();
+    let result = project.run("read", json!({ "path": "picture.dat" })).await;
+    assert!(result.error.is_none(), "{result:?}");
+    assert!(
+        matches!(&result.content[..], [Block::Image { media_type, data }] if media_type == "image/png" && !data.is_empty())
+    );
+}
+
+#[tokio::test]
+async fn read_continuation_preserves_complete_lines_and_long_unicode_line() {
+    let project = Project::new();
+    let original = format!("first\n{}\nlast\n", "界".repeat(30_000));
+    std::fs::write(project.0.join("text"), &original).unwrap();
+    let first = project
+        .run("read", json!({ "path": "text", "limit": 1 }))
+        .await;
+    assert_eq!(first.text, "first\n");
+    assert_eq!(first.details["next_offset"], 2);
+    let second = project
+        .run("read", json!({ "path": "text", "offset": 2 }))
+        .await;
+    assert_eq!(second.details["next_offset"], 2);
+    assert!(second.details["next_byte_offset"].as_u64().unwrap() > 0);
+    let third = project
+        .run(
+            "read",
+            json!({
+                "path": "text",
+                "offset": second.details["next_offset"],
+                "byte_offset": second.details["next_byte_offset"],
+            }),
+        )
+        .await;
+    assert_eq!(
+        format!("{}{}{}", first.text, second.text, third.text),
+        original
+    );
+    assert_eq!(third.details["complete"], true);
+    let invalid = project
+        .run(
+            "read",
+            json!({ "path": "text", "offset": 2, "byte_offset": 1 }),
+        )
+        .await;
+    assert!(invalid.error.is_some());
+}
+
+#[tokio::test]
+async fn batch_edit_validates_original_and_preserves_bom_crlf() {
+    let project = Project::new();
+    let original = "\u{feff}one\r\ntwo\r\nthree\r\n";
+    std::fs::write(project.0.join("text"), original).unwrap();
+    let bad = project
+        .run(
+            "edit",
+            json!({
+                "path": "text",
+                "edits": [
+                    { "old_text": "one\ntwo", "new_text": "changed" },
+                    { "old_text": "absent", "new_text": "lost" },
+                ],
+            }),
+        )
+        .await;
+    assert!(bad.error.is_some());
+    assert_eq!(
+        std::fs::read_to_string(project.0.join("text")).unwrap(),
+        original
+    );
+    let good = project
+        .run(
+            "edit",
+            json!({
+                "path": "text",
+                "edits": [
+                    { "old_text": "one\ntwo", "new_text": "first\nsecond" },
+                    { "old_text": "three", "new_text": "third" },
+                ],
+            }),
+        )
+        .await;
+    assert!(good.error.is_none(), "{good:?}");
+    assert_eq!(
+        std::fs::read_to_string(project.0.join("text")).unwrap(),
+        "\u{feff}first\r\nsecond\r\nthird\r\n"
+    );
+    assert_eq!(good.details["edits"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn tolerant_edit_is_explicit_and_refuses_ambiguous_normalized_matches() {
+    let project = Project::new();
+    let original = "“hello”—world  \n";
+    std::fs::write(project.0.join("text"), original).unwrap();
+    let args = json!({ "path": "text", "old_text": "\"hello\"-world", "new_text": "done" });
+    assert!(project.run("edit", args.clone()).await.error.is_some());
+    let mut tolerant = args;
+    tolerant["mode"] = json!("tolerant");
+    let result = project.run("edit", tolerant.clone()).await;
+    assert!(result.error.is_none(), "{result:?}");
+    assert_eq!(result.details["mode"], "tolerant");
+    assert_eq!(
+        std::fs::read_to_string(project.0.join("text")).unwrap(),
+        "done\n"
+    );
+    let ambiguous = "“hello”—world\n\"hello\"-world\n";
+    std::fs::write(project.0.join("text"), ambiguous).unwrap();
+    assert!(project.run("edit", tolerant).await.error.is_some());
+    assert_eq!(
+        std::fs::read_to_string(project.0.join("text")).unwrap(),
+        ambiguous
+    );
+}
+
+#[tokio::test]
+async fn overlapping_batch_edits_and_overlapping_matches_leave_file_unchanged() {
+    let project = Project::new();
+    std::fs::write(project.0.join("text"), "abcdef aaa").unwrap();
+    for arguments in [
+        json!({
+            "path": "text",
+            "edits": [
+                { "old_text": "abc", "new_text": "x" },
+                { "old_text": "cde", "new_text": "y" },
+            ],
+        }),
+        json!({ "path": "text", "old_text": "aa", "new_text": "x" }),
+    ] {
+        assert!(project.run("edit", arguments).await.error.is_some());
+        assert_eq!(
+            std::fs::read_to_string(project.0.join("text")).unwrap(),
+            "abcdef aaa"
+        );
+    }
+}
+
+#[tokio::test]
+async fn image_signatures_roundtrip_exact_bytes_and_reject_over_limit() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use eden_plugin_sdk::protocol::coding::Block;
+    let project = Project::new();
+    for (bytes, media_type) in [
+        (b"\xff\xd8\xffJPEG".as_slice(), "image/jpeg"),
+        (b"GIF89aGIF".as_slice(), "image/gif"),
+        (b"RIFF1234WEBPdata".as_slice(), "image/webp"),
+    ] {
+        std::fs::write(project.0.join("image"), bytes).unwrap();
+        let result = project.run("read", json!({ "path": "image" })).await;
+        match &result.content[..] {
+            [
+                Block::Image {
+                    media_type: actual,
+                    data,
+                },
+            ] => {
+                assert_eq!(actual, media_type);
+                assert_eq!(STANDARD.decode(data).unwrap(), bytes);
+            }
+            _ => panic!("missing image content: {result:?}"),
+        }
+    }
+    let mut bytes = b"GIF89a".to_vec();
+    bytes.resize(10 * 1024 * 1024 + 1, 0);
+    std::fs::write(project.0.join("image"), bytes).unwrap();
+    assert!(
+        project
+            .run("read", json!({ "path": "image" }))
+            .await
+            .error
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn read_byte_budget_defers_whole_line_and_empty_file_is_complete() {
+    let project = Project::new();
+    let first_line = format!("{}\n", "a".repeat(40_000));
+    let second_line = format!("{}\n", "b".repeat(40_000));
+    std::fs::write(project.0.join("text"), format!("{first_line}{second_line}")).unwrap();
+    let first = project.run("read", json!({ "path": "text" })).await;
+    assert_eq!(first.text, first_line);
+    assert_eq!(first.details["next_offset"], 2);
+    assert_eq!(first.details["next_byte_offset"], 0);
+    assert_eq!(first.details["partial_line"], false);
+    std::fs::write(project.0.join("text"), "").unwrap();
+    let empty = project.run("read", json!({ "path": "text" })).await;
+    assert_eq!(empty.details["complete"], true);
+    assert_eq!(empty.text, "");
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn bash_path_roundtrip_read_edit_preserves_space_and_unicode_cwd() {
+    let project = Project::new();
+    let cwd = project.0.join("space 目录");
+    std::fs::create_dir(&cwd).unwrap();
+    let result = execute_with_artifacts(
+        ToolRequest {
+            cwd: cwd.to_str().unwrap().into(),
+            call_id: "path".into(),
+            name: "bash".into(),
+            arguments: json!({
+                "command": "printf 'before\n' > '文件.txt'; printf '%s/文件.txt\n' \"$PWD\"",
+            }),
+        },
+        Scope::default(),
+        "bash".into(),
+        project.0.join("artifacts"),
+    )
+    .await
+    .unwrap();
+    assert!(result.error.is_none(), "{result:?}");
+    let stdout = result
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.name == "stdout")
+        .unwrap();
+    let path = std::fs::read_to_string(&stdout.path)
+        .unwrap()
+        .trim()
+        .to_owned();
+    assert!(
+        path.starts_with('/'),
+        "expected Bash drive spelling: {path}"
+    );
+    let read = project.run("read", json!({ "path": path })).await;
+    assert!(read.text.contains("before"), "{read:?}");
+    let edited = project
+        .run(
+            "edit",
+            json!({ "path": path, "old_text": "before", "new_text": "after" }),
+        )
+        .await;
+    assert!(edited.error.is_none(), "{edited:?}");
+    assert_eq!(
+        std::fs::read_to_string(cwd.join("文件.txt")).unwrap(),
+        "after\n"
+    );
 }

@@ -61,6 +61,13 @@ fn create(config: Value) -> Result<Package, Fault> {
 eden_plugin_sdk::export_plugin!(descriptor, create);
 
 fn load(config: &SourceConfig, revision: u64) -> Result<Loaded, Fault> {
+    load_with_home(config, revision, eden_workspace::paths::user_home())
+}
+fn load_with_home(
+    config: &SourceConfig,
+    revision: u64,
+    home: Option<PathBuf>,
+) -> Result<Loaded, Fault> {
     let cwd = Path::new(&config.cwd);
     if !cwd.is_absolute() || !cwd.is_dir() {
         return Err(invalid("resource cwd must be an absolute directory"));
@@ -122,8 +129,16 @@ fn load(config: &SourceConfig, revision: u64) -> Result<Loaded, Fault> {
             }
         }
     }
-    let mut skill_roots: Vec<_> = config.skill_paths.iter().map(PathBuf::from).collect();
-    let mut template_roots: Vec<_> = config.template_paths.iter().map(PathBuf::from).collect();
+    let mut skill_roots: Vec<_> = config
+        .skill_paths
+        .iter()
+        .map(|path| eden_workspace::paths::resolve_path(cwd, Path::new(path)))
+        .collect::<Result<_, _>>()?;
+    let mut template_roots: Vec<_> = config
+        .template_paths
+        .iter()
+        .map(|path| eden_workspace::paths::resolve_path(cwd, Path::new(path)))
+        .collect::<Result<_, _>>()?;
     for (key, roots) in [
         ("skills", &mut skill_roots),
         ("templates", &mut template_roots),
@@ -133,19 +148,39 @@ fn load(config: &SourceConfig, revision: u64) -> Result<Loaded, Fault> {
                 .as_array()
                 .ok_or_else(|| invalid(format!("{key} must be a path array")))?;
             for path in paths {
-                roots.push(
-                    cwd.join(
+                roots.push(eden_workspace::paths::resolve_path(
+                    cwd,
+                    Path::new(
                         path.as_str()
                             .ok_or_else(|| invalid(format!("{key} paths must be strings")))?,
                     ),
-                );
+                )?);
             }
         }
     }
+    eden_workspace::packages::validate_resource_packages(&config.resource_packages)?;
+    for package in &config.resource_packages {
+        skill_roots.extend(
+            package
+                .manifest
+                .skills
+                .iter()
+                .map(|path| Path::new(&package.root).join(path)),
+        );
+        template_roots.extend(
+            package
+                .manifest
+                .templates
+                .iter()
+                .map(|path| Path::new(&package.root).join(path)),
+        );
+    }
+    let required_skills = skill_roots.len();
+    let required_templates = template_roots.len();
     if enabled(&config.settings, "discover_skills")? {
         skill_roots.push(global.join("skills"));
-        // The shared harness directory is a sibling of the application state directory.
-        if let Some(home) = global.parent().and_then(Path::parent) {
+        // A custom application state directory does not move the shared user home.
+        if let Some(home) = home {
             skill_roots.push(home.join(".agents/skills"));
         }
         if config.trusted {
@@ -164,14 +199,28 @@ fn load(config: &SourceConfig, revision: u64) -> Result<Loaded, Fault> {
             template_roots.push(cwd.join(".eden/prompts"));
         }
     }
-    let mut visited = BTreeSet::new();
-    for root in skill_roots {
-        discover(&root, true, true, &mut visited, &mut loaded)?;
+    for (is_skill, roots, required_count, key) in [
+        (true, skill_roots, required_skills, "skill_excludes"),
+        (
+            false,
+            template_roots,
+            required_templates,
+            "template_excludes",
+        ),
+    ] {
+        let excludes = selectors(&config.settings, key)?;
+        let mut visited = BTreeSet::new();
+        for (index, root) in roots.iter().enumerate() {
+            let policy = Discovery {
+                is_skill,
+                required: index < required_count,
+                tolerate: revision == 1,
+                excludes: &excludes,
+            };
+            discover(root, &policy, &mut visited, &mut loaded)?;
+        }
     }
-    visited.clear();
-    for root in template_roots {
-        discover(&root, false, false, &mut visited, &mut loaded)?;
-    }
+
     Ok(loaded)
 }
 fn enabled(settings: &Value, key: &str) -> Result<bool, Fault> {
@@ -192,44 +241,162 @@ fn read_optional(path: &Path) -> Result<Option<String>, Fault> {
 fn file_error(error: std::io::Error) -> Fault {
     Fault::new("FileFailure", "workspace-resources", error.to_string())
 }
-fn discover(
-    path: &Path,
+struct Discovery<'a> {
     is_skill: bool,
-    recursive: bool,
+    required: bool,
+    tolerate: bool,
+    excludes: &'a globset::GlobSet,
+}
+fn selectors(settings: &Value, key: &str) -> Result<globset::GlobSet, Fault> {
+    let mut builder = globset::GlobSetBuilder::new();
+    if let Some(value) = settings.get(key) {
+        for pattern in value
+            .as_array()
+            .ok_or_else(|| invalid(format!("{key} must be an array")))?
+        {
+            builder.add(
+                globset::Glob::new(
+                    pattern
+                        .as_str()
+                        .ok_or_else(|| invalid(format!("{key} entries must be strings")))?,
+                )
+                .map_err(|e| invalid(format!("{key}: {e}")))?,
+            );
+        }
+    }
+    builder.build().map_err(|e| invalid(e.to_string()))
+}
+fn discovery_error(
+    path: &Path,
+    policy: &Discovery<'_>,
+    loaded: &mut Loaded,
+    error: Fault,
+) -> Result<(), Fault> {
+    let error = invalid(format!("{}: {}", path.display(), error.message));
+    if policy.tolerate && !policy.required {
+        loaded
+            .snapshot
+            .diagnostics
+            .push(Diagnostic::warning(error.message));
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+fn discover(
+    root: &Path,
+    policy: &Discovery<'_>,
     visited: &mut BTreeSet<PathBuf>,
     loaded: &mut Loaded,
 ) -> Result<(), Fault> {
-    let canonical = match std::fs::canonicalize(path) {
-        Ok(path) => path,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(file_error(error)),
-    };
-    if !visited.insert(canonical) {
+    if !root.exists() {
+        if policy.required {
+            return Err(invalid(format!(
+                "required resource does not exist: {}",
+                root.display()
+            )));
+        }
         return Ok(());
     }
-    if path.is_dir() {
-        if is_skill && path.join("SKILL.md").is_file() {
-            return discover(&path.join("SKILL.md"), true, false, visited, loaded);
+    let mut walk = ignore::WalkBuilder::new(root);
+    walk.parents(false)
+        .hidden(!policy.required)
+        .require_git(false)
+        .git_global(false)
+        .git_exclude(false)
+        .add_custom_ignore_filename(".fdignore")
+        .follow_links(false)
+        .sort_by_file_path(|a, b| a.cmp(b));
+    if !policy.is_skill {
+        walk.max_depth(Some(1));
+    }
+    let is_skill = policy.is_skill;
+    let owned_root = root.to_owned();
+    let excludes = policy.excludes.clone();
+    walk.filter_entry(move |entry| {
+        if excludes.is_match(entry.path())
+            || excludes.is_match(
+                entry
+                    .path()
+                    .strip_prefix(&owned_root)
+                    .unwrap_or(entry.path()),
+            )
+            || (entry.file_type().is_some_and(|kind| kind.is_dir())
+                && excludes.is_match(Path::new(entry.file_name())))
+        {
+            return false;
         }
-        let mut entries = std::fs::read_dir(path)
-            .map_err(file_error)?
-            .map(|entry| entry.map(|e| e.path()))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(file_error)?;
-        entries.sort();
-        for entry in entries {
-            if recursive || entry.is_file() {
-                discover(&entry, is_skill, recursive, visited, loaded)?;
+        if entry.depth() == 0 {
+            return true;
+        }
+        if entry.file_name() == "node_modules" {
+            return false;
+        }
+        if is_skill {
+            for parent in entry.path().ancestors().skip(1) {
+                if parent.join("SKILL.md").is_file() && entry.path() != parent.join("SKILL.md") {
+                    return false;
+                }
+                if parent == owned_root {
+                    break;
+                }
             }
         }
-        return Ok(());
+        true
+    });
+    for entry in walk.build() {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                discovery_error(root, policy, loaded, invalid(error.to_string()))?;
+                continue;
+            }
+        };
+        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        if path
+            .extension()
+            .is_none_or(|ext| !ext.eq_ignore_ascii_case("md"))
+        {
+            continue;
+        }
+        if policy.is_skill
+            && entry.depth() > 1
+            && path.file_name().is_none_or(|name| name != "SKILL.md")
+        {
+            continue;
+        }
+        if policy.excludes.is_match(path)
+            || policy
+                .excludes
+                .is_match(path.strip_prefix(root).unwrap_or(path))
+        {
+            continue;
+        }
+        let canonical = match std::fs::canonicalize(path) {
+            Ok(path) => path,
+            Err(error) => {
+                discovery_error(path, policy, loaded, file_error(error))?;
+                continue;
+            }
+        };
+        if !visited.insert(canonical) {
+            continue;
+        }
+        if let Err(error) = load_resource(path, policy.is_skill, policy.excludes, loaded) {
+            discovery_error(path, policy, loaded, error)?;
+        }
     }
-    if path
-        .extension()
-        .is_none_or(|ext| !ext.eq_ignore_ascii_case("md"))
-    {
-        return Ok(());
-    }
+    Ok(())
+}
+fn load_resource(
+    path: &Path,
+    is_skill: bool,
+    excludes: &globset::GlobSet,
+    loaded: &mut Loaded,
+) -> Result<(), Fault> {
     let raw = std::fs::read_to_string(path).map_err(file_error)?;
     let (metadata, body) = frontmatter(&raw)?;
     let description = metadata
@@ -238,13 +405,7 @@ fn discover(
         .unwrap_or("");
     if is_skill && description.trim().is_empty() {
         if path.file_name().is_some_and(|n| n == "SKILL.md") {
-            loaded
-                .snapshot
-                .diagnostics
-                .push(Diagnostic::warning(format!(
-                    "Skill without description ignored: {}",
-                    path.display()
-                )));
+            return Err(invalid("Skill requires a nonempty description"));
         }
         return Ok(());
     }
@@ -273,6 +434,9 @@ fn discover(
             "invalid resource name at {}",
             path.display()
         )));
+    }
+    if excludes.is_match(&name) {
+        return Ok(());
     }
     let bodies = if is_skill {
         &mut loaded.skills
@@ -322,6 +486,7 @@ fn discover(
     Ok(())
 }
 fn frontmatter(raw: &str) -> Result<(Value, &str), Fault> {
+    let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw);
     let Some((first, rest)) = raw.split_once('\n') else {
         return Ok((Value::Null, raw));
     };
@@ -361,17 +526,32 @@ fn split_arguments(text: &str) -> Result<Vec<String>, Fault> {
     let mut args = vec![];
     let mut word = String::new();
     let mut quote = None;
-    let mut escaped = false;
     let mut started = false;
-    for ch in text.chars() {
-        if escaped {
-            word.push(ch);
-            escaped = false;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        // A doubled trailing separator allows a quoted Windows directory to end
+        // before the closing quote, while leading UNC separators remain literal.
+        if ch == '\\' && quote == Some('"') && chars.clone().take(2).eq(['\\', '"']) {
+            chars.next();
+            word.push('\\');
             started = true;
             continue;
         }
-        if ch == '\\' && quote != Some('\'') {
-            escaped = true;
+        // Only grouping syntax is escapable; path separators (including UNC prefixes)
+        // remain literal instead of silently changing the user's file names.
+        if ch == '\\'
+            && quote != Some('\'')
+            && chars.peek().is_some_and(|next| {
+                if let Some(q) = quote {
+                    *next == q
+                } else {
+                    next.is_whitespace() || matches!(next, '\'' | '"')
+                }
+            })
+        {
+            if let Some(next) = chars.next() {
+                word.push(next);
+            }
             started = true;
             continue;
         }
@@ -395,8 +575,8 @@ fn split_arguments(text: &str) -> Result<Vec<String>, Fault> {
             started = true;
         }
     }
-    if quote.is_some() || escaped {
-        return Err(invalid("unterminated quoted argument or escape"));
+    if quote.is_some() {
+        return Err(invalid("unterminated quoted argument"));
     }
     if started {
         args.push(word);

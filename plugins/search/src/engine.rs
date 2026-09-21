@@ -27,6 +27,7 @@ struct Cached {
     follow: bool,
     excluded: Vec<PathBuf>,
     rows: Vec<Value>,
+    matches: usize,
     metadata: Value,
     fallback: bool,
 }
@@ -180,7 +181,11 @@ impl Engine {
         if !cwd.is_absolute() {
             return Err("cwd must be absolute".into());
         }
-        let scope = std::fs::canonicalize(cwd.join(text(args, "path", "."))).map_err(fail)?;
+        let scope = std::fs::canonicalize(
+            eden_workspace::paths::resolve_path(cwd, Path::new(text(args, "path", ".")))
+                .map_err(fail)?,
+        )
+        .map_err(fail)?;
         if !scope.is_dir() && !scope.is_file() {
             return Err("scope must be a regular file or directory".into());
         }
@@ -251,6 +256,26 @@ impl Engine {
             }
         }
         let excludes = excludes.build().map_err(fail)?;
+        let mut includes = globset::GlobSetBuilder::new();
+        if let Some(values) = args.get("include") {
+            for value in values.as_array().ok_or("include must be an array")? {
+                includes.add(
+                    globset::Glob::new(value.as_str().ok_or("include entries must be strings")?)
+                        .map_err(fail)?,
+                );
+            }
+        }
+        let includes = includes.build().map_err(fail)?;
+        let selected = |path: &str| {
+            !excludes.is_match(path) && (includes.is_empty() || includes.is_match(path))
+        };
+        let context = args.get("context").map_or(Ok(0), |value| {
+            value
+                .as_u64()
+                .filter(|lines| *lines <= 100)
+                .ok_or("context must be between 0 and 100")
+        })?;
+        let progress = self.progress;
         let index = self.index(
             &scope,
             follow,
@@ -394,14 +419,18 @@ impl Engine {
                         .filter(|n| *n > 0 && *n <= 10 * 1024 * 1024)
                         .ok_or("max_file_bytes must be between 1 and 10485760")
                 })?;
+            let direct = scope.is_file()
+                && mode != "fuzzy"
+                && std::fs::metadata(&scope).map_err(fail)?.len() > max_size;
+            let mut streaming = None;
             for file in picker.get_files().iter().filter(|f| !f.is_deleted()) {
                 let path = file.relative_path(picker);
-                if excludes.is_match(&path) {
+                if !selected(&path) {
                     continue;
                 }
                 let reason = if file.is_binary() {
                     Some("binary")
-                } else if file.size > max_size {
+                } else if file.size > max_size && !direct {
                     Some("size_limit")
                 } else {
                     None
@@ -412,28 +441,46 @@ impl Engine {
                         .unwrap()
                         .push(json!({ "path": path, "reason": reason }));
                 } else {
-                    std::fs::File::open(file.absolute_path(picker, picker.base_path()))
+                    let absolute = file.absolute_path(picker, picker.base_path());
+                    std::fs::File::open(&absolute)
                         .map_err(|e| format!("cannot read {path}: {e}"))?;
+                    if direct {
+                        if let Some(progress) = progress {
+                            progress("stream_started");
+                        }
+                        let found = super::stream::search(
+                            &absolute,
+                            &path,
+                            pattern,
+                            mode == "literal",
+                            insensitive,
+                        )?;
+                        metadata["skipped"]
+                            .as_array_mut()
+                            .unwrap()
+                            .extend(found.skipped);
+                        metadata["index"]["direct_stream"] = json!(true);
+                        metadata["truncation"]["stream_line_bytes"] = json!(10 * 1024 * 1024);
+                        streaming = Some(found.rows);
+                    }
                 }
             }
             if !metadata["skipped"].as_array().unwrap().is_empty() {
                 metadata["complete"] = json!(false);
             }
             let run = |mode: &str| -> Result<Vec<Value>, String> {
-                // Force explicit case handling without FFF's query-language inference.
-                let native_pattern = if insensitive && mode != "fuzzy" {
+                // FFF disables Unicode by default. Keep character semantics independent
+                // of case selection, and bypass its query-language case inference.
+                let native_pattern = if mode != "fuzzy" {
                     format!(
-                        "(?ui:{})",
+                        "(?u{}:{})",
+                        if insensitive { "i" } else { "-i" },
                         if mode == "literal" {
                             literal_pattern(pattern)
                         } else {
                             safe_regex(pattern)
                         }
                     )
-                } else if mode == "literal" {
-                    literal_pattern(pattern)
-                } else if mode == "regex" {
-                    safe_regex(pattern)
                 } else {
                     pattern.into()
                 };
@@ -483,7 +530,7 @@ impl Engine {
                 );
                 for item in found.matches {
                     let path = found.files[item.file_index].relative_path(picker);
-                    if excludes.is_match(&path) {
+                    if !selected(&path) {
                         continue;
                     }
                     use std::io::{BufRead, Seek};
@@ -524,7 +571,7 @@ impl Engine {
                         .filter(|f| !f.is_deleted() && !f.is_binary() && f.size <= max_size)
                     {
                         let path = file.relative_path(picker);
-                        if excludes.is_match(&path) {
+                        if !selected(&path) {
                             continue;
                         }
                         let input =
@@ -570,8 +617,26 @@ impl Engine {
                 }
                 Ok(output)
             };
-            rows = run(mode)?;
-            if rows.is_empty()
+            let streamed = streaming.is_some();
+            rows = match streaming {
+                Some(rows) => rows,
+                None => run(mode)?,
+            };
+            if streamed
+                && rows.is_empty()
+                && args["fallback"] == "fuzzy"
+                && metadata["complete"] == true
+            {
+                metadata["skipped"].as_array_mut().unwrap().push(json!({
+                    "path": scope.file_name().unwrap_or_default().to_string_lossy(),
+                    "reason": "fuzzy_large_file_unsupported",
+                }));
+                metadata["complete"] = json!(false);
+                metadata["mode"] = json!("fuzzy");
+                fallback = true;
+            }
+            if !fallback
+                && rows.is_empty()
                 && mode == "literal"
                 && args["fallback"] == "fuzzy"
                 && metadata["skipped"].as_array().unwrap().is_empty()
@@ -588,7 +653,7 @@ impl Engine {
                     .filter(|f| !f.is_deleted() && !f.is_binary() && f.size <= max_size)
                 {
                     let path = file.relative_path(picker);
-                    if excludes.is_match(&path) {
+                    if !selected(&path) {
                         continue;
                     }
                     let input = std::fs::File::open(file.absolute_path(picker, picker.base_path()))
@@ -642,6 +707,11 @@ impl Engine {
             };
             rows.sort_by(|a, b| score(b).total_cmp(&score(a)));
         }
+        let matches = rows.len();
+        if name == "grep" && context > 0 {
+            rows = super::stream::with_context(rows, root, context)?;
+        }
+        metadata["context_lines"] = json!(context);
         metadata["ranking"] = json!(ranking);
         metadata["index"]["history_persistent"] = json!(args["_history_dir"].is_string());
         drop(guard);
@@ -666,6 +736,7 @@ impl Engine {
                 follow,
                 excluded,
                 rows,
+                matches,
                 metadata,
                 fallback,
             },
@@ -697,11 +768,16 @@ impl Engine {
         let mut groups: Vec<Value> = vec![];
         for row in &cached.rows[row_start..row_end] {
             if groups.last().is_none_or(|g| g["path"] != row["path"]) {
-                groups.push(json!({ "path": row["path"], "matches": [] }));
+                groups.push(json!({ "path": row["path"], "matches": [], "context": [] }));
             }
             let mut item = row.clone();
             item.as_object_mut().unwrap().remove("path");
-            groups.last_mut().unwrap()["matches"]
+            let field = if row["context"] == true {
+                "context"
+            } else {
+                "matches"
+            };
+            groups.last_mut().unwrap()[field]
                 .as_array_mut()
                 .unwrap()
                 .push(item);
@@ -733,12 +809,18 @@ impl Engine {
                 [offset.saturating_sub(cached.rows.len())..end.saturating_sub(cached.rows.len())]
         );
         page["total_matches"] = if page["complete"] == true {
-            json!(cached.rows.len())
+            json!(cached.matches)
         } else {
             Value::Null
         };
-        page["matched_so_far"] = json!(cached.rows.len());
+        page["matched_so_far"] = json!(cached.matches);
         page["returned"] = json!(row_end - row_start);
+        page["returned_matches"] = json!(
+            cached.rows[row_start..row_end]
+                .iter()
+                .filter(|row| row["context"] != true)
+                .count()
+        );
         page["has_more"] = json!(end < total);
         if end < total {
             let cursor = format!("{id}:{end}");
@@ -880,6 +962,152 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+    #[test]
+    fn grep_include_filters_skips_and_context_is_deduplicated_before_pagination() {
+        let fixture = Fixture::new();
+        std::fs::write(
+            fixture.0.join("a.rs"),
+            "one\ntwo\nneedle\nfour\nneedle\nsix\nseven\n",
+        )
+        .unwrap();
+        std::fs::write(fixture.0.join("excluded.txt"), vec![b'x'; 6 * 1024 * 1024]).unwrap();
+        let mut request = fixture.request("needle");
+        request["arguments"]["include"] = json!(["*.rs"]);
+        request["arguments"]["context"] = json!(1);
+        request["arguments"]["limit"] = json!(2);
+        let mut engine = Engine::default();
+        let mut lines = vec![];
+        loop {
+            let page = engine.query(&request).unwrap();
+            assert_eq!(page["complete"], true);
+            assert_eq!(page["total_matches"], 2);
+            assert_eq!(page["skipped_count"], 0);
+            for group in page["groups"].as_array().unwrap() {
+                for field in ["matches", "context"] {
+                    if let Some(rows) = group[field].as_array() {
+                        lines.extend(rows.iter().map(|row| row["line"].as_u64().unwrap()));
+                    }
+                }
+            }
+            if page["has_more"] == false {
+                break;
+            }
+            request["arguments"]["cursor"] = page["cursor"].clone();
+        }
+        lines.sort_unstable();
+        assert_eq!(lines, vec![2, 3, 4, 5, 6]);
+    }
+    #[test]
+    fn explicit_large_file_streams_tail_and_keeps_stale_cursor_checks() {
+        use std::io::Write;
+        let fixture = Fixture::new();
+        let path = fixture.0.join("large.txt");
+        let mut file = std::fs::File::create(&path).unwrap();
+        for _ in 0..11 {
+            file.write_all(&[b'x'; 1024 * 1024]).unwrap();
+            file.write_all(b"\n").unwrap();
+        }
+        file.write_all("before\nα needle\nbetween\nω needle\nafter\n".as_bytes())
+            .unwrap();
+        drop(file);
+        let mut engine = Engine::default();
+        let mut request = fixture.request("needle");
+        let skipped = engine.query(&request).unwrap();
+        assert_eq!(skipped["complete"], false);
+        assert_eq!(skipped["skipped"][0]["reason"], "size_limit");
+        request["arguments"]["path"] = json!("large.txt");
+        request["arguments"]["context"] = json!(1);
+        request["arguments"]["limit"] = json!(2);
+        let page = engine.query(&request).unwrap();
+        assert_eq!(page["complete"], true);
+        assert_eq!(page["total_matches"], 2);
+        assert_eq!(page["index"]["direct_stream"], true);
+        assert_eq!(page["groups"][0]["matches"][0]["text"], "α needle");
+        request["arguments"]["cursor"] = page["cursor"].clone();
+        let mut changed = request.clone();
+        changed["arguments"]["context"] = json!(2);
+        assert!(
+            engine
+                .query(&changed)
+                .unwrap_err()
+                .contains("different query")
+        );
+        assert_eq!(engine.query(&request).unwrap()["returned"], 2);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .write_all(b"changed\n")
+            .unwrap();
+        assert!(engine.query(&request).unwrap_err().contains("stale"));
+    }
+    #[test]
+    fn excluded_large_file_does_not_add_fallback_omissions() {
+        let fixture = Fixture::new();
+        std::fs::write(fixture.0.join("text.txt"), "before\nneedle\nafter\n").unwrap();
+        let mut request = fixture.request("absent");
+        request["arguments"]["path"] = json!("text.txt");
+        request["arguments"]["include"] = json!(["*.rs"]);
+        request["arguments"]["max_file_bytes"] = json!(2);
+        request["arguments"]["fallback"] = json!("fuzzy");
+        let page = Engine::default().query(&request).unwrap();
+        assert_eq!(page["exact"]["complete"], true);
+        assert_eq!(page["candidates"]["complete"], true);
+        assert_eq!(page["candidates"]["skipped_count"], 0);
+        assert_eq!(page["candidates"]["total_matches"], 0);
+    }
+    #[test]
+    fn streaming_rejects_file_anchors_without_reinterpreting_them_as_line_anchors() {
+        let fixture = Fixture::new();
+        std::fs::write(fixture.0.join("text.txt"), "before\nneedle\nafter\n").unwrap();
+        let mut engine = Engine::default();
+        for pattern in [r"\Aneedle", r"needle\z", r"(?-m:^needle$)"] {
+            let mut request = fixture.request(pattern);
+            request["arguments"]["path"] = json!("text.txt");
+            request["arguments"]["mode"] = json!("regex");
+            request["arguments"]["max_file_bytes"] = json!(1024);
+            assert_eq!(engine.query(&request).unwrap()["total_matches"], 0);
+            request["arguments"]["max_file_bytes"] = json!(2);
+            let page = engine.query(&request).unwrap();
+            assert_eq!(page["complete"], false, "pattern={pattern}");
+            assert_eq!(page["total_matches"], Value::Null);
+            assert_eq!(
+                page["skipped"][0]["reason"],
+                "file_anchor_unsupported_for_large_file"
+            );
+        }
+        let mut request = fixture.request("^needle$");
+        request["arguments"]["path"] = json!("text.txt");
+        request["arguments"]["mode"] = json!("regex");
+        request["arguments"]["max_file_bytes"] = json!(2);
+        let page = engine.query(&request).unwrap();
+        assert_eq!(page["complete"], true);
+        assert_eq!(page["total_matches"], 1);
+    }
+    #[test]
+    fn explicit_large_file_reports_multiline_and_oversized_line_limits() {
+        let fixture = Fixture::new();
+        let path = fixture.0.join("large.txt");
+        let mut content = vec![b'x'; 11 * 1024 * 1024];
+        content.extend_from_slice(b"\nneedle\n");
+        std::fs::write(path, content).unwrap();
+        let mut request = fixture.request("needle");
+        request["arguments"]["path"] = json!("large.txt");
+        let mut engine = Engine::default();
+        let page = engine.query(&request).unwrap();
+        assert_eq!(page["complete"], false);
+        assert_eq!(page["matched_so_far"], 1);
+        assert_eq!(page["groups"][0]["matches"][0]["line"], 2);
+        assert_eq!(page["skipped"][0]["reason"], "line_size_limit");
+        request["arguments"]["mode"] = json!("regex");
+        request["arguments"]["pattern"] = json!(r"x\sneedle");
+        let page = engine.query(&request).unwrap();
+        assert_eq!(page["complete"], false);
+        assert_eq!(
+            page["skipped"][0]["reason"],
+            "multiline_pattern_unsupported_for_large_file"
+        );
     }
     #[test]
     fn literal_is_case_sensitive_and_regex_is_explicit() {
@@ -1073,6 +1301,32 @@ mod tests {
             request["arguments"]["cursor"] = page["cursor"].clone();
         }
         assert_eq!(count, 35);
+    }
+    #[test]
+    fn regex_unicode_classes_and_scalars_are_independent_of_case_mode() {
+        let fixture = Fixture::new();
+        std::fs::write(fixture.0.join("text.txt"), "é\n中\nα\nΑ\n🙂\na\n").unwrap();
+        let mut engine = Engine::default();
+        for case in ["sensitive", "insensitive"] {
+            for (pattern, expected) in [
+                (r"^\w$", vec![1, 2, 3, 4, 6]),
+                (r"^.$", vec![1, 2, 3, 4, 5, 6]),
+                (r"^\p{Greek}$", vec![3, 4]),
+            ] {
+                let mut request = fixture.request(pattern);
+                request["arguments"]["mode"] = json!("regex");
+                request["arguments"]["case"] = json!(case);
+                let page = engine.query(&request).unwrap();
+                let lines: Vec<_> = page["groups"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .flat_map(|group| group["matches"].as_array().unwrap())
+                    .map(|row| row["line"].as_u64().unwrap())
+                    .collect();
+                assert_eq!(lines, expected, "pattern={pattern} case={case}");
+            }
+        }
     }
     #[test]
     fn regex_preserves_escaped_backslash_and_unicode_insensitive_literals() {

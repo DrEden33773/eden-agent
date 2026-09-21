@@ -5,12 +5,14 @@ use eden_plugin_sdk::{
         Descriptor, Fault,
         coding::{TOOL, ToolRequest, ToolResult},
     },
-    serde_json::Value,
+    serde_json::{self, Value},
 };
 use std::path::{Path, PathBuf};
-use tokio::io::{AsyncRead, AsyncReadExt};
 
 mod catalog;
+mod edit;
+mod files;
+mod shell;
 
 mod registry;
 
@@ -31,6 +33,24 @@ fn create(config: Value) -> Result<Package, Fault> {
     let registry = registry::Registry::new(&config)?;
     let listing = registry.clone();
     let read_observer = config["read_observer"].as_str().map(String::from);
+    let artifact_dir = config
+        .get("artifact_dir")
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+                .ok_or_else(|| fault("InvalidInput", "artifact_dir must be a nonempty path"))
+        })
+        .transpose()?
+        .unwrap_or_else(|| {
+            eden_workspace::WorkspaceOptions::default()
+                .global_dir
+                .join("artifacts")
+        });
+    if !artifact_dir.is_absolute() {
+        return Err(fault("InvalidInput", "artifact_dir must be absolute"));
+    }
     let shell = match config.get("bash") {
         None => "bash".into(),
         Some(Value::String(path)) if !path.is_empty() => path.clone(),
@@ -51,6 +71,8 @@ fn create(config: Value) -> Result<Package, Fault> {
             ));
         }
     };
+    let default_bash = config.get("bash").is_none();
+    let default_powershell = config.get("powershell").is_none();
     Ok(Package::new("coding-tools")
         .service(r::TOOL_CATALOG, move |request: r::CatalogRequest, cx| {
             let registry = listing.clone();
@@ -72,7 +94,13 @@ fn create(config: Value) -> Result<Package, Fault> {
             } else {
                 shell.clone()
             };
+            let default_shell = if request.name == "powershell" {
+                default_powershell
+            } else {
+                default_bash
+            };
             let read_observer = read_observer.clone();
+            let artifact_dir = artifact_dir.clone();
             async move {
                 let selected = registry.catalog(&cx, &request.cwd).await?;
                 let (_, route) = selected.get(&request.name).ok_or_else(|| {
@@ -84,8 +112,7 @@ fn create(config: Value) -> Result<Package, Fault> {
                 if let Some(route) = route {
                     return cx.call(route, &request).await;
                 }
-                if request.name == "skill" {
-                    let name = string(&request.arguments, "name")?;
+                if let Some(name) = resource_skill(&request)? {
                     let state: r::ResourceReply =
                         cx.call(r::SOURCE, &r::ResourceRequest::Snapshot).await?;
                     if !state
@@ -120,7 +147,39 @@ fn create(config: Value) -> Result<Package, Fault> {
                 } else {
                     None
                 };
-                let result = execute(request, cx.scope.clone(), shell).await?;
+                let shell = if matches!(request.name.as_str(), "bash" | "powershell") {
+                    let cwd = Path::new(&request.cwd);
+                    let configured =
+                        if shell.starts_with('~') || Path::new(&shell).components().count() > 1 {
+                            eden_workspace::paths::resolve_path(cwd, Path::new(&shell))?
+                        } else {
+                            PathBuf::from(&shell)
+                        };
+                    let configured = configured.to_str().ok_or_else(|| {
+                        fault("ShellUnavailable", "shell executable path is not Unicode")
+                    })?;
+                    let kind = if request.name == "powershell" {
+                        eden_process::ShellKind::PowerShell
+                    } else {
+                        eden_process::ShellKind::Bash
+                    };
+                    let resolved =
+                        eden_process::resolve_shell(configured, kind, cwd, default_shell)?;
+                    resolved
+                        .executable
+                        .to_str()
+                        .ok_or_else(|| {
+                            fault(
+                                "ShellUnavailable",
+                                "resolved shell executable path is not Unicode",
+                            )
+                        })?
+                        .to_owned()
+                } else {
+                    shell
+                };
+                let result =
+                    execute_with_artifacts(request, cx.scope.clone(), shell, artifact_dir).await?;
                 if result.error.is_none()
                     && let (Some(route), Some(request)) = (read_observer, observed)
                 {
@@ -132,7 +191,26 @@ fn create(config: Value) -> Result<Package, Fault> {
 }
 eden_plugin_sdk::export_plugin!(descriptor, create);
 
+fn resource_skill(request: &ToolRequest) -> Result<Option<&str>, Fault> {
+    match request.name.as_str() {
+        "skill" => string(&request.arguments, "name").map(Some),
+        "read" => Ok(string(&request.arguments, "path")?.strip_prefix("eden-resource://skill/")),
+        _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
 async fn execute(request: ToolRequest, scope: Scope, shell: String) -> Result<ToolResult, Fault> {
+    let artifact_dir = Path::new(&request.cwd).join(".test-artifacts");
+    execute_with_artifacts(request, scope, shell, artifact_dir).await
+}
+
+async fn execute_with_artifacts(
+    request: ToolRequest,
+    scope: Scope,
+    shell: String,
+    artifact_dir: PathBuf,
+) -> Result<ToolResult, Fault> {
     let cancellation = scope.cancellation();
     let (sender, receiver) = tokio::sync::oneshot::channel();
     // The SDK drops a cancelled root future. The admitted child owns all file
@@ -145,7 +223,7 @@ async fn execute(request: ToolRequest, scope: Scope, shell: String) -> Result<To
         } {
             Err(fault("Cancelled", "tool cancelled before execution"))
         } else {
-            run(request, shell, cancellation).await
+            run(request, shell, artifact_dir, cancellation).await
         };
         let result = result.unwrap_or_else(failed);
         let cleanup = result
@@ -167,6 +245,7 @@ async fn execute(request: ToolRequest, scope: Scope, shell: String) -> Result<To
 async fn run(
     request: ToolRequest,
     shell: String,
+    artifact_dir: PathBuf,
     cancellation: eden_plugin_sdk::Cancellation,
 ) -> Result<ToolResult, Fault> {
     let cwd = Path::new(&request.cwd);
@@ -203,37 +282,7 @@ async fn run(
             entries.sort();
             Ok(output(entries.join("\n"), None, false))
         }
-        "read" => {
-            let path = file_path(cwd, &request.arguments)?;
-            let offset = integer(&request.arguments, "offset", 1)?;
-            let limit = integer(&request.arguments, "limit", u64::MAX)?;
-            let content = tokio::fs::read_to_string(path).await.map_err(file_error)?;
-            let lines = content.split_inclusive('\n');
-            let count = lines.clone().count() as u64;
-            if offset > count.max(1) {
-                return Err(fault("InvalidInput", "offset is beyond the last line"));
-            }
-            let mut text = String::new();
-            let mut truncated = false;
-            for line in lines
-                .skip((offset - 1) as usize)
-                .take(usize::try_from(limit).unwrap_or(usize::MAX))
-            {
-                if text.len() + line.len() > OUTPUT_LIMIT {
-                    let remaining = OUTPUT_LIMIT - text.len();
-                    text.push_str(&line[..line.floor_char_boundary(remaining)]);
-                    truncated = true;
-                    break;
-                }
-                text.push_str(line);
-            }
-            Ok(ToolResult {
-                text,
-                truncated,
-                exit_code: None,
-                error: None,
-            })
-        }
+        "read" => files::read(cwd, &request.arguments).await,
         "write" => {
             let path = file_path(cwd, &request.arguments)?;
             let content = string(&request.arguments, "content")?;
@@ -249,41 +298,15 @@ async fn run(
                 false,
             ))
         }
-        "edit" => {
-            let path = file_path(cwd, &request.arguments)?;
-            let old = string(&request.arguments, "old_text")?;
-            let new = string(&request.arguments, "new_text")?;
-            if old.is_empty() {
-                return Err(fault("EditMismatch", "old_text must not be empty"));
-            }
-            let content = tokio::fs::read_to_string(&path).await.map_err(file_error)?;
-            let start = content.find(old).ok_or_else(|| {
-                fault(
-                    "EditMismatch",
-                    "old_text has no exact match; file unchanged",
-                )
-            })?;
-            let next = start + old.chars().next().map(char::len_utf8).unwrap_or(0);
-            if content[next..].contains(old) {
-                return Err(fault(
-                    "EditMismatch",
-                    "old_text has multiple exact matches; file unchanged",
-                ));
-            }
-            let mut replacement = content[..start].to_owned();
-            replacement.push_str(new);
-            replacement.push_str(&content[start + old.len()..]);
-            tokio::fs::write(path, replacement)
-                .await
-                .map_err(file_error)?;
-            Ok(output("Replaced one exact match".into(), None, false))
-        }
+        "edit" => edit::edit(cwd, &request.arguments).await,
         "bash" | "powershell" => {
-            shell_command(
+            shell::run(
                 cwd,
                 string(&request.arguments, "command")?,
                 &shell,
                 request.name == "powershell",
+                shell::timeout(&request.arguments)?,
+                &artifact_dir,
                 cancellation,
             )
             .await
@@ -315,7 +338,7 @@ fn file_path(cwd: &Path, value: &Value) -> Result<PathBuf, Fault> {
     if path.is_empty() {
         return Err(fault("InvalidInput", "path must not be empty"));
     }
-    Ok(cwd.join(path))
+    eden_workspace::paths::resolve_path(cwd, Path::new(path))
 }
 fn fault(code: &str, message: impl Into<String>) -> Fault {
     Fault::new(code, "coding-tools", message)
@@ -325,6 +348,9 @@ fn file_error(error: std::io::Error) -> Fault {
 }
 fn failed(error: Fault) -> ToolResult {
     ToolResult {
+        content: vec![],
+        details: serde_json::Value::Null,
+        artifacts: vec![],
         text: error.message.clone(),
         exit_code: None,
         truncated: false,
@@ -337,110 +363,14 @@ fn output(mut text: String, exit_code: Option<i32>, mut truncated: bool) -> Tool
         truncated = true;
     }
     ToolResult {
+        content: vec![],
+        details: serde_json::Value::Null,
+        artifacts: vec![],
         text,
         exit_code,
         truncated,
         error: None,
     }
-}
-
-async fn capture(mut pipe: impl AsyncRead + Unpin) -> std::io::Result<(Vec<u8>, bool)> {
-    let mut captured = Vec::new();
-    let mut truncated = false;
-    let mut chunk = [0u8; 8192];
-    loop {
-        let read = pipe.read(&mut chunk).await?;
-        if read == 0 {
-            return Ok((captured, truncated));
-        }
-        let keep = read.min(OUTPUT_LIMIT - captured.len());
-        captured.extend_from_slice(&chunk[..keep]);
-        truncated |= keep < read;
-    }
-}
-
-async fn shell_command(
-    cwd: &Path,
-    command: &str,
-    shell: &str,
-    powershell: bool,
-    cancellation: eden_plugin_sdk::Cancellation,
-) -> Result<ToolResult, Fault> {
-    let args: &[&str] = if powershell {
-        &[
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            command,
-        ]
-    } else {
-        &["--noprofile", "--norc", "-c", command]
-    };
-    let (mut child, tree) = eden_process::spawn(shell, args, cwd).await?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| fault("ToolFailure", "stdout pipe missing"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| fault("ToolFailure", "stderr pipe missing"))?;
-    let wait = async {
-        // Two clearly separated outcomes. Completion reads the leader's own
-        // terminal status and then only clears descendants that outlived it;
-        // cancellation stops the whole domain and reports that decision
-        // explicitly. Neither path lets cleanup rewrite the leader's status.
-        let (stop, status, cancelled) = tokio::select! {
-            status = child.wait() => {
-                let status = status.map_err(|error| fault("ToolFailure", error.to_string()))?;
-                let stop = eden_process::Stop::complete(&status);
-                // Foreground completion cannot leave background children
-                // holding pipes or continuing file writes after the tool result
-                // has been committed. The leader is already reaped, and this
-                // action never signals it again.
-                tree.cleanup_descendants()?;
-                (stop, status, false)
-            },
-            _ = cancellation.cancelled() => {
-                tree.terminate_group()?;
-                let status = child
-                    .wait()
-                    .await
-                    .map_err(|error| fault("ToolFailure", error.to_string()))?;
-                // The caller's decision is recorded explicitly, so an absent
-                // exit code can no longer be read as a signal death. A status
-                // the command had already produced is still kept below.
-                let stop = eden_process::Stop::stopped(&status);
-                (stop, status, true)
-            }
-        };
-        tree.settle().await?;
-        Ok::<_, Fault>((stop, status, cancelled))
-    };
-    let (waited, stdout, stderr) = tokio::join!(wait, capture(stdout), capture(stderr));
-    let (stop, status, cancelled) = waited?;
-    let (stdout, out_truncated) = stdout.map_err(file_error)?;
-    let (stderr, err_truncated) = stderr.map_err(file_error)?;
-    let mut text = String::from_utf8_lossy(&stdout).into_owned();
-    if !stderr.is_empty() {
-        text.push_str("\n[stderr]\n");
-        text.push_str(&String::from_utf8_lossy(&stderr));
-    }
-    let mut result = output(text, stop.exit_code, out_truncated || err_truncated);
-    result.error = if cancelled {
-        Some(fault(
-            "Cancelled",
-            "shell command cancelled; process tree stopped",
-        ))
-    } else if !status.success() {
-        // The rendered status names the exit code or the stopping signal, so
-        // this stays the exact outcome text callers already saw.
-        Some(fault("ShellExit", format!("shell exited with {status}")))
-    } else {
-        None
-    };
-    Ok(result)
 }
 
 #[cfg(test)]

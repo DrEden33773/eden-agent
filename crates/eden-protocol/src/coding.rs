@@ -166,6 +166,15 @@ pub struct ToolRequest {
 /// a failure is carried as `error` rather than as a missing exit code.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ToolResult {
+    /// Additional model-visible content; old text-only records deserialize as empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content: Vec<Block>,
+    /// Structured range, edit and process details without parsing display text.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub details: Value,
+    /// Complete retained outputs. References survive run and session closure.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<Artifact>,
     // Its name and type are the whole meaning; see docs/development-checks.md#doc-comments.
     #[allow(missing_docs)]
     pub text: String,
@@ -177,6 +186,18 @@ pub struct ToolResult {
     // Its name and type are the whole meaning; see docs/development-checks.md#doc-comments.
     #[allow(missing_docs)]
     pub error: Option<Fault>,
+}
+/// An immutable output retained until explicit removal, never silently regenerated.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Artifact {
+    /// Native absolute path accepted by read; a missing artifact is a read failure.
+    pub path: String,
+    /// Identifies the output stream without conflating stdout and stderr.
+    pub name: String,
+    /// Number of complete stored bytes, independent of the preview budget.
+    pub bytes: u64,
+    /// The stored representation; shell streams are raw octets.
+    pub media_type: String,
 }
 /// One public history node: its identity, its place in the branch, and the
 /// payload of its kind. A record is written once and never rewritten — but a
@@ -277,6 +298,10 @@ pub struct QueueEntry {
     pub id: u64,
     pub kind: String,
     pub content: Vec<Block>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_content: Option<Vec<Block>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_revision: Option<u64>,
 }
 /// Validate complete public JSONL records without loading a storage or business plugin.
 /// An interrupted tail is diagnosed and preserved; reading never repairs or replays it.

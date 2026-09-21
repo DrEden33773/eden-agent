@@ -29,6 +29,8 @@ fn fault(code: &str, message: impl Into<String>) -> Fault {
 #[cfg(unix)]
 mod unix_exit;
 use eden_plugin_sdk::protocol::Fault;
+mod shell;
+pub use shell::{ResolvedShell, ShellKind, ShellTransport, resolve_shell};
 use std::{path::Path, process::Stdio};
 use tokio::process::{Child, Command};
 
@@ -92,7 +94,9 @@ impl Stop {
 /// than returning a leader whose domain was never established.
 pub async fn spawn(shell: &str, args: &[&str], cwd: &Path) -> Result<(Child, Tree), Fault> {
     #[cfg(windows)]
-    let shell = &resolve_windows_shell(shell, cwd)?;
+    let resolved = resolve_shell(shell, ShellKind::Bash, cwd, true)?;
+    #[cfg(windows)]
+    let shell = &resolved.executable;
     let mut command = Command::new(shell);
     command.args(args);
     command
@@ -126,34 +130,6 @@ pub async fn spawn(shell: &str, args: &[&str], cwd: &Path) -> Result<(Child, Tre
     }
 }
 
-#[cfg(windows)]
-fn resolve_windows_shell(shell: &str, cwd: &Path) -> Result<std::path::PathBuf, Fault> {
-    let requested = Path::new(shell);
-    if requested.components().count() > 1 || requested.is_absolute() {
-        return Ok(cwd.join(requested));
-    }
-    // CreateProcess searches System32 before PATH for an unqualified name.
-    // Resolve PATH ourselves so a selected native Bash is not shadowed by
-    // Windows' WSL launcher. Passing the full path fixes the actual launch.
-    let executable = if requested.extension().is_some() {
-        requested.to_owned()
-    } else {
-        requested.with_extension("exe")
-    };
-    for directory in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
-        let candidate = directory.join(&executable);
-        if candidate.is_file() {
-            return std::path::absolute(candidate)
-                .map_err(|error| fault("ShellUnavailable", error.to_string()));
-        }
-    }
-    Err(fault(
-        "ShellUnavailable",
-        format!(
-            "native shell executable {shell:?} was not found in PATH; configure the selected shell with its absolute path"
-        ),
-    ))
-}
 pub use platform::Tree;
 
 #[cfg(unix)]

@@ -1,5 +1,6 @@
 //! Data-only workspace bootstrap. No library, shell or credential command is executed here.
 pub mod packages;
+pub mod paths;
 use eden_protocol::Fault;
 use eden_protocol::resources::Diagnostic;
 use serde::{Deserialize, Serialize};
@@ -31,9 +32,7 @@ impl Default for WorkspaceOptions {
         let global_dir = std::env::var_os("EDEN_AGENT_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
-                std::env::var_os("HOME")
-                    .or_else(|| std::env::var_os("USERPROFILE"))
-                    .map(PathBuf::from)
+                paths::user_home()
                     .unwrap_or_else(|| PathBuf::from("."))
                     .join(".eden/agent")
             });
@@ -112,7 +111,8 @@ impl Workspace {
 /// Persist an explicit path grant or denial without loading project configuration.
 pub fn save_trust(global_dir: &Path, root: &Path, trusted: bool) -> Result<(), Fault> {
     let root = canonical_dir(root)?;
-    std::fs::create_dir_all(global_dir).map_err(io_error)?;
+    let global_dir = absolute(global_dir)?;
+    std::fs::create_dir_all(&global_dir).map_err(io_error)?;
     let lock = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -120,7 +120,7 @@ pub fn save_trust(global_dir: &Path, root: &Path, trusted: bool) -> Result<(), F
         .open(global_dir.join("trust.lock"))
         .map_err(io_error)?;
     lock.lock().map_err(io_error)?;
-    let mut entries = read_trust(global_dir)?;
+    let mut entries = read_trust(&global_dir)?;
     entries.retain(|entry| entry.root != root);
     entries.push(TrustEntry { root, trusted });
     let temporary = global_dir.join("trust.json.next");
@@ -159,19 +159,17 @@ fn read_trust(global_dir: &Path) -> Result<Vec<TrustEntry>, Fault> {
 /// Resolve a path to a real directory, so every later comparison is made on
 /// what the filesystem actually holds rather than on how it was spelled.
 pub fn canonical_dir(path: &Path) -> Result<PathBuf, Fault> {
-    let path = std::fs::canonicalize(path).map_err(io_error)?;
+    let base = std::env::current_dir().map_err(io_error)?;
+    let path = std::fs::canonicalize(paths::resolve_path(&base, path)?).map_err(io_error)?;
     if !path.is_dir() {
         return Err(invalid(format!("not a directory: {}", path.display())));
     }
     Ok(path)
 }
 fn absolute(path: &Path) -> Result<PathBuf, Fault> {
-    if path.is_absolute() {
-        Ok(path.into())
-    } else {
-        Ok(std::env::current_dir().map_err(io_error)?.join(path))
-    }
+    paths::resolve_path(&std::env::current_dir().map_err(io_error)?, path)
 }
+
 fn read_settings(path: &Path) -> Result<Value, Fault> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
@@ -200,7 +198,7 @@ fn resolve_resource_paths(settings: &mut Value, root: &Path) -> Result<(), Fault
                 let text = path
                     .as_str()
                     .ok_or_else(|| invalid(format!("{key} entries must be paths")))?;
-                *path = serde_json::json!(root.join(text));
+                *path = serde_json::json!(paths::resolve_path(root, Path::new(text))?);
             }
         }
     }

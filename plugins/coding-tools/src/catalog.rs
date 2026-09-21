@@ -6,11 +6,16 @@ pub(super) fn tools() -> Vec<ToolDefinition> {
             "powershell",
             concat!(
                 "Run native PowerShell without profiles at the explicit cwd. Waits for process-tree ",
-                "cleanup on completion or cancellation.",
+                "cleanup on completion, cancellation or optional timeout_seconds deadline. Returns ",
+                "separate bounded stream tails and persistent full-output artifacts.",
             ),
             json!({
                 "type": "object",
-                "properties": { "command": { "type": "string" } },
+                "properties": {
+                    "command": { "type": "string" },
+                    "timeout_seconds": { "type": "number", "exclusiveMinimum": 0,
+                        "description": "Optional positive deadline in seconds; no default timeout." },
+                },
                 "required": ["command"],
                 "additionalProperties": false,
             }),
@@ -39,13 +44,14 @@ pub(super) fn tools() -> Vec<ToolDefinition> {
         ),
         (
             "read",
-            "Read a UTF-8 file. offset is a 1-based line; limit bounds lines.",
+            "Read UTF-8 text or PNG/JPEG/GIF/WebP images. Text uses 1-based offset and line limit; follow details.next_offset/next_byte_offset to continue.",
             json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
                     "offset": { "type": "integer", "minimum": 1 },
                     "limit": { "type": "integer", "minimum": 1 },
+                    "byte_offset": { "type": "integer", "minimum": 0 },
                 },
                 "required": ["path"],
                 "additionalProperties": false,
@@ -64,8 +70,9 @@ pub(super) fn tools() -> Vec<ToolDefinition> {
         (
             "edit",
             concat!(
-                "Replace exactly one occurrence of old_text with new_text. Fails without changing ",
-                "the file if absent or ambiguous.",
+                "Apply old_text/new_text or a batch of edits against the original file. All matches must be ",
+                "unique and nonoverlapping. Strict mode normalizes CRLF; tolerant mode additionally ",
+                "normalizes curly quotes, Unicode dashes and trailing spaces/tabs. Preserves BOM and newline style.",
             ),
             json!({
                 "type": "object",
@@ -73,17 +80,38 @@ pub(super) fn tools() -> Vec<ToolDefinition> {
                     "path": { "type": "string" },
                     "old_text": { "type": "string" },
                     "new_text": { "type": "string" },
+                    "mode": { "type": "string", "enum": ["strict", "tolerant"] },
+                    "edits": {
+                        "type": "array", "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": { "old_text": { "type": "string" }, "new_text": { "type": "string" } },
+                            "required": ["old_text", "new_text"], "additionalProperties": false,
+                        },
+                    },
                 },
-                "required": ["path", "old_text", "new_text"],
+                "required": ["path"],
+                "oneOf": [
+                    { "required": ["old_text", "new_text"], "not": { "required": ["edits"] } },
+                    { "required": ["edits"], "not": { "anyOf": [{ "required": ["old_text"] }, { "required": ["new_text"] }] } },
+                ],
                 "additionalProperties": false,
             }),
         ),
         (
             "bash",
-            "Run a bash command in the session cwd. Returns bounded output and the exit code.",
+            concat!(
+                "Run bash in the session cwd. Returns separate bounded stream tails, persistent ",
+                "full-output artifacts and the exit code after process-tree cleanup. An optional ",
+                "timeout_seconds deadline stops this command; there is no default timeout.",
+            ),
             json!({
                 "type": "object",
-                "properties": { "command": { "type": "string" } },
+                "properties": {
+                    "command": { "type": "string" },
+                    "timeout_seconds": { "type": "number", "exclusiveMinimum": 0,
+                        "description": "Optional positive deadline in seconds; no default timeout." },
+                },
                 "required": ["command"],
                 "additionalProperties": false,
             }),

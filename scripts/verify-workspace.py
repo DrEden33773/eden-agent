@@ -224,6 +224,181 @@ def default_search_loop(
         server.close()
 
 
+def text_package_lifecycle(
+    destination: pathlib.Path, scratch: pathlib.Path, base: Composition
+) -> tuple[dict[str, Any], pathlib.Path, str]:
+    """Exercise text package selection through the installed host and model requests."""
+    project = scratch / "text-package-project"
+    project.mkdir()
+    global_dir = scratch / "text-package-global"
+    source = scratch / "text-package-source"
+    (source / "skills/pack-check").mkdir(parents=True)
+    (source / "prompts").mkdir()
+    host = destination / "bin" / ("eden.exe" if sys.platform == "win32" else "eden")
+    server = Server(lambda _body, _index: (200, complete(answer("RESOURCE-OBSERVED"))))
+    try:
+        base_path = helpers["configure"](destination, base, server, "text-package-base")
+
+        def invoke(
+            *arguments: str | pathlib.Path, config: pathlib.Path | None = None, check: bool = True
+        ) -> Any:
+            return run(
+                [
+                    host,
+                    *arguments,
+                    "--composition",
+                    config or base_path,
+                    "--cwd",
+                    project,
+                    "--global-dir",
+                    global_dir,
+                ],
+                scratch,
+                check=check,
+            )
+
+        def bundle(version: str, marker: str) -> None:
+            write(
+                source / "package.json",
+                {
+                    "resources": {
+                        "name": "text-resources",
+                        "version": version,
+                        "skills": ["skills/pack-check"],
+                        "templates": ["prompts"],
+                    }
+                },
+            )
+            (source / "skills/pack-check/SKILL.md").write_text(
+                f"---\nname: pack-check\ndescription: Packaged check\n---\nSKILL-{marker}",
+                encoding="utf-8",
+            )
+            (source / "prompts/pack-template.md").write_text(
+                f"TEMPLATE-{marker}: $1", encoding="utf-8"
+            )
+
+        def resolve(version: str) -> tuple[pathlib.Path, dict[str, Any]]:
+            result = json.loads(
+                invoke(
+                    "package",
+                    "resolve",
+                    json.dumps(
+                        {
+                            "base": str(base_path),
+                            "packages": [{"name": "text-resources", "version": version}],
+                            "roles": {},
+                        }
+                    ),
+                ).stdout
+            )
+            assert len(result["composition"]["packages"]) == len(base["packages"])
+            assert result["composition"]["resource_packages"][0]["manifest"]["version"] == version
+            return pathlib.Path(result["path"]), result
+
+        bundle("1.0.0", "V1")
+        installed = json.loads(invoke("package", "install", source).stdout)
+        assert installed["manifest"] is None
+        assert pathlib.Path(installed["path"]).name == "resources"
+        archive = scratch / "text-resources.tar.gz"
+        with tarfile.open(archive, "w:gz") as output:
+            output.add(source, arcname="text-resources")
+        run(["git", "init", source], scratch)
+        run(["git", "-C", source, "add", "."], scratch)
+        run(
+            [
+                "git",
+                "-C",
+                source,
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "Text package fixture",
+            ],
+            scratch,
+        )
+        commit = run(["git", "-C", source, "rev-parse", "HEAD"], scratch).stdout.strip()
+        (source / "prompts/pack-template.md").write_text("UNCOMMITTED", encoding="utf-8")
+        pinned = json.loads(
+            invoke(
+                "package",
+                "install",
+                "--source-json",
+                json.dumps({"kind": "git", "url": str(source), "revision": commit}),
+            ).stdout
+        )
+        assert pinned["source"]["commit"] == commit and pinned["digest"] == installed["digest"]
+        v1, locked_v1 = resolve("1.0.0")
+        listed = json.loads(invoke("resources", "list", config=v1).stdout)
+        assert any(skill["name"] == "pack-check" for skill in listed["skills"])
+        assert any(template["name"] == "pack-template" for template in listed["templates"])
+        history = project / "resource-history.jsonl"
+        invoke("--session", history, "--json", "/pack-template supplied", config=v1)
+        assert "TEMPLATE-V1: supplied" in json.dumps(server.requests[-1])
+        invoke("--session", history, "--json", "/skill:pack-check task", config=v1)
+        assert "SKILL-V1" in json.dumps(server.requests[-1])
+        assert any(
+            record["kind"] == "composition_lock"
+            and record["payload"]["resource_packages"][0]["digest"] == installed["digest"]
+            for record in records(history)
+        )
+        write(
+            global_dir / "settings.json",
+            {"skill_excludes": ["pack-check"], "template_excludes": ["pack-template"]},
+        )
+        excluded = json.loads(invoke("resources", "list", config=v1).stdout)
+        assert not any(skill["name"] == "pack-check" for skill in excluded["skills"])
+        assert not any(template["name"] == "pack-template" for template in excluded["templates"])
+        invoke(
+            "--session", project / "excluded.jsonl", "--json", "/pack-template excluded", config=v1
+        )
+        assert "TEMPLATE-V1" not in json.dumps(server.requests[-1])
+        assert "/pack-template excluded" in json.dumps(server.requests[-1])
+        (global_dir / "settings.json").unlink()
+        bundle("2.0.0", "V2")
+        upgraded = json.loads(invoke("package", "install", source, "--build").stdout)
+        v2, locked_v2 = resolve("2.0.0")
+        invoke("--session", project / "v2.jsonl", "--json", "/pack-template upgraded", config=v2)
+        assert "TEMPLATE-V2: upgraded" in json.dumps(server.requests[-1])
+        invoke("--session", history, "--json", "/skill:pack-check reopen", config=v1)
+        assert "SKILL-V1" in json.dumps(server.requests[-1])
+        assert "SKILL-V2" not in json.dumps(server.requests[-1])
+        rejected = invoke("package", "remove", "text-resources", "1.0.0", check=False)
+        assert (
+            rejected.returncode
+            and "PackageInUse" in rejected.stderr
+            and history.name in rejected.stderr
+        )
+        removed = json.loads(
+            invoke("package", "remove", "text-resources", "1.0.0", "--force").stdout
+        )
+        assert removed["affected_bindings"] and history.exists()
+        calls = len(server.requests)
+        reopen = invoke("--session", history, "--json", "Continue", config=v1, check=False)
+        assert reopen.returncode and "PackageIntegrity" in reopen.stderr
+        assert len(server.requests) == calls
+        return (
+            {
+                "v1_digest": installed["digest"],
+                "v2_digest": upgraded["digest"],
+                "git_commit": commit,
+                "v1_lock": locked_v1["composition"]["resource_packages"],
+                "v2_lock": locked_v2["composition"]["resource_packages"],
+                "model_requests": server.requests,
+                "removed_bindings": removed["affected_bindings"],
+                "missing_reopen": reopen.stderr,
+            },
+            archive,
+            installed["digest"],
+        )
+    finally:
+        server.close()
+
+
 def main() -> None:
     os.environ["EDEN_CONTEXT_KEY"] = "context-verifier-key"
     resolve_openssl()
@@ -290,6 +465,24 @@ def main() -> None:
         assert "SKILL-BODY-ONLY-ON-DEMAND" not in json.dumps(resource)
         assert resource["skills"][0]["name"] == "check"
         results["untrusted_malformed_settings_ignored"] = True
+        broken_resource = global_dir / "prompts/broken.md"
+        broken_resource.write_text("---\nname: [\n---\nbroken", encoding="utf-8")
+        isolated = json.loads(command("resources", "list").stdout)
+        assert any(s["name"] == "check" for s in isolated["skills"])
+        assert any("broken.md" in d["message"] for d in isolated["diagnostics"])
+        required_composition = copy.deepcopy(base)
+        for entry in required_composition["packages"]:
+            if entry["descriptor"]["package"] == "workspace-resources":
+                entry["config"] = {"template_paths": [str(broken_resource)]}
+        required_config = destination / "required-resource.json"
+        write(required_config, required_composition)
+        assert command("resources", "list", config=required_config, check=False).returncode != 0
+        broken_resource.unlink()
+        results["startup_optional_isolation"] = {
+            "valid_skill_retained": True,
+            "path_diagnostic": True,
+            "explicit_required_rejected": True,
+        }
         (project / ".eden/settings.json").unlink()
         results["resource_reload"] = json.loads(
             run([probe, destination / "composition.json", project, "resources"], scratch).stdout
@@ -304,6 +497,10 @@ def main() -> None:
             run([probe, destination / "composition.json", project, "cancel-search"], scratch).stdout
         )
         assert stopped(results["search_cancel"]["stopped_worker_pid"])
+        results["search_parity"] = json.loads(
+            run([probe, destination / "composition.json", project, "search-parity"], scratch).stdout
+        )
+        assert stopped(results["search_parity"]["stopped_worker_pid"])
         # The installed host and probe are already fixed; only SDK and author sources follow.
         results["default_search_loop"] = default_search_loop(destination, scratch, base)
         authors = author_packages(destination, scratch)
@@ -597,6 +794,10 @@ def main() -> None:
             finally:
                 server.close()
 
+        results["text_package_lifecycle"], text_archive, text_digest = text_package_lifecycle(
+            destination, scratch, base
+        )
+
         source = scratch / "bundle"
         source.mkdir()
         artifact = pathlib.Path(authors[0]["library"])
@@ -837,7 +1038,7 @@ def main() -> None:
                     self.end_headers()
                     return
                 self.send_response(200)
-                payload = archive.read_bytes()
+                payload = (text_archive if self.path == "/text-bundle" else archive).read_bytes()
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
                 self.wfile.write(payload)
@@ -891,6 +1092,26 @@ def main() -> None:
                 ).returncode
                 != 0
             )
+            text_receipt = json.loads(
+                command(
+                    "package",
+                    "install",
+                    "--source-json",
+                    json.dumps(
+                        {
+                            "kind": "https",
+                            "url": f"https://127.0.0.1:{tls.server_port}/text-bundle",
+                            "sha256": hashlib.sha256(text_archive.read_bytes()).hexdigest(),
+                        }
+                    ),
+                    config=tls_path,
+                ).stdout
+            )
+            assert text_receipt["manifest"] is None and text_receipt["digest"] == text_digest
+            results["text_package_https"] = {
+                "digest": text_receipt["digest"],
+                "source": text_receipt["source"],
+            }
             results["https_verified_digest_and_no_downgrade"] = True
         finally:
             tls.shutdown()

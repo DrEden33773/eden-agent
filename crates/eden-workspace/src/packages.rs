@@ -1,5 +1,8 @@
 //! Data-only validation and reference records for immutable installed packages.
-use eden_protocol::{Composition, Fault, PackageManifest};
+use eden_protocol::{
+    Composition, Fault, PackageManifest,
+    resources::{LockedResourcePackage, PackageResources},
+};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -95,18 +98,75 @@ pub fn verify(root: &Path) -> Result<Value, Fault> {
             root.display()
         )));
     }
-    let manifest: PackageManifest =
-        serde_json::from_value(receipt["manifest"].clone()).map_err(fail)?;
-    let library = std::fs::canonicalize(root.join(&manifest.library)).map_err(fail)?;
-    if !library.starts_with(std::fs::canonicalize(root).map_err(fail)?) {
-        return Err(fail("installed library escapes its package"));
+    if !receipt["manifest"].is_null() {
+        let manifest: PackageManifest =
+            serde_json::from_value(receipt["manifest"].clone()).map_err(fail)?;
+        let library = std::fs::canonicalize(root.join(&manifest.library)).map_err(fail)?;
+        if !library.starts_with(std::fs::canonicalize(root).map_err(fail)?) {
+            return Err(fail("installed library escapes its package"));
+        }
+    }
+    if !receipt["resources"].is_null() {
+        let resources: PackageResources =
+            serde_json::from_value(receipt["resources"].clone()).map_err(fail)?;
+        validate_resource_paths(root, &resources)?;
+    } else if receipt["manifest"].is_null() {
+        return Err(fail(
+            "package receipt contains neither native nor text resources",
+        ));
     }
     Ok(receipt)
 }
+/// Verify declared text roots exist within their immutable installed package.
+/// Relative paths cannot escape via parents or symlinks.
+pub fn validate_resource_paths(root: &Path, manifest: &PackageResources) -> Result<(), Fault> {
+    let canonical = std::fs::canonicalize(root).map_err(fail)?;
+    for relative in manifest.skills.iter().chain(&manifest.templates) {
+        let path = Path::new(relative);
+        if path.as_os_str().is_empty()
+            || path.is_absolute()
+            || path.components().any(|part| {
+                !matches!(
+                    part,
+                    std::path::Component::Normal(_) | std::path::Component::CurDir
+                )
+            })
+        {
+            return Err(fail("resource path must stay inside package"));
+        }
+        let actual = std::fs::canonicalize(root.join(path)).map_err(fail)?;
+        if !actual.starts_with(&canonical) {
+            return Err(fail("resource path escapes package"));
+        }
+    }
+    Ok(())
+}
+
+/// Validate locked resource identities before either native loading or direct
+/// ResourceSource initialization. A missing or changed version is not substituted.
+pub fn validate_resource_packages(packages: &[LockedResourcePackage]) -> Result<(), Fault> {
+    let mut names = std::collections::BTreeSet::new();
+    for package in packages {
+        if !names.insert(&package.manifest.name) {
+            return Err(fail("duplicate resource package selection"));
+        }
+        let receipt = verify(Path::new(&package.root))?;
+        let resources: PackageResources =
+            serde_json::from_value(receipt["resources"].clone()).map_err(fail)?;
+        if resources != package.manifest || receipt["digest"].as_str() != Some(&package.digest) {
+            return Err(fail(
+                "locked resource package differs from installed receipt",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Check every package of a composition before any library is loaded: each
 /// managed package must match its installed receipt, and a library inside the
 /// store without a receipt is refused rather than treated as a loose one.
 pub fn validate(composition: &Composition, store: &Path) -> Result<(), Fault> {
+    validate_resource_packages(&composition.resource_packages)?;
     let packages = store.join("packages");
     let packages = std::fs::canonicalize(packages).ok();
     for package in &composition.packages {
@@ -152,7 +212,16 @@ pub fn resolve_paths(
     for package in &mut composition.packages {
         package.library = base.join(&package.library).to_string_lossy().into_owned();
     }
+    for package in &mut composition.resource_packages {
+        package.root = base.join(&package.root).to_string_lossy().into_owned();
+    }
     validate(composition, store)?;
+    for package in &mut composition.resource_packages {
+        package.root = std::fs::canonicalize(&package.root)
+            .map_err(fail)?
+            .to_string_lossy()
+            .into_owned();
+    }
     for package in &mut composition.packages {
         package.library = std::fs::canonicalize(&package.library)
             .map_err(|e| {
@@ -189,6 +258,7 @@ pub fn register_pending(
             .packages
             .iter()
             .map(|p| p.library.clone())
+            .chain(composition.resource_packages.iter().map(|p| p.root.clone()))
             .collect(),
         pending,
     )
@@ -429,6 +499,7 @@ mod tests {
         )
         .unwrap();
         let mut direct = Composition {
+            resource_packages: vec![],
             packages: vec![target_manifest],
             roles: Default::default(),
         };

@@ -520,8 +520,10 @@ dependencies = [
 name = "eden-coding-tools"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "eden-plugin-sdk",
  "eden-process",
+ "eden-workspace",
  "libc",
  "serde",
  "tokio",
@@ -628,11 +630,13 @@ name = "eden-search"
 version = "0.1.0"
 dependencies = [
  "eden-plugin-sdk",
+ "eden-workspace",
  "fff-search",
  "globset",
  "ignore",
  "neo_frizbee",
  "regex",
+ "regex-syntax",
  "serde",
  "serde_json",
  "sha2",
@@ -661,6 +665,9 @@ name = "eden-workspace-resources"
 version = "0.1.0"
 dependencies = [
  "eden-plugin-sdk",
+ "eden-workspace",
+ "globset",
+ "ignore",
  "serde",
  "serde_yaml_ng",
 ]

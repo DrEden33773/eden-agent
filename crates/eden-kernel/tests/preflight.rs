@@ -9,6 +9,7 @@ use eden_protocol::{
 fn manifest() -> Composition {
     let roles = [AGENT_LOOP, CONTEXT, PROVIDER, TOOL];
     Composition {
+        resource_packages: vec![],
         packages: vec![PackageManifest {
             descriptor: Descriptor {
                 package: "standard".into(),

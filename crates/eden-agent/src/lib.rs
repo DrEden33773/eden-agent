@@ -1,5 +1,6 @@
 //! Shared persistent and memory session API for the CLI and Rust consumers.
 use eden_kernel::{Events, Kernel};
+mod attempts;
 mod composition;
 mod generation;
 mod workspace_setup;
@@ -369,6 +370,28 @@ impl Session {
         tokio::spawn(async move {
             let mut terminal = operation(session.clone(), run_id, cancel).await;
             if session.0.coding && session.0.kernel.available() {
+                // Persistence runs in fresh admission after the cancelled invocation
+                // has drained; partial provider output can never execute here.
+                match session
+                    .service::<_, c::StoreReply>(run_id, c::STORE, &c::StoreRequest::Read)
+                    .await
+                {
+                    Ok(history) => {
+                        for attempt in attempts::records(
+                            &session.events(),
+                            run_id,
+                            &terminal,
+                            &history.records,
+                        ) {
+                            if let Err(error) =
+                                session.commit(run_id, "model_attempt", attempt).await
+                            {
+                                terminal.cleanup_errors.push(error);
+                            }
+                        }
+                    }
+                    Err(error) => terminal.cleanup_errors.push(error),
+                }
                 if let Err(error) = session
                     .service::<_, Vec<c::QueueEntry>>(run_id, c::QUEUE, &c::QueueRequest::Restore)
                     .await

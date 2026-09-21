@@ -144,12 +144,74 @@ fn add_uncertainties(items: &mut Vec<Item>, payload: &Value) {
         )));
     }
 }
-fn estimate(items: &[Item]) -> u64 {
+pub(crate) fn estimate(items: &[Item]) -> u64 {
     items
         .iter()
-        .map(|item| serde_json::to_string(item).map_or(0, |s| s.chars().count() as u64 / 4 + 1))
+        .map(|item| match item {
+            Item::Message { content, .. } => {
+                content
+                    .iter()
+                    .map(|block| match block {
+                        Block::Text { text } => text.chars().count() as u64 / 4 + 1,
+                        // Binary attachment size is not text token usage. Until provider usage is
+                        // available use a bounded block allowance, never base64 character count.
+                        _ => 1024,
+                    })
+                    .sum::<u64>()
+                    + 4
+            }
+            Item::ToolResult { result, .. } => {
+                result.text.chars().count() as u64 / 4
+                    + 1
+                    + result
+                        .content
+                        .iter()
+                        .map(|block| match block {
+                            Block::Text { text } => text.chars().count() as u64 / 4 + 1,
+                            _ => 1024,
+                        })
+                        .sum::<u64>()
+                    + result.details.to_string().chars().count() as u64 / 4
+                    + 1
+                    + serde_json::to_string(&result.artifacts)
+                        .map_or(0, |s| s.chars().count() as u64 / 4 + 1)
+            }
+            _ => serde_json::to_string(item).map_or(0, |s| s.chars().count() as u64 / 4 + 1),
+        })
         .sum()
 }
+pub(crate) fn generation(path: &[Record]) -> u64 {
+    path.iter()
+        .rev()
+        .find(|r| r.kind == "compaction")
+        .map_or(0, |r| r.sequence)
+}
+pub(crate) fn usage_tokens(usage: &Value) -> Option<u64> {
+    usage["total_tokens"].as_u64().or_else(|| {
+        Some(
+            usage["input_tokens"]
+                .as_u64()?
+                .saturating_add(usage["output_tokens"].as_u64()?),
+        )
+    })
+}
+fn calibrated_estimate(path: &[Record], estimate: u64) -> u64 {
+    let current = generation(path);
+    path.iter()
+        .rev()
+        .find_map(|record| {
+            if record.kind != "model_response"
+                || record.payload["usage_generation"].as_u64()? != current
+            {
+                return None;
+            }
+            let total = usage_tokens(&record.payload["usage"])?;
+            let baseline = record.payload["response_estimate"].as_u64()?;
+            Some(total.saturating_add(estimate.saturating_sub(baseline)))
+        })
+        .unwrap_or(estimate)
+}
+
 fn retained_cut(path: &[Record], keep_recent_tokens: u64) -> Result<usize, Fault> {
     // Keep about 20k recent tokens. A cut may only precede a complete assistant/tool round.
     let first = path
@@ -335,6 +397,14 @@ fn summary_safe_items(items: Vec<Item>) -> Vec<Item> {
                     })
                     .collect(),
             },
+            Item::ToolResult { call_id, mut result } => {
+                result.content = result.content.into_iter().map(|block| match block {
+                    Block::Text { .. } => block,
+                    Block::Image { media_type, .. } => Block::Text { text: format!("[Image tool output {media_type}; preserved in original record]") },
+                    Block::File { name, media_type, .. } => Block::Text { text: format!("[File tool output {name} ({media_type}); preserved in original record]") },
+                }).collect();
+                Item::ToolResult { call_id, result }
+            }
             Item::ProviderState { provider, .. } => text_item(format!(
                 "[Opaque {provider} provider state preserved in original record]"
             )),
@@ -375,6 +445,43 @@ async fn interpreted(records: &[Record], cx: &CallContext) -> Result<Vec<Item>, 
         Ok(vec![])
     }
 }
+fn system_item(input: &ContextInput) -> Item {
+    let selected = input.tools.clone().unwrap_or_else(tools);
+    let mut system = input.resources.as_ref().and_then(|r| r.system.clone()).unwrap_or_else(||
+        "You are eden, a coding assistant. Use the available tools to inspect, change and verify the project. Report observed results accurately. Tool failures are evidence to address; do not claim unexecuted checks passed.".into());
+    system.push_str(&format!("\n\nWorking directory: {}", input.cwd));
+    if let Some(resources) = &input.resources {
+        system.push_str("\n\n");
+        system.push_str(&resources.append_system);
+        system.push_str(&resources.instructions);
+        let skill_tool = selected.iter().any(|tool| tool.name == "skill");
+        let read_tool = selected.iter().any(|tool| tool.name == "read");
+        if skill_tool || read_tool {
+            for skill in resources
+                .skills
+                .iter()
+                .filter(|skill| skill.model_invocable)
+            {
+                let loading = if skill_tool {
+                    "Use the skill tool to load its instructions on demand.".to_owned()
+                } else {
+                    format!(
+                        "Use read with path eden-resource://skill/{} to load its frozen instructions.",
+                        skill.name
+                    )
+                };
+                system.push_str(&format!(
+                    "\nAvailable skill {}: {}. {}",
+                    skill.name, skill.description, loading
+                ));
+            }
+        }
+    }
+    Item::Message {
+        role: "system".into(),
+        content: vec![Block::Text { text: system }],
+    }
+}
 pub(crate) async fn context(
     mut input: ContextInput,
     cx: CallContext,
@@ -407,11 +514,17 @@ pub(crate) async fn context(
     projected.extend(input.items.clone());
     let threshold = settings.compaction_enabled
         && input.limits.context_window > 0
-        && estimate(&projected)
-            > input
-                .limits
-                .context_window
-                .saturating_sub(settings.reserve_tokens);
+        && calibrated_estimate(
+            &path,
+            estimate(&projected)
+                + estimate(&extension_items)
+                + estimate(&[system_item(&input)])
+                + serde_json::to_string(&input.tools.clone().unwrap_or_else(tools))
+                    .map_or(0, |s| s.chars().count() as u64 / 4 + 1),
+        ) > input
+            .limits
+            .context_window
+            .saturating_sub(settings.reserve_tokens);
     if input.action == "compact"
         || input.action == "branch_summary"
         || ((input.action.is_empty() || input.action == "project") && threshold)
@@ -477,6 +590,11 @@ pub(crate) async fn context(
                 ))?
             )));
             summary_items.extend(extension_items.clone());
+            let before_summary: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
+            let request_id = format!("{}:{}", cx.run_id(), before_summary.sequence + 1);
+            let request_record = json!({ "request_id": request_id, "purpose": "summary" });
+            append(&cx, "model_request", request_record.clone()).await?;
+            cx.emit("model_request", request_record)?;
             let reply = super::provider_retry(
                 &cx,
                 &ModelInput {
@@ -532,6 +650,8 @@ pub(crate) async fn context(
             };
             let mut payload = json!({
                 "summary": summary,
+                "usage": reply.usage,
+                "request_id": request_id,
                 "read_files": read,
                 "modified_files": modified,
                 "uncertainties": uncertainties,
@@ -545,41 +665,13 @@ pub(crate) async fn context(
                     json!(path.first().map_or(cx.session_id(), |r| r.session_id));
                 payload["origin_ids"] = json!(path.iter().map(|r| r.sequence).collect::<Vec<_>>());
             }
+            cx.emit("model_usage", reply.usage)?;
             append(&cx, kind, payload).await?;
             let history: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
             projected = project_records(&history.records)?;
         }
     }
-    let mut system = format!(
-        concat!(
-            "You are eden, a coding assistant. Work in {}. Use the available tools to inspect, change ",
-            "and verify the project. Report observed results accurately. Tool failures are evidence ",
-            "to address; do not claim unexecuted checks passed.",
-        ),
-        input.cwd
-    );
-    if let Some(resources) = &input.resources {
-        if let Some(replacement) = &resources.system {
-            system.clone_from(replacement);
-        }
-        system.push_str("\n\n");
-        system.push_str(&resources.append_system);
-        system.push_str(&resources.instructions);
-        for skill in resources
-            .skills
-            .iter()
-            .filter(|skill| skill.model_invocable)
-        {
-            system.push_str(&format!(
-                "\nAvailable skill {}: {}. Use the skill tool to load its instructions on demand.",
-                skill.name, skill.description
-            ));
-        }
-    }
-    let mut items = vec![Item::Message {
-        role: "system".into(),
-        content: vec![Block::Text { text: system }],
-    }];
+    let mut items = vec![system_item(&input)];
     items.extend(projected);
     items.extend(extension_items);
     Ok(ModelInput {
@@ -603,6 +695,80 @@ mod tests {
             kind: kind.into(),
             payload,
         }
+    }
+    #[test]
+    fn skill_catalog_uses_an_available_loader_and_custom_system_keeps_cwd() {
+        let snapshot = r::Snapshot {
+            system: Some("Custom system".into()),
+            skills: vec![r::Resource {
+                name: "review".into(),
+                description: "Review changes".into(),
+                path: "/mutable/SKILL.md".into(),
+                model_invocable: true,
+            }],
+            ..r::Snapshot::default()
+        };
+        let mut input: ContextInput = serde_json::from_value(json!({
+            "cwd": "/project",
+            "items": [],
+            "resources": snapshot,
+            "tools": [],
+        }))
+        .unwrap();
+        let render = |input: &ContextInput| serde_json::to_string(&system_item(input)).unwrap();
+        let absent = render(&input);
+        assert!(absent.contains("Custom system"));
+        assert!(absent.contains("Working directory: /project"));
+        assert!(!absent.contains("Available skill"));
+        input.tools = Some(vec![ToolDefinition {
+            name: "read".into(),
+            description: String::new(),
+            parameters: Value::Null,
+        }]);
+        let read = render(&input);
+        assert!(read.contains("eden-resource://skill/review"));
+        assert!(!read.contains("Use the skill tool"));
+        input.tools.as_mut().unwrap()[0].name = "skill".into();
+        assert!(render(&input).contains("Use the skill tool"));
+    }
+    #[test]
+    fn usage_is_calibrated_only_within_the_same_projection_generation() {
+        let mut path = vec![record(
+            1,
+            "model_response",
+            json!({
+                "usage": { "total_tokens": 90000 },
+                "usage_generation": 0,
+                "request_estimate": 20,
+                "response_estimate": 25,
+            }),
+        )];
+        assert_eq!(calibrated_estimate(&path, 40), 90015);
+        path.push(record(
+            2,
+            "compaction",
+            json!({ "summary": "new", "first_kept": 0 }),
+        ));
+        assert_eq!(calibrated_estimate(&path, 40), 40);
+        path.push(record(
+            3,
+            "model_response",
+            json!({
+                "usage": { "total_tokens": 800 },
+                "usage_generation": 2,
+                "response_estimate": 25,
+            }),
+        ));
+        assert_eq!(calibrated_estimate(&path, 40), 815);
+    }
+    #[test]
+    fn failed_attempt_text_and_partial_tools_never_enter_projection() {
+        let path = vec![record(
+            1,
+            "model_attempt",
+            json!({ "status": "failed", "text": "partial secret", "tool_arguments": "{broken" }),
+        )];
+        assert!(project_records(&path).unwrap().is_empty());
     }
     #[test]
     fn manual_compaction_of_short_transcript_keeps_every_original_message() {
@@ -776,6 +942,9 @@ mod tests {
                 json!(Item::ToolResult {
                     call_id: "a".into(),
                     result: ToolResult {
+                        content: vec![],
+                        details: serde_json::Value::Null,
+                        artifacts: vec![],
                         text: "x".repeat(90000),
                         exit_code: None,
                         truncated: false,
@@ -789,6 +958,9 @@ mod tests {
                 json!(Item::ToolResult {
                     call_id: "b".into(),
                     result: ToolResult {
+                        content: vec![],
+                        details: serde_json::Value::Null,
+                        artifacts: vec![],
                         text: "done".into(),
                         exit_code: None,
                         truncated: false,
@@ -846,6 +1018,9 @@ mod tests {
                 json!(Item::ToolResult {
                     call_id: "a".into(),
                     result: ToolResult {
+                        content: vec![],
+                        details: serde_json::Value::Null,
+                        artifacts: vec![],
                         text: "x".repeat(90000),
                         exit_code: None,
                         truncated: false,
@@ -859,6 +1034,9 @@ mod tests {
                 json!(Item::ToolResult {
                     call_id: "b".into(),
                     result: ToolResult {
+                        content: vec![],
+                        details: serde_json::Value::Null,
+                        artifacts: vec![],
                         text: "done".into(),
                         exit_code: None,
                         truncated: false,

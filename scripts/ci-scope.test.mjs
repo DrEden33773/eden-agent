@@ -4,22 +4,56 @@ import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { changedPaths, HEAVY_OSES, heavyRequired, qualityPass, scopeFor } from "./ci-scope.mjs";
+import { changedPaths, FAMILIES, qualityPass, scopeFor, staticPass } from "./ci-scope.mjs";
 
-test("only explicitly recognized prose PRs omit native jobs", () => {
-  assert.equal(scopeFor("pull_request", ["README.md", "docs/a/b.md"]).native, false);
-  for (const path of [
-    "AGENTS.md",
-    ".github/workflows/quality.yml",
-    "scripts/ci-scope.mjs",
-    "docs/sample.rs",
-    "plugins/new/src/lib.rs",
-    "Cargo.lock",
-  ]) {
-    assert.equal(scopeFor("pull_request", ["README.md", path]).native, true);
+test("associated families union inputs and keep native suites together", () => {
+  const selected = (paths, event = "pull_request") =>
+    FAMILIES.filter((key) => scopeFor(event, paths)[key]);
+  for (const event of ["pull_request", "push"]) {
+    assert.deepEqual(selected(["README.md", "docs/a/b.md", "AGENTS.md"], event), ["markdown"]);
+    assert.deepEqual(selected(["scripts/install.py"], event), ["python", "native"]);
+    assert.deepEqual(selected(["scripts/prepare-pi-reference.mjs"], event), [
+      "javascript",
+      "native",
+    ]);
+    assert.deepEqual(selected(["crates/a/src/lib.rs", "README.md"], event), [
+      "markdown",
+      "rust",
+      "native",
+    ]);
   }
-  assert.equal(scopeFor("push", ["README.md"]).native, true);
-  assert.equal(scopeFor("pull_request", []).native, true);
+  for (const path of [
+    "Cargo.lock",
+    "tests/contract-authors/a/Cargo.toml",
+    ".cargo/config.toml",
+    "rust-toolchain.toml",
+    "rustfmt.toml",
+    "clippy.toml",
+  ])
+    assert.deepEqual(selected([path]), ["rust", "native"]);
+  assert.deepEqual(selected([".markdownlint-cli2.jsonc"]), ["markdown", "native"]);
+  assert.deepEqual(selected(["biome.json"]), ["javascript", "native"]);
+  for (const path of [
+    "scripts/ci-scope.mjs",
+    "scripts/ci-proof.test.mjs",
+    "scripts/test_ci_cache.py",
+    "scripts/checks.mjs",
+    "scripts/install-hooks.mjs",
+    "tests/development-hooks.test.mjs",
+    ".githooks/pre-commit",
+    ".github/workflows/quality.yml",
+    "package.json",
+    ".gitignore",
+    "THIRD_PARTY_NOTICES.md",
+    "LICENSE",
+    "new-fixture.json",
+  ])
+    assert.deepEqual(selected([path]), FAMILIES, path);
+  assert.deepEqual(selected(["pnpm-lock.yaml"]), ["markdown", "javascript", "native"]);
+  for (const path of ["pyproject.toml", "uv.lock"])
+    assert.deepEqual(selected([path]), ["python", "native"]);
+  assert.deepEqual(selected([]), FAMILIES);
+  assert.deepEqual(selected(["README.md"], "workflow_dispatch"), FAMILIES);
 });
 
 test("renaming executable input into docs retains the removed native path", () => {
@@ -45,73 +79,82 @@ test("renaming executable input into docs retains the removed native path", () =
     assert.deepEqual(paths, ["build.rs", "docs/sample.md"]);
     assert.equal(scopeFor("pull_request", paths).native, true);
     assert.throws(() => changedPaths("--invalid", base, root), /exact commit IDs/);
+    assert.throws(() => changedPaths("f".repeat(40), base, root), /Unable to inspect/);
+    const head = git("rev-parse", "HEAD");
+    git("checkout", "--detach", base);
+    writeFileSync(join(root, "README.md"), "base advanced\n");
+    git("add", ".");
+    git("-c", "commit.gpgsign=false", "commit", "-qm", "base advances");
+    const advanced = git("rev-parse", "HEAD");
+    assert.deepEqual(changedPaths(advanced, head, root), ["build.rs", "docs/sample.md"]);
+    assert.deepEqual(changedPaths(advanced, head, root, "push"), [
+      "README.md",
+      "build.rs",
+      "docs/sample.md",
+    ]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("Quality rejects failed, cancelled, missing and unexpectedly skipped requirements", () => {
-  assert.equal(qualityPass({ lint: "success", required: "true", native: "success" }), true);
-  assert.equal(qualityPass({ lint: "success", required: "false", native: "skipped" }), true);
+test("Quality requires successful scope and every selected result", () => {
+  const valid = {
+    event: "pull_request",
+    scope: "success",
+    selected: scopeFor("pull_request", ["README.md"]),
+    lint: "success",
+    native: "skipped",
+  };
+  assert.equal(qualityPass(valid), true);
   for (const status of ["failure", "cancelled", "skipped", undefined]) {
-    assert.equal(qualityPass({ lint: "success", required: "true", native: status }), false);
-    assert.equal(qualityPass({ lint: status, required: "false", native: "skipped" }), false);
+    assert.equal(qualityPass({ ...valid, scope: status }), false);
+    assert.equal(qualityPass({ ...valid, lint: status }), false);
+    assert.equal(
+      qualityPass({ ...valid, selected: { ...valid.selected, native: true }, native: status }),
+      false,
+    );
   }
-  assert.equal(qualityPass({ lint: "success", native: "skipped" }), false);
+  assert.equal(qualityPass({ ...valid, selected: { native: false } }), false);
+  assert.equal(qualityPass({ ...valid, native: "success" }), false);
 });
 
-test("a main push accepts the proof only when it replaced a warm heavy run", () => {
+test("main proof reuses selected coverage independently of cache availability", () => {
+  const selected = scopeFor("push", ["README.md"]);
   const proven = {
     event: "push",
+    scope: "success",
+    selected,
     proof: "success",
     verified: "true",
-    heavy: "false",
     lint: "skipped",
     native: "skipped",
   };
   assert.equal(qualityPass(proven), true);
-  // The proof is not evidence for a run that skipped without it, or that ran
-  // part of the heavy work anyway.
-  assert.equal(qualityPass({ ...proven, proof: "failure" }), false);
-  assert.equal(qualityPass({ ...proven, proof: "skipped" }), false);
+  for (const proof of ["failure", "cancelled", "skipped", undefined]) {
+    assert.equal(qualityPass({ ...proven, proof }), false);
+    assert.equal(qualityPass({ ...proven, proof, lint: "success" }), true);
+  }
   assert.equal(qualityPass({ ...proven, verified: "false" }), false);
   assert.equal(qualityPass({ ...proven, lint: "success" }), false);
-  assert.equal(qualityPass({ ...proven, native: "success" }), false);
-  // A heavy run is its own evidence, including when the proof could not be made.
-  for (const proof of ["success", "failure", "cancelled", undefined]) {
-    assert.equal(
-      qualityPass({ event: "push", proof, heavy: "true", lint: "success", native: "success" }),
-      true,
-    );
-    assert.equal(
-      qualityPass({ event: "push", proof, heavy: "true", lint: "success", native: "skipped" }),
-      false,
-    );
-    assert.equal(
-      qualityPass({ event: "push", proof, heavy: "true", lint: "skipped", native: "skipped" }),
-      false,
-    );
-  }
-  // A missing verdict runs the heavy jobs, so it can never pass on the proof.
-  assert.equal(
-    qualityPass({
-      event: "push",
-      proof: "success",
-      verified: "true",
-      lint: "skipped",
-      native: "skipped",
-    }),
-    false,
-  );
+  assert.equal(qualityPass({ ...proven, scope: "failure" }), false);
 });
 
-test("the heavy jobs are required whenever a runner cache is cold or missing", () => {
-  const warm = new Map(HEAVY_OSES.map((os) => [os, true]));
-  assert.equal(heavyRequired(warm), false);
-  assert.equal(heavyRequired(new Map()), true);
-  for (const os of HEAVY_OSES) {
-    for (const value of [false, undefined]) {
-      assert.equal(heavyRequired(new Map(warm).set(os, value)), true);
-    }
-  }
+test("static gate rejects missing, skipped, failed or cancelled selected steps", () => {
+  const selected = scopeFor("pull_request", ["README.md"]);
+  const steps = Object.fromEntries(
+    ["markdown", "python", "javascript", "formatter", "format", "doc"].map((id) => [
+      id,
+      { outcome: id === "markdown" ? "success" : "skipped" },
+    ]),
+  );
+  assert.equal(staticPass(selected, steps), true);
+  for (const outcome of ["failure", "cancelled", "skipped", undefined])
+    assert.equal(staticPass(selected, { ...steps, markdown: { outcome } }), false);
+  assert.equal(staticPass(selected, { ...steps, doc: { outcome: "success" } }), false);
+  assert.equal(staticPass({}, steps), false);
+  const all = scopeFor("workflow_dispatch", []);
+  const success = Object.fromEntries(Object.keys(steps).map((id) => [id, { outcome: "success" }]));
+  assert.equal(staticPass(all, success), true);
+  for (const id of Object.keys(success))
+    assert.equal(staticPass(all, { ...success, [id]: { outcome: "skipped" } }), false);
 });

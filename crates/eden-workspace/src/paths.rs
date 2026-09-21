@@ -22,17 +22,24 @@ fn home_with(env: impl Fn(&str) -> Option<OsString>, windows: bool) -> Option<Pa
         .map(PathBuf::from)
 }
 
-/// Expand the current-user home and, on Windows, Bash drive paths, then resolve
+/// Expand the current-user home and, on Windows, Bash drive and /tmp paths, then resolve
 /// relative paths against the caller's base. This does not canonicalize, guess
 /// names, check existence or grant trust; those remain the caller's next step.
 pub fn resolve_path(base: &Path, path: &Path) -> Result<PathBuf, Fault> {
-    resolve_with(base, path, user_home().as_deref(), cfg!(windows))
+    resolve_with(
+        base,
+        path,
+        user_home().as_deref(),
+        cfg!(windows),
+        std::env::temp_dir().as_path(),
+    )
 }
 fn resolve_with(
     base: &Path,
     path: &Path,
     home: Option<&Path>,
     windows: bool,
+    temp: &Path,
 ) -> Result<PathBuf, Fault> {
     let Some(text) = path.to_str() else {
         return Ok(base.join(path));
@@ -55,6 +62,14 @@ fn resolve_with(
         });
     }
     if windows {
+        // Git Bash emits its /tmp mount for files under the native OS temporary
+        // directory. Preserve that mount when a shell path returns to file tools.
+        if text == "/tmp" {
+            return Ok(temp.to_owned());
+        }
+        if let Some(relative) = text.strip_prefix("/tmp/") {
+            return Ok(temp.join(relative.trim_start_matches('/')));
+        }
         let normalized = text.replace('\\', "/");
         let drive_path = text
             .starts_with('/')
@@ -96,11 +111,45 @@ fn resolve_with(
 mod tests {
     use super::*;
     #[test]
+    fn windows_msys_tmp_maps_to_injected_native_temp_without_widening_prefix() {
+        let base = Path::new("C:/project");
+        let temp = Path::new("C:/Users/runner/AppData/Local/Temp");
+        for (input, expected) in [
+            ("/tmp", temp.to_owned()),
+            ("/tmp/space 目录/文件.txt", temp.join("space 目录/文件.txt")),
+            ("/tmp//file", temp.join("file")),
+        ] {
+            assert_eq!(
+                resolve_with(base, Path::new(input), None, true, temp).unwrap(),
+                expected,
+                "{input}"
+            );
+        }
+        for input in ["/tmpx/file", r"\tmp\file"] {
+            assert_eq!(
+                resolve_with(base, Path::new(input), None, true, temp).unwrap(),
+                base.join(Path::new(input)),
+                "{input}",
+            );
+        }
+        assert_eq!(
+            resolve_with(
+                Path::new("/project"),
+                Path::new("/tmp/file"),
+                None,
+                false,
+                temp
+            )
+            .unwrap(),
+            PathBuf::from("/tmp/file")
+        );
+    }
+    #[test]
     fn native_rooted_backslash_path_is_not_a_bash_drive_path() {
         let base = Path::new("D:/project");
         let native = Path::new(r"\c\file");
         assert_eq!(
-            resolve_with(base, native, None, true).unwrap(),
+            resolve_with(base, native, None, true, Path::new("/unused-temp")).unwrap(),
             base.join(native)
         );
     }
@@ -120,7 +169,8 @@ mod tests {
                 Path::new("/project"),
                 Path::new("~/folder/new.txt"),
                 Some(&home),
-                false
+                false,
+                Path::new("/unused-temp")
             )
             .unwrap(),
             PathBuf::from("/user-home/folder/new.txt")
@@ -130,7 +180,8 @@ mod tests {
                 Path::new("/project"),
                 Path::new("~other/file"),
                 Some(&home),
-                false
+                false,
+                Path::new("/unused-temp")
             )
             .unwrap(),
             PathBuf::from("/project/~other/file")
@@ -145,7 +196,14 @@ mod tests {
             "C:\\目录 with spaces\\file.txt",
         ] {
             assert_eq!(
-                resolve_with(Path::new("D:/project"), Path::new(input), None, true).unwrap(),
+                resolve_with(
+                    Path::new("D:/project"),
+                    Path::new(input),
+                    None,
+                    true,
+                    Path::new("/unused-temp")
+                )
+                .unwrap(),
                 PathBuf::from("C:/目录 with spaces/file.txt")
             );
         }
@@ -154,19 +212,45 @@ mod tests {
                 Path::new("D:/project"),
                 Path::new("C:ambiguous"),
                 None,
-                true
+                true,
+                Path::new("/unused-temp")
             )
             .is_err()
         );
         assert_eq!(
-            resolve_with(Path::new("/project"), Path::new("/c/file"), None, false).unwrap(),
+            resolve_with(
+                Path::new("/project"),
+                Path::new("/c/file"),
+                None,
+                false,
+                Path::new("/unused-temp")
+            )
+            .unwrap(),
             PathBuf::from("/c/file")
         );
     }
     #[test]
     fn missing_home_is_an_error_only_for_current_user_expansion() {
-        assert!(resolve_with(Path::new("/project"), Path::new("~/file"), None, false).is_err());
-        assert!(resolve_with(Path::new("/project"), Path::new("relative"), None, false).is_ok());
+        assert!(
+            resolve_with(
+                Path::new("/project"),
+                Path::new("~/file"),
+                None,
+                false,
+                Path::new("/unused-temp")
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_with(
+                Path::new("/project"),
+                Path::new("relative"),
+                None,
+                false,
+                Path::new("/unused-temp")
+            )
+            .is_ok()
+        );
         assert_eq!(
             home_with(
                 |key| Some(

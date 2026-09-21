@@ -453,7 +453,7 @@ class ArithmeticTests(unittest.TestCase):
                 if index == 6:
                     assert result["exit_code"] == 0 and result["truncated"] is True
                     streams = {a["name"]: pathlib.Path(a["path"]) for a in result["artifacts"]}
-                    assert streams["stdout"].read_bytes().endswith(b"x" * 100000 + b"\n")
+                    assert streams["stdout"].read_bytes() == b"x" * 100000 + os.linesep.encode()
                     assert b"Ran 1 test" in streams["stderr"].read_bytes()
                     assert "Ran 1 test" in result["text"]
                     assert (project / "tests-ran.txt").read_text(

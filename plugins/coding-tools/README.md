@@ -1,6 +1,6 @@
 # Coding tools
 
-The `coding-tools` native package provides `eden.coding-tool.v1`. Each request carries an existing absolute `cwd`, a `call_id`, a tool `name`, and an `arguments` object. Relative file paths resolve against that request's cwd. Absolute file paths remain absolute. `~` and `~/...` use the operating-system user home; a custom global Eden directory does not change that home. Windows also accepts Bash drive paths such as `/c/project/file`, `/cygdrive/c/project/file` and `/mnt/c/project/file`; drive-relative `C:file` is refused. Resolution never guesses similar filenames. File tools read and write UTF-8 text.
+The `coding-tools` native package provides `eden.coding-tool.v1`. Each request carries an existing absolute `cwd`, a `call_id`, a tool `name`, and an `arguments` object. Relative file paths resolve against that request's cwd. Absolute file paths remain absolute. `~` and `~/...` use the operating-system user home; a custom global Eden directory does not change that home. Windows also accepts Bash drive paths such as `/c/project/file`, `/cygdrive/c/project/file` and `/mnt/c/project/file`. Git Bash `/tmp` and `/tmp/...` map to the operating-system temporary directory, so paths printed from a temporary working directory can be passed directly to read/edit. Native backslash-rooted paths and `/tmpx` keep their ordinary path meaning; drive-relative `C:file` is refused. Resolution never guesses similar filenames. File tools read and write UTF-8 text.
 
 | Tool | Arguments | Behavior |
 | --- | --- | --- |

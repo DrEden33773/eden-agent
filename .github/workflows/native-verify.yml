@@ -152,15 +152,15 @@ jobs:
       - name: Clippy including independent authors
         if: ${{ !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: node scripts/ci-run.mjs clippy pnpm clippy:check
-      - name: Formatter integration
-        run: node scripts/ci-run.mjs formatter-integration cargo test --locked -p eden-fmt
       - name: Git hook behavior
         if: ${{ !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: node scripts/ci-run.mjs hooks pnpm hooks:test
       # Platform sensitivity, not the crate list, decides what each runner
       # executes. These targets own the branches that really differ per OS:
       # process ownership and shell descendants, link creation, path scope and
-      # history locking, private credential permissions and catalog persistence. The other crates are pure logic or temp-directory
+      # history locking, private credential permissions and catalog persistence.
+      # eden-fmt also verifies the pinned formatter process on each native OS.
+      # The other crates are pure logic or temp-directory
       # fixtures, and their tests no longer execute off Linux; Clippy still
       # builds every target on every runner, so compilation coverage is unchanged.
       # This command's selection is declared in scripts/ci-cache.py and is part of
@@ -170,7 +170,7 @@ jobs:
       # still agree.
       - name: Platform-sensitive suites
         if: ${{ !cancelled() && runner.os != 'Linux' && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
-        run: node scripts/ci-run.mjs platform-suites cargo test --locked --no-fail-fast -p eden-process -p eden-coding-tools -p eden-search -p eden-local-history -p eden-workspace -p eden-model-access
+        run: node scripts/ci-run.mjs platform-suites cargo test --locked --no-fail-fast -p eden-process -p eden-coding-tools -p eden-search -p eden-local-history -p eden-workspace -p eden-model-access -p eden-fmt
       # Linux keeps the exact workspace command it always ran: it is the runner
       # that still executes what the other two no longer do, and a newly added
       # crate executes here. Cargo resolves features across the selected packages,

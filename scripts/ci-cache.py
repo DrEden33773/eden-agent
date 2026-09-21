@@ -53,6 +53,7 @@ LEGACY_IMAGES = {
 # that these declarations still match the commands the workflow runs.
 PLATFORM_PACKAGES = (
     "eden-coding-tools",
+    "eden-fmt",
     "eden-local-history",
     "eden-model-access",
     "eden-process",

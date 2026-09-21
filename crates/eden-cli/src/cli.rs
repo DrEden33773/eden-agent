@@ -82,6 +82,12 @@ pub struct Cli {
     /// Print more detail; repeatable
     #[arg(long, short, global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
+    /// Select provider/model before submitting the prompt
+    #[arg(long, value_name = "PROVIDER/MODEL")]
+    pub model: Option<String>,
+    /// Requested thinking level for --model
+    #[arg(long, requires = "model")]
+    pub thinking: Option<String>,
     /// Continue a saved session instead of submitting a new prompt
     #[arg(long = "continue", requires = "session", conflicts_with = "prompt")]
     pub continue_session: bool,
@@ -144,6 +150,18 @@ pub struct Cli {
 /// The command families `eden` accepts.
 #[derive(Debug, Subcommand)]
 pub enum Family {
+    /// Discover, select and refresh models
+    Models {
+        #[command(subcommand)]
+        /// Operation on model metadata or selection.
+        action: ModelAction,
+    },
+    /// Manage private API keys
+    Auth {
+        #[command(subcommand)]
+        /// Authentication operation.
+        action: AuthAction,
+    },
     /// Inspect or change saved project trust
     Trust {
         #[command(subcommand)]
@@ -422,6 +440,38 @@ pub enum SessionAction {
         #[command(flatten)]
         copy: CopyArgs,
     },
+}
+
+/// Model management shares the session and catalog services used by inference.
+#[derive(Debug, Subcommand)]
+#[allow(missing_docs)]
+pub enum ModelAction {
+    List,
+    Refresh,
+    Source {
+        url: String,
+    },
+    Select {
+        provider: String,
+        model: String,
+        #[arg(long)]
+        thinking: Option<String>,
+    },
+    Default {
+        provider: String,
+        model: String,
+        #[arg(long)]
+        thinking: Option<String>,
+    },
+    Current,
+    Cycle,
+}
+/// Secret input is read from stdin, never accepted as a command-line argument.
+#[derive(Debug, Subcommand)]
+#[allow(missing_docs)]
+pub enum AuthAction {
+    Set { provider: String },
+    Logout { provider: String },
 }
 
 /// What the probe pass reads before the authoritative parse.

@@ -3,6 +3,7 @@ use eden_kernel::{Events, Kernel};
 mod attempts;
 mod composition;
 mod generation;
+mod models;
 mod workspace_setup;
 use eden_plugin_sdk::Cancellation;
 use eden_protocol::{AGENT_LOOP, Request, RunInput, coding as c};
@@ -307,8 +308,9 @@ impl Session {
     }
     fn start_loop(&self, content: Vec<c::Block>, resume: bool) -> Result<u64, Fault> {
         self.0.kernel.get()?;
-        let payload = if self.0.coding {
+        let mut payload = if self.0.coding {
             serde_json::json!(c::RunInput {
+                target: None,
                 resume,
                 cwd: self.0.cwd.clone(),
                 content
@@ -326,6 +328,12 @@ impl Session {
         };
         let role = if self.0.coding { c::LOOP } else { AGENT_LOOP };
         self.start(false, move |session, run_id, cancel| async move {
+            if session.0.coding {
+                match session.freeze_model(run_id).await {
+                    Ok(target) => payload["target"] = serde_json::json!(target),
+                    Err(error) => return Terminal::failed(error),
+                }
+            }
             session
                 .0
                 .kernel

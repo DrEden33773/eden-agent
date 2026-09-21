@@ -248,6 +248,7 @@ async fn context(input: ContextInput, cx: CallContext) -> Result<ModelInput, Fau
     items.extend(input.items);
     items.extend(extension);
     Ok(ModelInput {
+        target: input.target.clone(),
         max_output_tokens: None,
         items,
         tools: vec![ToolDefinition {

@@ -191,7 +191,8 @@ async fn provider_retry(
                 }
                 let delay_ms = settings
                     .base_delay_ms
-                    .saturating_mul(2_u64.saturating_pow(attempt));
+                    .saturating_mul(2_u64.saturating_pow(attempt))
+                    .max(error.retry_after_ms.unwrap_or(0));
                 cx.emit(
                     "model_retry",
                     json!({ "attempt": attempt + 1, "delay_ms": delay_ms }),
@@ -310,7 +311,10 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
         )
         .await?;
     }
-    let limits = model_limits(&cx).await?;
+    let limits = match &input.target {
+        Some(target) => target.limits.clone(),
+        None => model_limits(&cx).await?,
+    };
     let mut final_answer = None;
     loop {
         let steering: Vec<QueueEntry> = cx
@@ -346,6 +350,7 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
             .call(
                 CONTEXT,
                 &ContextInput {
+                    target: input.target.clone(),
                     resources: resources.clone(),
                     tools: selected_tools.clone(),
                     action: String::new(),
@@ -372,12 +377,12 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
         append(
             &cx,
             "model_request",
-            json!({ "request_id": request_id, "queue_ids": queue_ids }),
+            json!({ "request_id": request_id, "queue_ids": queue_ids, "target": input.target }),
         )
         .await?;
         cx.emit(
             "model_request",
-            json!({ "request_id": request_id, "queue_ids": queue_ids }),
+            json!({ "request_id": request_id, "queue_ids": queue_ids, "target": input.target }),
         )?;
         let reply = match provider_retry(&cx, &projected, &settings).await {
             Ok(reply) => reply,
@@ -390,6 +395,7 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
                     .call(
                         CONTEXT,
                         &ContextInput {
+                            target: input.target.clone(),
                             resources: resources.clone(),
                             tools: selected_tools.clone(),
                             action: "compact".into(),
@@ -404,7 +410,11 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
                 projected = compacted;
                 cx.emit(
                     "model_request",
-                    json!({ "request_id": request_id, "queue_ids": queue_ids }),
+                    json!({
+                        "request_id": request_id,
+                        "queue_ids": queue_ids,
+                        "target": input.target,
+                    }),
                 )?;
                 provider_retry(&cx, &projected, &settings).await?
             }
@@ -610,6 +620,7 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
                 .call(
                     CONTEXT,
                     &ContextInput {
+                        target: input.target.clone(),
                         resources: resources.clone(),
                         tools: selected_tools.clone(),
                         action: "compact".into(),

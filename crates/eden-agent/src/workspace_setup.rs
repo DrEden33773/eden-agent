@@ -46,6 +46,15 @@ pub(crate) fn prepare(
             config["settings"] = workspace.settings.clone();
             package.config = config;
         }
+        if package.descriptor.package == "model-access" {
+            if !package.config.is_object() {
+                package.config = serde_json::json!({});
+            }
+            package.config["global_dir"] = serde_json::json!(workspace.global_dir);
+            package.config["cwd"] = serde_json::json!(cwd);
+            // Untrusted project configuration has already been excluded by discovery.
+            package.config["commands_trusted"] = serde_json::json!(true);
+        }
         if package.descriptor.package == "search" {
             if !package.config.is_object() {
                 package.config = serde_json::json!({});

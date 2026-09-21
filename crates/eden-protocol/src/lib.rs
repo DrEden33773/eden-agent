@@ -1,10 +1,11 @@
 //! Public data records shared by the host and native plugin SDK.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+pub mod models;
 pub mod resources;
 
 /// Exact host/SDK pairing for this development release.
-pub const CONTRACT: &str = "eden-native-0.3.0";
+pub const CONTRACT: &str = "eden-native-0.4.0";
 /// Agent loop role.
 pub const AGENT_LOOP: &str = "eden.agent-loop.v1";
 /// Context projection role.
@@ -24,6 +25,9 @@ pub struct Fault {
     pub code: String,
     pub source: String,
     pub message: String,
+    /// A server-directed retry delay; only transient provider failures consume it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
 }
 impl Fault {
     /// Construct a structured failure; the caller owns retry policy.
@@ -32,6 +36,7 @@ impl Fault {
             code: code.into(),
             source: source.into(),
             message: message.into(),
+            retry_after_ms: None,
         }
     }
 }
@@ -85,7 +90,7 @@ impl Terminal {
 }
 
 /// Every invocation belongs to a host-assigned session and run.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 // Field and variant names state the payload; see docs/development-checks.md#doc-comments.
 #[allow(missing_docs)]
 pub struct Request {
@@ -93,6 +98,46 @@ pub struct Request {
     pub run_id: u64,
     pub contract: String,
     pub payload: Value,
+}
+impl Request {
+    /// Only this redacted view may enter public routing events or diagnostics.
+    pub fn public_trace(&self) -> Value {
+        let input = if matches!(
+            self.contract.as_str(),
+            models::AUTH | models::CREDENTIAL_SOURCE
+        ) {
+            serde_json::json!({ "redacted": true })
+        } else {
+            self.payload.clone()
+        };
+        serde_json::json!({ "contract": self.contract, "input": input })
+    }
+}
+impl std::fmt::Debug for Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Request")
+            .field("session_id", &self.session_id)
+            .field("run_id", &self.run_id)
+            .field("public_trace", &self.public_trace())
+            .finish()
+    }
+}
+#[cfg(test)]
+mod privacy_tests {
+    use super::*;
+    #[test]
+    fn auth_and_credential_calls_never_expose_input_to_trace_or_debug() {
+        for contract in [models::AUTH, models::CREDENTIAL_SOURCE] {
+            let request = Request {
+                session_id: 1,
+                run_id: 1,
+                contract: contract.into(),
+                payload: serde_json::json!({ "api_key": "SECRET_CANARY" }),
+            };
+            assert!(!request.public_trace().to_string().contains("SECRET_CANARY"));
+            assert!(!format!("{request:?}").contains("SECRET_CANARY"));
+        }
+    }
 }
 /// Ordered, inspectable session event.
 #[derive(Clone, Debug, Serialize, Deserialize)]

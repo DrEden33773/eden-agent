@@ -670,6 +670,7 @@ impl Session {
                                     run_id,
                                     contract: c::CONTEXT.into(),
                                     payload: json!(c::ContextInput {
+                                        target: session.freeze_model(run_id).await?,
                                         resources: session.context_resources().await?,
                                         tools: session.context_tools().await?,
                                         action: "branch_summary".into(),
@@ -726,6 +727,10 @@ impl Session {
     /// Manual compaction participates in the same cancellation and settled barrier as a run.
     pub fn compact(&self, instructions: String) -> Result<u64, Fault> {
         self.start(true, move |session, run_id, cancel| async move {
+            let model_target = match session.freeze_model(run_id).await {
+                Ok(target) => target,
+                Err(error) => return Terminal::failed(error),
+            };
             let records = match session.history().await {
                 Ok(records) => records,
                 Err(error) => return Terminal::failed(error),
@@ -747,6 +752,7 @@ impl Session {
                         run_id,
                         contract: c::CONTEXT.into(),
                         payload: json!(c::ContextInput {
+                            target: model_target,
                             resources,
                             tools,
                             action: "compact".into(),

@@ -490,7 +490,9 @@ pub(crate) async fn context(
         let history: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
         input.records = history.records;
     }
-    if input.limits.context_window == 0 {
+    if let Some(target) = &input.target {
+        input.limits = target.limits.clone();
+    } else if input.limits.context_window == 0 {
         input.limits = super::model_limits(&cx).await?;
     }
     let path = if input.action == "branch_summary" {
@@ -577,12 +579,17 @@ pub(crate) async fn context(
             summary_items.extend(extension_items.clone());
             let before_summary: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
             let request_id = format!("{}:{}", cx.run_id(), before_summary.sequence + 1);
-            let request_record = json!({ "request_id": request_id, "purpose": "summary" });
+            let request_record = json!({
+                "request_id": request_id,
+                "purpose": "summary",
+                "target": input.target,
+            });
             append(&cx, "model_request", request_record.clone()).await?;
             cx.emit("model_request", request_record)?;
             let reply = super::provider_retry(
                 &cx,
                 &ModelInput {
+                    target: input.target.clone(),
                     max_output_tokens: Some(allowance),
                     items: summary_items,
                     tools: vec![],
@@ -660,6 +667,7 @@ pub(crate) async fn context(
     items.extend(projected);
     items.extend(extension_items);
     Ok(ModelInput {
+        target: input.target.clone(),
         max_output_tokens: None,
         items,
         tools: input.tools.unwrap_or_else(tools),

@@ -261,7 +261,9 @@ impl Sse {
         if line.is_empty() {
             if !self.data.is_empty() {
                 let data = self.data.trim_end_matches('\n');
-                if data != "[DONE]" {
+                if data == "[DONE]" {
+                    events.push(json!({ "type": "eden.done" }));
+                } else {
                     events.push(
                         serde_json::from_str(data)
                             .map_err(|_| failure("stream contains invalid JSON"))?,

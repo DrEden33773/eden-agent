@@ -83,6 +83,7 @@ async fn server(status: &str, body: String) -> (String, tokio::task::JoinHandle<
 }
 fn input() -> ModelInput {
     ModelInput {
+        target: None,
         max_output_tokens: None,
         items: vec![],
         tools: vec![],
@@ -133,6 +134,7 @@ async fn streams_unicode_and_complete_multiple_calls_and_projects_all_input() {
     ]));
     let (endpoint, server) = server("200 OK", body).await;
     let input = ModelInput {
+        target: None,
         max_output_tokens: None,
         items: vec![
             Item::Message {
@@ -386,7 +388,10 @@ fn sse_preserves_utf8_crlf_multiline_data_and_ignores_comments_at_every_split() 
         events.extend(decoder.push(&body.as_bytes()[split..]).unwrap());
         assert_eq!(
             events,
-            vec![json!({ "type": "response.output_text.delta", "delta": "你好🙂" })]
+            vec![
+                json!({ "type": "response.output_text.delta", "delta": "你好🙂" }),
+                json!({ "type": "eden.done" })
+            ]
         );
     }
     let mut decoder = Sse::default();
@@ -394,7 +399,7 @@ fn sse_preserves_utf8_crlf_multiline_data_and_ignores_comments_at_every_split() 
     for byte in body.as_bytes() {
         events.extend(decoder.push(&[*byte]).unwrap());
     }
-    assert_eq!(events.len(), 1);
+    assert_eq!(events.len(), 2);
 }
 
 #[test]
@@ -581,6 +586,7 @@ async fn deepseek_reasoning_and_tool_result_roundtrip_preserves_images_and_full_
     )
     .unwrap();
     let mut conversation = ModelInput {
+        target: None,
         max_output_tokens: None,
         items: vec![Item::Message {
             role: "user".into(),
@@ -996,6 +1002,7 @@ fn image_tool_output_is_native_content_with_metadata_and_old_text_is_compatible(
     });
     result.details = json!({ "kind": "image" });
     let input = ModelInput {
+        target: None,
         max_output_tokens: None,
         tools: vec![],
         items: vec![Item::ToolResult {
@@ -1010,4 +1017,157 @@ fn image_tool_output_is_native_content_with_metadata_and_old_text_is_compatible(
     let metadata: Value = serde_json::from_str(output[0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(metadata["details"]["kind"], "image");
     assert!(!metadata.to_string().contains("YWJj"));
+}
+
+#[tokio::test]
+async fn frozen_chat_route_sends_private_auth_and_waits_for_done_usage() {
+    let stream = event(json!({
+        "choices": [{ "index": 0, "delta": { "content": "hello" }, "finish_reason": null }],
+    })) + &event(
+        json!({ "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }] }),
+    ) + &event(json!({
+        "choices": [],
+        "usage": { "prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6 },
+    })) + "data: [DONE]\n\n";
+    let (url, received) = server("200 OK", stream).await;
+    let mut target = projection::test_target("openai-completions");
+    target.base_url = url.trim_end_matches("/responses").into();
+    let credential = eden_protocol::models::CredentialReply {
+        api_key: Some("PRIVATE_CANARY".into()),
+        source: "test".into(),
+        headers: Default::default(),
+    };
+    let reply = targeted::request(&target, &credential, &input(), |_, _| Ok(()))
+        .await
+        .unwrap();
+    assert_eq!(reply.usage["total_tokens"], 6);
+    let (headers, body) = received.await.unwrap();
+    assert!(headers.starts_with("POST /v1/chat/completions "));
+    assert!(
+        headers
+            .to_lowercase()
+            .contains("authorization: bearer private_canary")
+    );
+    assert_eq!(body["model"], target.model);
+    assert!(
+        !serde_json::to_string(&reply)
+            .unwrap()
+            .contains("PRIVATE_CANARY")
+    );
+}
+#[tokio::test]
+async fn frozen_anthropic_route_has_version_and_key_and_stream_completion() {
+    let stream = event(json!({
+        "type": "message_start",
+        "message": { "usage": { "input_tokens": 4, "output_tokens": 0 } },
+    })) + &event(json!({
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": { "type": "text", "text": "" },
+    })) + &event(json!({
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": { "type": "text_delta", "text": "hello" },
+    })) + &event(json!({ "type": "content_block_stop", "index": 0 }))
+        + &event(json!({
+            "type": "message_delta",
+            "delta": { "stop_reason": "end_turn" },
+            "usage": { "output_tokens": 2 },
+        }))
+        + &event(json!({ "type": "message_stop" }));
+    let (url, received) = server("200 OK", stream).await;
+    let mut target = projection::test_target("anthropic-messages");
+    target.base_url = url.trim_end_matches("/v1/responses").into();
+    let credential = eden_protocol::models::CredentialReply {
+        api_key: Some("PRIVATE_CANARY".into()),
+        source: "test".into(),
+        headers: Default::default(),
+    };
+    let reply = targeted::request(&target, &credential, &input(), |_, _| Ok(()))
+        .await
+        .unwrap();
+    assert_eq!(reply.usage["total_tokens"], 6);
+    let (headers, _) = received.await.unwrap();
+    assert!(headers.starts_with("POST /v1/messages "));
+    assert!(headers.to_lowercase().contains("x-api-key: private_canary"));
+    assert!(headers.contains("anthropic-version: 2023-06-01"));
+}
+#[tokio::test]
+async fn chat_finish_reason_without_done_does_not_execute_partial_tool() {
+    let stream = event(json!({
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call",
+                    "type": "function",
+                    "function": { "name": "write", "arguments": "{" },
+                }],
+            },
+            "finish_reason": "tool_calls",
+        }],
+    }));
+    let (url, received) = server("200 OK", stream).await;
+    let mut target = projection::test_target("openai-completions");
+    target.base_url = url.trim_end_matches("/responses").into();
+    let credential = eden_protocol::models::CredentialReply {
+        api_key: Some("test".into()),
+        source: "test".into(),
+        headers: Default::default(),
+    };
+    let error = targeted::request(&target, &credential, &input(), |_, _| Ok(()))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "RetryableProviderFailure");
+    received.await.unwrap();
+}
+
+#[test]
+fn managed_anthropic_effort_preserves_history_and_requested_active_level() {
+    let mut target = projection::test_target("anthropic-messages");
+    target.compat = json!({ "supportsMidConvoEffort": true });
+    target.thinking.effective = Some("low".into());
+    let state = projection::state(
+        &target,
+        json!({ "type": "thinking", "thinking": "old", "signature": "signature" }),
+    );
+    target.thinking.effective = Some("medium".into());
+    let mut input = input();
+    input.items.push(state);
+    let body = anthropic::project(&input, &target).unwrap();
+    assert_eq!(body["messages"][0]["output_config"]["effort"], "low");
+    assert_eq!(
+        body["messages"].as_array().unwrap().last().unwrap()["output_config"]["effort"],
+        "medium"
+    );
+    assert_eq!(body["output_config"]["effort"], "high");
+}
+
+#[tokio::test]
+async fn nonreasoning_responses_omits_reasoning_despite_requested_thinking() {
+    let (url, received) = server(
+        "200 OK",
+        complete(json!([{
+            "type": "message",
+            "role": "assistant",
+            "content": [{ "type": "output_text", "text": "ok" }],
+        }])),
+    )
+    .await;
+    let mut target = projection::test_target("openai-responses");
+    target.base_url = url;
+    target.capabilities.reasoning = false;
+    target.thinking.requested = Some("high".into());
+    target.thinking.effective = Some("off".into());
+    let credentials = eden_protocol::models::CredentialReply {
+        api_key: Some("test".into()),
+        source: "test".into(),
+        headers: Default::default(),
+    };
+    targeted::request(&target, &credentials, &input(), |_, _| Ok(()))
+        .await
+        .unwrap();
+    let (_, body) = received.await.unwrap();
+    assert!(body.get("reasoning").is_none());
 }

@@ -5,6 +5,8 @@
 pub mod cli;
 /// Explicit environment-file parsing for CLI startup.
 pub mod environment;
+/// Model and API-key operations through the shared session services.
+pub mod model_commands;
 /// Shared-session management commands.
 pub mod session_commands;
 /// Single outlet for human-readable messages.

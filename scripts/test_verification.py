@@ -128,8 +128,8 @@ class VerificationTests(unittest.TestCase):
         def entry(name: str, config: dict[str, Any] | None) -> Package:
             return {
                 "descriptor": {"package": name, "version": "0.1.0", "provides": []},
-                "host": "eden-native-0.3.0",
-                "sdk": "eden-native-0.3.0",
+                "host": "eden-native-0.4.0",
+                "sdk": "eden-native-0.4.0",
                 "target": "x86_64-unknown-linux-gnu",
                 "library": "lib" + name + ".so",
                 "config": config,

@@ -46,6 +46,9 @@ fn start(parsed: Parsed, shell: &Shell) -> Result<i32, Box<dyn std::error::Error
 }
 async fn run(parsed: Parsed, shell: &Shell) -> Result<i32, Box<dyn std::error::Error>> {
     match &parsed.cli.family {
+        Some(Family::Models { .. } | Family::Auth { .. }) => {
+            eden_cli::model_commands::run(&parsed.cli).await
+        }
         Some(
             Family::Trust { .. }
             | Family::Resources { .. }
@@ -163,6 +166,17 @@ async fn prompt(parsed: &Parsed, shell: &Shell) -> Result<i32, Box<dyn std::erro
     )
     .await?;
     let result = async {
+        if let Some(identity) = &cli.model {
+            let (provider, model) = identity
+                .split_once('/')
+                .ok_or("--model requires PROVIDER/MODEL")?;
+            let run = session.select_model(eden_protocol::models::ModelSelection {
+                provider: provider.into(),
+                model: model.into(),
+                thinking: cli.thinking.clone(),
+            })?;
+            session.wait(run).await?.into_result()?;
+        }
         let run = if resume {
             session.resume()?
         } else {

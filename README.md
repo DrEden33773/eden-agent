@@ -54,3 +54,5 @@ Changes enter `main` through a PR with independent review and passing Quality ch
 Product code and SDK: [Apache-2.0](LICENSE). Dependencies retain their [third-party notices](THIRD_PARTY_NOTICES.md).
 
 See [resources, trust and package composition](docs/workspace.md) for Skills, templates, FFF search, package commands and independent service contributions.
+
+See [Models and API keys](docs/models.md) for catalog refresh, private credentials, model selection and cross-protocol continuation.

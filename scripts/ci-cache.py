@@ -54,6 +54,7 @@ LEGACY_IMAGES = {
 PLATFORM_PACKAGES = (
     "eden-coding-tools",
     "eden-local-history",
+    "eden-model-access",
     "eden-process",
     "eden-search",
     "eden-workspace",

@@ -219,11 +219,8 @@ impl Router {
         let Some(instance) = services.0.get(&request.contract) else {
             return Terminal::failed(Fault::new("MissingDependency", "router", &request.contract));
         };
-        self.events.push(
-            request.run_id,
-            "service_called",
-            serde_json::json!({ "contract": request.contract, "input": request.payload }),
-        );
+        self.events
+            .push(request.run_id, "service_called", request.public_trace());
         instance.call(request, cancel).await
     }
 }

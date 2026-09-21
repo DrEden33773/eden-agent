@@ -153,7 +153,7 @@ jobs:
       # Platform sensitivity, not the crate list, decides what each runner
       # executes. These targets own the branches that really differ per OS:
       # process ownership and shell descendants, link creation, path scope and
-      # history locking. The other crates are pure logic or temp-directory
+      # history locking, private credential permissions and catalog persistence. The other crates are pure logic or temp-directory
       # fixtures, and their tests no longer execute off Linux; Clippy still
       # builds every target on every runner, so compilation coverage is unchanged.
       # This command's selection is declared in scripts/ci-cache.py and is part of
@@ -163,7 +163,7 @@ jobs:
       # still agree.
       - name: Platform-sensitive suites
         if: ${{ !cancelled() && runner.os != 'Linux' && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
-        run: node scripts/ci-run.mjs platform-suites cargo test --locked --no-fail-fast -p eden-process -p eden-coding-tools -p eden-search -p eden-local-history -p eden-workspace
+        run: node scripts/ci-run.mjs platform-suites cargo test --locked --no-fail-fast -p eden-process -p eden-coding-tools -p eden-search -p eden-local-history -p eden-workspace -p eden-model-access
       # Linux keeps the exact workspace command it always ran: it is the runner
       # that still executes what the other two no longer do, and a newly added
       # crate executes here. Cargo resolves features across the selected packages,

@@ -23,3 +23,5 @@ DeepSeek behavior follows its [Responses guide](https://api-docs.deepseek.com/gu
 Run `cargo test -p eden-model-access --locked` for controlled loopback HTTP and byte-fragmentation tests. These establish request projection, streaming parsing, error handling and cancellation behavior; they do not establish credentialed model availability or real model task success.
 
 Protocol references: [Responses streaming](https://developers.openai.com/api/docs/guides/streaming-responses), [function calling](https://developers.openai.com/api/docs/guides/function-calling), [Responses request parameters](https://developers.openai.com/api/reference/resources/responses/methods/create), and [reqwest 0.13.5](https://docs.rs/crate/reqwest/0.13.5).
+
+Model selection, catalogs, API keys and the additional Chat Completions/Anthropic protocols are documented in [Models and API keys](../../docs/models.md).

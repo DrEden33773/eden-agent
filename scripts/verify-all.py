@@ -27,6 +27,7 @@ SUITES = {
     "sessions": ("verify-sessions.py", "session-verification.json"),
     "context": ("verify-context.py", "context-verification.json"),
     "workspace": ("verify-workspace.py", "workspace-verification.json"),
+    "models": ("verify-model-access.py", "model-access-verification.json"),
 }
 
 

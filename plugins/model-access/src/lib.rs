@@ -14,6 +14,13 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 use wire::{Sse, failure};
+mod anthropic;
+mod catalog;
+mod chat;
+mod credentials;
+mod projection;
+mod targeted;
+mod usage;
 mod wire;
 
 static NEXT_ATTEMPT: AtomicU64 = AtomicU64::new(1);
@@ -49,7 +56,6 @@ struct Settings {
     options: RequestOptions,
 }
 #[derive(Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Config {
     model: Option<String>,
     endpoint: Option<String>,
@@ -153,10 +159,20 @@ fn descriptor() -> Descriptor {
     Descriptor {
         package: "model-access".into(),
         version: "0.1.0".into(),
-        provides: vec![MODEL_INFO.into(), PROVIDER.into()],
+        provides: vec![
+            eden_protocol::models::MODEL_CATALOG.into(),
+            eden_protocol::models::CREDENTIAL_SOURCE.into(),
+            eden_protocol::models::AUTH.into(),
+            MODEL_INFO.into(),
+            PROVIDER.into(),
+        ],
     }
 }
 fn create(config: Value) -> Result<Package, Fault> {
+    let package = credentials::register(
+        catalog::register(Package::new("model-access"), &config)?,
+        &config,
+    )?;
     let config: Config = serde_json::from_value(if config.is_null() {
         serde_json::json!({})
     } else {
@@ -165,7 +181,7 @@ fn create(config: Value) -> Result<Package, Fault> {
     .map_err(|_| failure("invalid model-access configuration"))?;
     let config = Arc::new(config);
     let info_config = config.clone();
-    Ok(Package::new("model-access")
+    Ok(package
         .service(MODEL_INFO, move |_: (), _| {
             let config = info_config.clone();
             async move { config.limits_with(|key| std::env::var(key).ok()) }
@@ -173,7 +189,6 @@ fn create(config: Value) -> Result<Package, Fault> {
         .service(PROVIDER, move |input: ModelInput, cx| {
             let config = config.clone();
             async move {
-                let settings = config.settings()?;
                 let cancel = cx.scope.cancellation();
                 let attempt_id = format!(
                     "{}:{}",
@@ -188,17 +203,36 @@ fn create(config: Value) -> Result<Package, Fault> {
                     biased;
                     _ = cancel.cancelled() =>
                         Err(Fault::new("Cancelled", "model-access", "request cancelled",)),
-                    reply = request(
-                            &settings.endpoint,
-                            &settings.model,
-                            &settings.key,
-                            &input,
-                            &settings.options,
-                            |kind, mut payload| {
+                    reply = async {
+                            let emit = |kind: &str, mut payload: Value| {
                                 payload["attempt_id"] = serde_json::json!(attempt_id);
                                 cx.emit(kind, payload)
-                            },
-                        ) => reply,
+                            };
+                            if let Some(target) = &input.target {
+                                let credentials: eden_protocol::models::CredentialReply = cx
+                                    .call(
+                                        eden_protocol::models::CREDENTIAL_SOURCE,
+                                        &eden_protocol::models::CredentialRequest {
+                                            provider: target.provider.clone(),
+                                            explicit: None,
+                                            purpose: "inference".into(),
+                                        },
+                                    )
+                                    .await?;
+                                targeted::request(target, &credentials, &input, emit).await
+                            } else {
+                                let settings = config.settings()?;
+                                request(
+                                    &settings.endpoint,
+                                    &settings.model,
+                                    &settings.key,
+                                    &input,
+                                    &settings.options,
+                                    emit,
+                                )
+                                .await
+                            }
+                        } => reply,
                 };
                 let status = match &result {
                     Ok(_) => "completed",
@@ -280,6 +314,7 @@ async fn request(
         .map_err(transport_failure)?;
     if !response.status().is_success() {
         let status = response.status().as_u16();
+        let retry_after_ms = targeted::retry_delay(response.headers());
         // Parse only a bounded error envelope and never expose its contents.
         let mut bytes = Vec::new();
         let mut stream = response.bytes_stream();
@@ -291,7 +326,9 @@ async fn request(
             bytes.extend_from_slice(&chunk);
         }
         let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        return Err(wire::provider_fault(Some(status), &body));
+        let mut error = wire::provider_fault(Some(status), &body);
+        error.retry_after_ms = retry_after_ms;
+        return Err(error);
     }
     let mut stream = response.bytes_stream();
     let mut sse = Sse::default();

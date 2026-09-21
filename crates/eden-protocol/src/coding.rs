@@ -75,6 +75,9 @@ pub enum Item {
 /// resolved cwd, and whether this continues a session instead of adding a turn.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunInput {
+    /// Immutable, non-secret model target for this run, including summary requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<crate::models::ModelTarget>,
     /// Continue the session from its committed context instead of adding a turn.
     #[serde(default)]
     pub resume: bool,
@@ -89,6 +92,9 @@ pub struct RunInput {
 /// compaction or branch summarization; an empty `action` means normal.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ContextInput {
+    /// Immutable, non-secret model target for this run, including summary requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<crate::models::ModelTarget>,
     /// The loaded resources. `None` means the loop has none to offer, not an empty set.
     #[serde(default)]
     pub resources: Option<crate::resources::Snapshot>,
@@ -134,6 +140,9 @@ pub struct ToolDefinition {
 // Field and variant names state the payload; see docs/development-checks.md#doc-comments.
 #[allow(missing_docs)]
 pub struct ModelInput {
+    /// Immutable, non-secret model target for this run, including summary requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<crate::models::ModelTarget>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     /// A narrower allowance for this one request; a summary uses it.
     pub max_output_tokens: Option<u32>,

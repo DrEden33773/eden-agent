@@ -26,6 +26,7 @@ AUTHORS = (
     "coding-replacements",
     "service-a",
     "service-b",
+    "model-services",
 )
 INVALID = ("wrong-abi", "wrong-sdk", "short-table", "metadata-panic", "init-panic")
 EXAMPLES = (

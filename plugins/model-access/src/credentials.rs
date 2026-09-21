@@ -213,10 +213,11 @@ impl Credentials {
             let mut file = private_open(&temporary)?;
             let bytes = serde_json::to_vec(&stored)
                 .map_err(|_| fault("cannot encode credential storage"))?;
-            let outcome = file
-                .write_all(&bytes)
-                .and_then(|()| file.sync_all())
-                .and_then(|()| std::fs::rename(&temporary, path));
+            let written = file.write_all(&bytes).and_then(|()| file.sync_all());
+            // Windows private handles deliberately exclude delete sharing. Close
+            // the temporary before replacement, retaining the separate store lock.
+            drop(file);
+            let outcome = written.and_then(|()| std::fs::rename(&temporary, path));
             if outcome.is_err() {
                 let _ = std::fs::remove_file(&temporary);
                 return Err(fault("cannot atomically persist credentials"));

@@ -83,8 +83,11 @@ try {
     imported("packages/ai/src/utils/event-stream.ts"),
   ]);
   const { ensureTool } = await imported("packages/coding-agent/src/utils/tools-manager.ts");
-  const rg = await ensureTool("rg", true);
-  assert(rg, "Pi could not locate or install its pinned ripgrep binary");
+  const rg = await ensureTool("rg", (status) => {
+    results.toolSetup ??= [];
+    results.toolSetup.push(status);
+  });
+  assert(rg, "Pi could not locate or install its ripgrep binary");
   results.ripgrep = execFileSync(rg, ["--version"], { encoding: "utf8" }).trim();
   process.env.PI_OFFLINE = "1";
   const read = createReadTool(scratch, { autoResizeImages: false });
@@ -229,7 +232,7 @@ try {
       await writeFile(path.join(directory, "skip.log"), "αβ\n");
       const unicode = await grep.execute("unicode", {
         path: directory,
-        pattern: "\\w+",
+        pattern: "\\p{Greek}+|猫",
         glob: "*.txt",
         context: 1,
       });

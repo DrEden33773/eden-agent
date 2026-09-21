@@ -316,10 +316,20 @@ def main() -> None:
             def inspect_prompt(
                 body: dict[str, Any], _index: int, selected_tools: list[str] = selected_tools
             ) -> list[dict[str, Any]]:
-                prompt = json.dumps(
-                    [item for item in body["input"] if item.get("role") == "system"]
+                prompt = "\n".join(
+                    block["text"]
+                    for item in body["input"]
+                    if item.get("role") == "system"
+                    for block in item["content"]
+                    if block["type"] == "input_text"
                 )
-                assert "CUSTOM-ROLE-PARITY" in prompt and str(project) in prompt
+                actual_cwd = next(
+                    line.removeprefix("Working directory: ")
+                    for line in prompt.splitlines()
+                    if line.startswith("Working directory: ")
+                )
+                assert "CUSTOM-ROLE-PARITY" in prompt
+                assert pathlib.Path(actual_cwd).samefile(project), (actual_cwd, str(project))
                 assert ("Use the skill tool" in prompt) is (selected_tools == ["skill"])
                 assert ("eden-resource://skill/frozen" in prompt) is (selected_tools == ["read"])
                 assert ("Available skill frozen" in prompt) is bool(selected_tools)

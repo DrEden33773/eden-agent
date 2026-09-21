@@ -809,23 +809,35 @@ async fn bash_path_roundtrip_read_edit_preserves_space_and_unicode_cwd() {
         .iter()
         .find(|artifact| artifact.name == "stdout")
         .unwrap();
-    let path = std::fs::read_to_string(&stdout.path)
+    let raw_stdout = std::fs::read(&stdout.path).unwrap();
+    let path = String::from_utf8(raw_stdout).unwrap().trim().to_owned();
+    let expected = cwd.join("文件.txt");
+    let resolved = file_path(&project.0, &json!({ "path": path })).unwrap();
+    let entries: Vec<_> = std::fs::read_dir(&cwd)
         .unwrap()
-        .trim()
-        .to_owned();
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect();
+    let diagnosis = format!(
+        "cwd={cwd:?}; expected={expected:?}; entries={entries:?}; emitted={path:?}; resolved={resolved:?}; resolved_exists={}",
+        resolved.is_file(),
+    );
+    assert!(
+        expected.is_file(),
+        "Bash did not create the requested Unicode file: {diagnosis}"
+    );
     assert!(
         path.starts_with('/'),
-        "expected Bash drive spelling: {path}"
+        "expected Bash drive spelling: {diagnosis}"
     );
     let read = project.run("read", json!({ "path": path })).await;
-    assert!(read.text.contains("before"), "{read:?}");
+    assert!(read.text.contains("before"), "{read:?}; {diagnosis}");
     let edited = project
         .run(
             "edit",
             json!({ "path": path, "old_text": "before", "new_text": "after" }),
         )
         .await;
-    assert!(edited.error.is_none(), "{edited:?}");
+    assert!(edited.error.is_none(), "{edited:?}; {diagnosis}");
     assert_eq!(
         std::fs::read_to_string(cwd.join("文件.txt")).unwrap(),
         "after\n"

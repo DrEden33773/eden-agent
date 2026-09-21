@@ -116,6 +116,36 @@ impl Session {
                 .await
         })
     }
+    /// Inspect a transient operation while its managed wait is active, without claiming the session.
+    pub async fn auth_status(&self, operation_id: &str) -> Result<m::AuthReply, Fault> {
+        self.service(
+            0,
+            m::AUTH,
+            &m::AuthRequest::Status {
+                operation_id: operation_id.into(),
+            },
+        )
+        .await
+    }
+    /// Pass private pasted input to an existing login while its managed wait owns the session.
+    ///
+    /// This does not start a second run. Keep the wait alive to observe completion and cleanup;
+    /// operation identifiers are scoped to this session and cannot be resumed after reopening it.
+    pub async fn submit_auth_input(
+        &self,
+        operation_id: &str,
+        input: String,
+    ) -> Result<m::AuthReply, Fault> {
+        self.service(
+            0,
+            m::AUTH,
+            &m::AuthRequest::Submit {
+                operation_id: operation_id.into(),
+                input,
+            },
+        )
+        .await
+    }
     pub(crate) async fn freeze_model(&self, run_id: u64) -> Result<Option<m::ModelTarget>, Fault> {
         if self.role(m::MODEL_CATALOG).is_err() {
             return Ok(None);

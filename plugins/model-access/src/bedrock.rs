@@ -799,12 +799,18 @@ mod tests {
             });
             let credential = if bearer {
                 CredentialReply {
+                    base_url: None,
+                    available_model_ids: None,
+                    catalog_scope: None,
                     api_key: Some("test-bearer".into()),
                     headers: BTreeMap::new(),
                     source: "test".into(),
                 }
             } else {
                 CredentialReply {
+                    base_url: None,
+                    available_model_ids: None,
+                    catalog_scope: None,
                     api_key: None,
                     headers: BTreeMap::from([(
                         cloud::AWS_PRIVATE_HEADER.into(),
@@ -879,6 +885,9 @@ mod tests {
             request(
                 &target,
                 &CredentialReply {
+                    base_url: None,
+                    available_model_ids: None,
+                    catalog_scope: None,
                     api_key: Some("test-bearer".into()),
                     headers: BTreeMap::new(),
                     source: "test".into(),

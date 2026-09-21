@@ -2,9 +2,11 @@
 
 `model-access` supplies inference (`eden.coding-provider.v1`), legacy model limits (`eden.model-info.v1`), model catalogs (`eden.model-catalog.v1`), private credentials (`eden.credential-source.v1`) and authentication operations (`eden.auth.v1`) through the ordinary native SDK. Its Cargo package is `eden-model-access`; build it with `cargo build -p eden-model-access --locked`.
 
+Account login and refresh are available through CLI/SDK; see [authentication](../../docs/authentication.md) for client configuration, methods and cleanup semantics.
+
 ## Catalog-selected models
 
-Model selection supports OpenAI Responses, Chat Completions, Anthropic Messages, Gemini, Vertex, Bedrock ConverseStream, Azure Responses and native Mistral Chat. Each run freezes the selected model's routing, capabilities, limits and thinking settings; credentials are resolved through the private credential service. The catalog and credential roles can be replaced independently of inference. Other catalog protocols remain visible as unsupported.
+Model selection supports OpenAI Responses, Chat Completions, Anthropic Messages, Gemini, Vertex, Bedrock ConverseStream, Azure Responses, native Mistral Chat, Codex Responses (SSE/WebSocket), Copilot and Radius pi-messages. Each run freezes the selected model's routing, capabilities, limits and thinking settings; credentials are resolved through the private credential service. The catalog and credential roles can be replaced independently of inference. Other catalog protocols remain visible as unsupported.
 
 See [Models and API keys](../../docs/models.md) for CLI selection, catalog refresh and source configuration, API-key management, credential precedence and trust, cross-model history projection, and independent SDK consumers.
 

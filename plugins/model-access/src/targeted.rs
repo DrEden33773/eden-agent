@@ -39,12 +39,13 @@ pub(crate) async fn request(
     };
     let mut projected = input.clone();
     projected.items = projection::items(input, target)?;
-    let (suffix, body) = match target.api.as_str() {
+    let (suffix, mut body) = match target.api.as_str() {
         "openai-completions" => ("chat/completions", chat::project(input, target)?),
         "mistral-conversations" => ("chat/completions", mistral::project(input, target)?),
         "google-generative-ai" | "google-vertex" => ("", gemini::project(input, target)?),
         "anthropic-messages" => ("v1/messages", anthropic::project(input, target)?),
-        "openai-responses" | "azure-openai-responses" => {
+        "pi-messages" => ("messages", crate::pi_messages::project(input, target)?),
+        "openai-responses" | "azure-openai-responses" | "openai-codex-responses" => {
             for item in &mut projected.items {
                 if let Item::ProviderState { provider, value } = item {
                     *provider = options.profile.state().into();
@@ -65,7 +66,18 @@ pub(crate) async fn request(
         }
         _ => return Err(wire::failure("selected model protocol is not implemented")),
     };
+    if target.api == "openai-codex-responses" {
+        crate::subscription::codex_body(&mut body);
+    }
     let url = routes::endpoint(target, credential, suffix)?;
+    if target.api == "openai-codex-responses"
+        && let Some(reply) = crate::codex_socket::request(
+            target, credential, input, &options, &body, &url, &mut emit,
+        )
+        .await?
+    {
+        return Ok(reply);
+    }
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .pool_max_idle_per_host(0)
@@ -75,6 +87,9 @@ pub(crate) async fn request(
         .post(url)
         .header("Accept", "text/event-stream")
         .json(&body);
+    for (name, value) in crate::subscription::headers(target, input) {
+        request = request.header(name, value);
+    }
     for (name, value) in &target.headers {
         request = request.header(name, value);
     }
@@ -87,8 +102,17 @@ pub(crate) async fn request(
         }
     } else if target.api == "anthropic-messages" {
         request = request.header("anthropic-version", "2023-06-01");
-        if let Some(key) = &credential.api_key {
-            request = request.header("x-api-key", key);
+        if let Some(key) = &credential.api_key
+            && !credential
+                .headers
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case("authorization"))
+        {
+            request = if target.provider == "github-copilot" {
+                request.bearer_auth(key)
+            } else {
+                request.header("x-api-key", key)
+            };
         }
     } else if matches!(
         target.api.as_str(),
@@ -133,6 +157,7 @@ pub(crate) async fn request(
     }
     let mut stream = response.bytes_stream();
     let mut sse = wire::Sse::default();
+    let mut pi = crate::pi_messages::Decoder::new(target.clone());
     let mut chat = chat::Decoder::new(target.clone());
     let mut anthropic = anthropic::Decoder::new(target.clone());
     let mut gemini = gemini::Decoder::new(target.clone());
@@ -140,6 +165,20 @@ pub(crate) async fn request(
     while let Some(chunk) = stream.next().await {
         for event in sse.push(&chunk.map_err(super::transport_failure)?)? {
             match target.api.as_str() {
+                "pi-messages" => {
+                    let delta = match event["type"].as_str() {
+                        Some("text_delta") => Some("model_text_delta"),
+                        Some("thinking_delta") => Some("model_reasoning_delta"),
+                        Some("toolcall_delta") => Some("model_tool_delta"),
+                        _ => None,
+                    };
+                    if let Some(kind) = delta {
+                        emit(kind, event.clone())?;
+                    }
+                    if let Some(reply) = pi.consume(event)? {
+                        return Ok(reply);
+                    }
+                }
                 "google-generative-ai" | "google-vertex" => {
                     let reply = gemini.consume(event)?;
                     for (kind, payload) in gemini.take_deltas() {
@@ -177,14 +216,19 @@ pub(crate) async fn request(
                     }
                 }
                 _ => match event["type"].as_str() {
-                    Some("response.completed") => {
+                    Some("response.completed" | "response.done") => {
                         let mut reply = wire::completed(&event["response"], options.profile)?;
                         for item in &mut reply.items {
                             if let Item::ProviderState { value, .. } = item {
                                 *item = projection::state(target, value.clone());
                             }
                         }
-                        reply.usage = usage::normalize(&reply.usage, target, Some("stop"));
+                        let mut accounting_target = target.clone();
+                        if accounting_target.api == "openai-codex-responses" {
+                            accounting_target.api = "openai-responses".into();
+                        }
+                        reply.usage =
+                            usage::normalize(&reply.usage, &accounting_target, Some("stop"));
                         return Ok(reply);
                     }
                     Some("response.incomplete") => {

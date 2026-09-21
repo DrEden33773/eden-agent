@@ -2,7 +2,7 @@
 
 A Rust coding agent built from replaceable native plugins.
 
-This development release executes coding tasks through native loop, context, provider, tool and history roles. The default combination uses OpenAI Responses, read/write/edit/bash and local JSONL history. Explicit model configuration and credentials are required; native roles are independently replaceable without rebuilding the host.
+This development release executes coding tasks through native loop, context, provider, tool and history roles. The default combination provides model catalogs, private API-key management, OpenAI Responses, Chat Completions and Anthropic Messages, alongside read/write/edit/bash and local JSONL history. Configure model access and credentials through [Models and API keys](docs/models.md); native roles are independently replaceable without rebuilding the host.
 
 ## Build and run
 

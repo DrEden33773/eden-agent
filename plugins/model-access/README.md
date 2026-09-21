@@ -1,6 +1,14 @@
 # Model access
 
-`model-access` supplies `eden.coding-provider.v1` and `eden.model-info.v1` through the ordinary native SDK. Its Cargo package is `eden-model-access`; build it with `cargo build -p eden-model-access --locked`.
+`model-access` supplies inference (`eden.coding-provider.v1`), legacy model limits (`eden.model-info.v1`), model catalogs (`eden.model-catalog.v1`), private credentials (`eden.credential-source.v1`) and authentication operations (`eden.auth.v1`) through the ordinary native SDK. Its Cargo package is `eden-model-access`; build it with `cargo build -p eden-model-access --locked`.
+
+## Catalog-selected models
+
+Model selection supports OpenAI Responses, Chat Completions and Anthropic Messages. Each run freezes the selected model's routing, capabilities, limits and thinking settings; credentials are resolved through the private credential service. The catalog and credential roles can be replaced independently of inference. Other catalog protocols remain visible as unsupported.
+
+See [Models and API keys](../../docs/models.md) for CLI selection, catalog refresh and source configuration, API-key management, credential precedence and trust, cross-model history projection, and independent SDK consumers.
+
+## Legacy Responses configuration
 
 Configuration accepts `model`, `endpoint`, `api_key_env`, `profile`, `max_output_tokens`, `context_window`, and `reasoning_effort`. Explicit configuration takes precedence over the corresponding environment variable. `model` is an exact model identifier; if absent, `OPENAI_MODEL` is required. No model is chosen automatically. `endpoint` is a complete Responses URL. If absent, `OPENAI_BASE_URL` is an API base URL (for example, `https://api.openai.com/v1`), with `/responses` appended after stripping trailing slashes. The default base is `https://api.openai.com/v1`. `api_key_env` names an environment variable containing the bearer credential and falls back to `EDEN_API_KEY_ENV`, then `OPENAI_API_KEY`. Credentials are read only when a request starts and are never included in failure messages. Missing model or credentials produces `ProviderFailure`; package initialization does not require credentials.
 
@@ -23,5 +31,3 @@ DeepSeek behavior follows its [Responses guide](https://api-docs.deepseek.com/gu
 Run `cargo test -p eden-model-access --locked` for controlled loopback HTTP and byte-fragmentation tests. These establish request projection, streaming parsing, error handling and cancellation behavior; they do not establish credentialed model availability or real model task success.
 
 Protocol references: [Responses streaming](https://developers.openai.com/api/docs/guides/streaming-responses), [function calling](https://developers.openai.com/api/docs/guides/function-calling), [Responses request parameters](https://developers.openai.com/api/reference/resources/responses/methods/create), and [reqwest 0.13.5](https://docs.rs/crate/reqwest/0.13.5).
-
-Model selection, catalogs, API keys and the additional Chat Completions/Anthropic protocols are documented in [Models and API keys](../../docs/models.md).

@@ -213,12 +213,16 @@ jobs:
     if: ${{ !cancelled() && github.event_name == 'pull_request' && needs.lint.result == 'success' && needs.scope.outputs.native == 'true' }}
     cache-mode: read
     uses: ./.github/workflows/native-verify.yml
+    with:
+      selected: ${{ needs.scope.outputs.selected }}
   native-main:
     name: Native verification (main)
     needs: [scope, lint]
     if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.lint.result == 'success' && needs.scope.outputs.native == 'true' }}
     cache-mode: write
     uses: ./.github/workflows/native-verify.yml
+    with:
+      selected: ${{ needs.scope.outputs.selected }}
   quality:
     name: Quality
     if: always()

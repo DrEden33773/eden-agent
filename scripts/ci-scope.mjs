@@ -4,7 +4,8 @@ import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const FAMILIES = ["markdown", "python", "javascript", "rust", "native"];
+export const FAMILIES = ["markdown", "python", "javascript", "rust", "native", "pi_reference"];
+const PI_STEPS = ["pi-checkout", "pi-deps", "pi-prepare", "pi-corpus"];
 
 export function scopeFor(event, paths) {
   const selected = new Set();
@@ -42,6 +43,7 @@ export function scopeFor(event, paths) {
       selected.add("markdown");
       selected.add("javascript");
       selected.add("native");
+      selected.add("pi_reference");
     } else if (["biome.json", "biome.jsonc"].includes(path)) {
       selected.add("javascript");
       selected.add("native");
@@ -51,6 +53,8 @@ export function scopeFor(event, paths) {
     } else if (/\.mjs$/.test(path)) {
       selected.add("javascript");
       selected.add("native");
+      if (path === "scripts/prepare-pi-reference.mjs" || path === "scripts/verify-pi-reference.mjs")
+        selected.add("pi_reference");
     } else if (
       /\.rs$/.test(path) ||
       /(^|\/)(Cargo\.(toml|lock)|\.?rustfmt\.toml|\.?clippy\.toml|rust-toolchain(\.toml)?)$/.test(
@@ -103,9 +107,19 @@ export function changedPaths(base, head, root = process.cwd(), event = "pull_req
 export function qualityPass({ event, scope, proof, verified, lint, native, selected }) {
   if (scope !== "success" || !FAMILIES.every((key) => typeof selected?.[key] === "boolean"))
     return false;
+  if (selected.pi_reference && !selected.native) return false;
   if (event === "push" && proof === "success" && verified === "true")
     return lint === "skipped" && native === "skipped";
   return lint === "success" && native === (selected.native ? "success" : "skipped");
+}
+
+// Pi is a reference baseline, not an Eden runtime dependency or a cached verdict.
+export function piPass(selected, steps) {
+  return (
+    selected?.native === true &&
+    typeof selected.pi_reference === "boolean" &&
+    PI_STEPS.every((id) => steps[id]?.outcome === (selected.pi_reference ? "success" : "skipped"))
+  );
 }
 
 export function staticPass(selected, steps) {
@@ -135,6 +149,19 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     };
     console.log(JSON.stringify(result));
     if (!qualityPass(result)) process.exitCode = 1;
+  } else if (process.argv[2] === "pi-gate") {
+    const selected = JSON.parse(process.env.CI_SELECTED || "null");
+    const steps = JSON.parse(process.env.CI_STEPS || "{}");
+    const passed = piPass(selected, steps);
+    const receipt = {
+      selected,
+      status: !passed ? "failed" : selected.pi_reference ? "passed" : "not_selected",
+      steps: Object.fromEntries(PI_STEPS.map((id) => [id, steps[id]?.outcome ?? "missing"])),
+    };
+    mkdirSync("artifacts/ci", { recursive: true });
+    writeFileSync("artifacts/ci/pi-selection.json", `${JSON.stringify(receipt, null, 2)}\n`);
+    console.log(JSON.stringify(receipt));
+    if (!passed) process.exitCode = 1;
   } else if (process.argv[2] === "static-gate") {
     if (
       !staticPass(

@@ -157,6 +157,7 @@ pub(crate) async fn request(
     }
     let mut stream = response.bytes_stream();
     let mut sse = wire::Sse::default();
+    let mut responses = wire::ResponseOutput::default();
     let mut pi = crate::pi_messages::Decoder::new(target.clone());
     let mut chat = chat::Decoder::new(target.clone());
     let mut anthropic = anthropic::Decoder::new(target.clone());
@@ -164,6 +165,12 @@ pub(crate) async fn request(
     let mut mistral = mistral::Decoder::new(target.clone());
     while let Some(chunk) = stream.next().await {
         for event in sse.push(&chunk.map_err(super::transport_failure)?)? {
+            if matches!(
+                target.api.as_str(),
+                "openai-responses" | "azure-openai-responses" | "openai-codex-responses"
+            ) {
+                responses.observe(&event)?;
+            }
             match target.api.as_str() {
                 "pi-messages" => {
                     let delta = match event["type"].as_str() {
@@ -217,7 +224,7 @@ pub(crate) async fn request(
                 }
                 _ => match event["type"].as_str() {
                     Some("response.completed" | "response.done") => {
-                        let mut reply = wire::completed(&event["response"], options.profile)?;
+                        let mut reply = responses.complete(&event["response"], options.profile)?;
                         for item in &mut reply.items {
                             if let Item::ProviderState { value, .. } = item {
                                 *item = projection::state(target, value.clone());

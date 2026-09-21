@@ -551,8 +551,8 @@ impl Catalog {
             .map_err(|_| fault("catalog client initialization failed"))?;
         let mut success = true;
         for provider in ["radius", "github-copilot"] {
-            let credential: CredentialReply = cx
-                .call(
+            let resolved = cx
+                .call::<_, CredentialReply>(
                     CREDENTIAL_SOURCE,
                     &CredentialRequest {
                         provider: provider.into(),
@@ -560,8 +560,15 @@ impl Catalog {
                         purpose: "catalog_refresh".into(),
                     },
                 )
-                .await?;
-            if credential.api_key.is_none() && provider == "github-copilot" {
+                .await;
+            let credential = match resolved {
+                Ok(credential) => credential,
+                Err(_) => {
+                    success = false;
+                    continue;
+                }
+            };
+            if credential.api_key.is_none() && credential.headers.is_empty() {
                 continue;
             }
             let source = self.subscription_source(provider);

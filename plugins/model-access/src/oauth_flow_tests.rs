@@ -36,7 +36,7 @@ async fn serve(provider: &str) -> (String, Arc<Mutex<Vec<String>>>, tokio::task:
             let request = read_request(&mut stream).await;
             let path = request.split_whitespace().nth(1).unwrap();
             let body = match path {
-                "/discovery" => json!({ "authorization_endpoint": format!("{gateway}/authorize") }),
+                "/discovery" => json!({ "authorizationEndpoint": format!("{gateway}/authorize") }),
                 "/device" => {
                     json!({
                         "device_code": "private-device-canary",

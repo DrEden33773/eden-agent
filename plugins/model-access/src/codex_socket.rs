@@ -101,6 +101,7 @@ pub(crate) async fn request(
         return Err(wire::failure("Codex WebSocket send failed"));
     }
     let mut started = false;
+    let mut responses = wire::ResponseOutput::default();
     loop {
         let frame = socket.next().await;
         let event = match frame {
@@ -124,9 +125,10 @@ pub(crate) async fn request(
             }
         };
         started = true;
+        responses.observe(&event)?;
         match event["type"].as_str() {
             Some("response.completed" | "response.done") => {
-                let mut reply = wire::completed(&event["response"], options.profile)?;
+                let mut reply = responses.complete(&event["response"], options.profile)?;
                 for item in &mut reply.items {
                     if let Item::ProviderState { value, .. } = item {
                         *item = projection::state(target, value.clone());
@@ -194,17 +196,24 @@ mod tests {
             assert!(body.get("stream").is_none());
             ws.send(Message::Text(
                 json!({
-                    "type": "response.done",
-                    "response": {
-                        "status": "completed",
-                        "output": [{
-                            "type": "function_call",
-                            "call_id": "c",
-                            "name": "read",
-                            "arguments": "{}",
-                        }],
-                        "usage": {},
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "type": "function_call",
+                        "call_id": "c",
+                        "name": "read",
+                        "arguments": "{}",
                     },
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+            ws.send(Message::Text(
+                json!({
+                    "type": "response.done",
+                    "response": { "status": "completed", "output": [], "usage": {} },
                 })
                 .to_string()
                 .into(),

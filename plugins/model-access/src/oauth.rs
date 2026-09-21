@@ -373,7 +373,7 @@ impl Flow {
                 let (status, discovery) =
                     response(client()?.get(url(&settings.authorization_url)?)).await?;
                 successful(status)?;
-                settings.authorization_url = required(&discovery, "authorization_endpoint")?;
+                settings.authorization_url = required(&discovery, "authorizationEndpoint")?;
             }
             let mut authorization = url(&settings.authorization_url)?;
             {

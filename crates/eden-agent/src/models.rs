@@ -5,6 +5,19 @@ use eden_protocol::models as m;
 use serde_json::Value;
 use serde_json::json;
 
+fn public_auth_terminal(private: &Terminal) -> Terminal {
+    let mut public = private.clone();
+    if let Outcome::Completed(value) = &mut public.outcome {
+        // Whitelist status metadata so future private reply fields stay private by default.
+        *value = ["operation_id", "provider", "status", "source"]
+            .into_iter()
+            .filter_map(|key| value.get(key).map(|field| (key.to_owned(), field.clone())))
+            .collect::<serde_json::Map<_, _>>()
+            .into();
+    }
+    public
+}
+
 fn saved_selection(records: &[c::Record]) -> Result<Option<m::ModelSelection>, Fault> {
     eden_protocol::history::active_path(records)?
         .iter()
@@ -98,23 +111,27 @@ impl Session {
                 .await
         })
     }
-    /// Authentication input travels only through the private contract; terminal status is redacted.
+    /// Authentication input and wait/inspect results are private; events and history contain only status metadata.
     pub fn authenticate(&self, request: m::AuthRequest) -> Result<u64, Fault> {
-        self.start(true, move |session, run_id, cancel| async move {
-            session
-                .0
-                .kernel
-                .invoke(
-                    Request {
-                        session_id: session.id(),
-                        run_id,
-                        contract: m::AUTH.into(),
-                        payload: json!(request),
-                    },
-                    cancel,
-                )
-                .await
-        })
+        self.start_with_public_result(
+            true,
+            public_auth_terminal,
+            move |session, run_id, cancel| async move {
+                session
+                    .0
+                    .kernel
+                    .invoke(
+                        Request {
+                            session_id: session.id(),
+                            run_id,
+                            contract: m::AUTH.into(),
+                            payload: json!(request),
+                        },
+                        cancel,
+                    )
+                    .await
+            },
+        )
     }
     /// Inspect a transient operation while its managed wait is active, without claiming the session.
     pub async fn auth_status(&self, operation_id: &str) -> Result<m::AuthReply, Fault> {
@@ -217,6 +234,117 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn managed_auth_result_stays_private_while_settled_event_is_redacted() {
+        let events = Events::new(1);
+        let session = Session(Arc::new(Inner {
+            id: 1,
+            kernel: generation::Generation::empty(),
+            workspace_options: WorkspaceOptions::default(),
+            history_path: None,
+            offline_records: Mutex::new(vec![]),
+            events,
+            state: Mutex::new(State {
+                closed: false,
+                next: 1,
+                active: None,
+                management: false,
+                pending_inputs: 0,
+                terminals: BTreeMap::new(),
+                shutdown_result: None,
+            }),
+            settled: tokio::sync::Notify::new(),
+            shutdown: tokio::sync::Mutex::new(()),
+            coding: false,
+            cwd: ".".into(),
+        }));
+        let private = Terminal {
+            outcome: Outcome::Completed(json!({
+                "status": "awaiting_authorization",
+                "interaction": {
+                    "url": "https://fixture/?state=private-state",
+                    "user_code": "private-code",
+                },
+            })),
+            cleanup_errors: vec![],
+        };
+        let (release, ready) = tokio::sync::oneshot::channel();
+        let run = session
+            .start_with_public_result(true, public_auth_terminal, move |_, _, _| async move {
+                ready.await.unwrap()
+            })
+            .unwrap();
+        assert!(session.inspect(run).is_none());
+        assert!(
+            session
+                .start(true, |_, _, _| async {
+                    Terminal::failed(Fault::new("unused", "test", "unused"))
+                })
+                .is_err()
+        );
+        release.send(private.clone()).unwrap();
+        assert_eq!(session.wait(run).await.unwrap(), private);
+        assert_eq!(session.inspect(run).unwrap(), private);
+        let settled = session
+            .events()
+            .into_iter()
+            .find(|event| event.kind == "settled")
+            .unwrap();
+        assert_eq!(settled.payload, json!(public_auth_terminal(&private)));
+        assert!(!json!(session.events()).to_string().contains("private-"));
+        let ordinary = private.clone();
+        let run = session
+            .start(true, move |_, _, _| async { ordinary })
+            .unwrap();
+        assert_eq!(session.wait(run).await.unwrap(), private);
+        assert_eq!(session.events().last().unwrap().payload, json!(private));
+        session.shutdown().await.unwrap();
+    }
+    #[test]
+    fn authentication_public_result_omits_interaction_and_unknown_private_fields() {
+        let private = Terminal {
+            outcome: Outcome::Completed(json!({
+                "operation_id": "login-1",
+                "provider": "fixture",
+                "status": "awaiting_authorization",
+                "source": null,
+                "challenge": "oauth",
+                "interaction": {
+                    "url": "https://fixture/?state=private-state",
+                    "user_code": "private-code",
+                    "manual_input": true,
+                    "expires_at": 123,
+                },
+                "future_private_field": "private-material",
+            })),
+            cleanup_errors: vec![Fault::new("Cleanup", "fixture", "cleanup failed")],
+        };
+        let public = public_auth_terminal(&private);
+        assert_eq!(
+            public.outcome,
+            Outcome::Completed(json!({
+                "operation_id": "login-1",
+                "provider": "fixture",
+                "status": "awaiting_authorization",
+                "source": null,
+            }))
+        );
+        assert_eq!(public.cleanup_errors, private.cleanup_errors);
+        assert!(json!(private)["outcome"]["value"]["interaction"]["url"].is_string());
+    }
+    #[test]
+    fn authentication_public_result_preserves_failure_and_cancellation() {
+        for outcome in [
+            Outcome::Cancelled,
+            Outcome::Failed(Fault::new("Auth", "fixture", "authorization denied")),
+        ] {
+            let terminal = Terminal {
+                outcome,
+                cleanup_errors: vec![],
+            };
+            assert_eq!(public_auth_terminal(&terminal), terminal);
+        }
+    }
     #[test]
     fn branch_selection_uses_ancestors_not_latest_selection_on_another_branch() {
         let row = |sequence, parent_id, kind: &str, payload: Value| c::Record {

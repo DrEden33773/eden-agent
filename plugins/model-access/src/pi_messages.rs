@@ -106,7 +106,42 @@ pub(crate) fn project(input: &ModelInput, target: &ModelTarget) -> Result<Value,
                 }));
             }
             Item::ProviderState { value, .. } => {
-                messages.push(assistant(projection::raw_state(&value).clone(), target))
+                let state = projection::raw_state(&value);
+                if matches!(
+                    state["type"].as_str(),
+                    Some("pi_text_signature" | "pi_tool_metadata")
+                ) {
+                    let content_type = if state["type"] == "pi_text_signature" {
+                        "text"
+                    } else {
+                        "toolCall"
+                    };
+                    let message = messages
+                        .last_mut()
+                        .filter(|message| message["role"] == "assistant")
+                        .ok_or_else(|| {
+                            wire::failure("content metadata has no preceding assistant message")
+                        })?;
+                    let block = message["content"]
+                        .as_array_mut()
+                        .and_then(|content| content.last_mut())
+                        .filter(|block| block["type"] == content_type)
+                        .ok_or_else(|| {
+                            wire::failure("content metadata does not match preceding block")
+                        })?;
+                    let fields: &[&str] = if content_type == "text" {
+                        &["textSignature"]
+                    } else {
+                        &["thoughtSignature", "namespace"]
+                    };
+                    for field in fields {
+                        if let Some(value) = state.get(*field) {
+                            block[*field] = value.clone();
+                        }
+                    }
+                } else {
+                    messages.push(assistant(state.clone(), target));
+                }
             }
         }
     }
@@ -151,18 +186,39 @@ impl Decoder {
             let mut items = Vec::new();
             for block in self.blocks.values() {
                 match block["type"].as_str() {
-                    Some("text") => items.push(Item::Message {
-                        role: "assistant".into(),
-                        content: vec![Block::Text {
-                            text: block["text"].as_str().unwrap_or("").into(),
-                        }],
-                    }),
+                    Some("text") => {
+                        items.push(Item::Message {
+                            role: "assistant".into(),
+                            content: vec![Block::Text {
+                                text: block["text"].as_str().unwrap_or("").into(),
+                            }],
+                        });
+                        // Keep visible text in the ordinary history item. The adjacent
+                        // state adds metadata on same-target replay and disappears on a switch.
+                        if let Some(signature) = block["textSignature"].as_str() {
+                            items.push(projection::state(
+                                &self.target,
+                                json!({ "type": "pi_text_signature", "textSignature": signature }),
+                            ));
+                        }
+                    }
                     Some("thinking") => items.push(projection::state(&self.target, block.clone())),
-                    Some("toolCall") => items.push(projection::tool(
-                        block["id"].as_str().unwrap_or(""),
-                        block["name"].as_str().unwrap_or(""),
-                        &block["arguments"].to_string(),
-                    )?),
+                    Some("toolCall") => {
+                        items.push(projection::tool(
+                            block["id"].as_str().unwrap_or(""),
+                            block["name"].as_str().unwrap_or(""),
+                            &block["arguments"].to_string(),
+                        )?);
+                        let mut metadata = json!({ "type": "pi_tool_metadata" });
+                        for field in ["thoughtSignature", "namespace"] {
+                            if let Some(value) = block[field].as_str() {
+                                metadata[field] = json!(value);
+                            }
+                        }
+                        if metadata.as_object().is_some_and(|fields| fields.len() > 1) {
+                            items.push(projection::state(&self.target, metadata));
+                        }
+                    }
                     _ => return Err(wire::failure("invalid pi-messages content")),
                 }
             }
@@ -366,5 +422,134 @@ mod tests {
                 .contains("signature")
         );
         assert_eq!(reply.usage["raw"]["totalTokens"], 9);
+    }
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::*;
+    #[test]
+    fn signed_text_replays_once_with_metadata_only_for_same_target() {
+        let target = projection::test_target("pi-messages");
+        let mut decoder = Decoder::new(target.clone());
+        decoder
+            .consume(json!({ "type": "text_start", "contentIndex": 0 }))
+            .unwrap();
+        decoder
+            .consume(json!({
+                "type": "text_end",
+                "contentIndex": 0,
+                "content": "visible",
+                "contentSignature": "opaque-text-signature",
+            }))
+            .unwrap();
+        let reply = decoder
+            .consume(json!({ "type": "done", "reason": "stop", "usage": {} }))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reply
+                .items
+                .iter()
+                .filter(|item| matches!(item, Item::Message { .. }))
+                .count(),
+            1
+        );
+        let input = ModelInput {
+            target: None,
+            max_output_tokens: None,
+            items: reply.items,
+            tools: vec![],
+        };
+        let same = project(&input, &target).unwrap();
+        assert_eq!(same["context"]["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            same["context"]["messages"][0]["content"],
+            json!([{ "type": "text", "text": "visible", "textSignature": "opaque-text-signature" }])
+        );
+        let mut other = target.clone();
+        other.model = "other-model".into();
+        let crossed = project(&input, &other).unwrap();
+        assert_eq!(crossed["context"]["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            crossed["context"]["messages"][0]["content"],
+            json!([{ "type": "text", "text": "visible" }])
+        );
+        assert!(
+            serde_json::to_string(&input)
+                .unwrap()
+                .contains("opaque-text-signature")
+        );
+    }
+    #[test]
+    fn signed_tool_roundtrips_reference_fields_without_duplicate_calls() {
+        let target = projection::test_target("pi-messages");
+        let mut decoder = Decoder::new(target.clone());
+        decoder
+            .consume(json!({
+                "type": "toolcall_start",
+                "contentIndex": 0,
+                "id": "call",
+                "toolName": "read",
+            }))
+            .unwrap();
+        decoder
+            .consume(json!({
+                "type": "toolcall_end",
+                "contentIndex": 0,
+                "toolCall": {
+                    "type": "toolCall",
+                    "id": "call",
+                    "name": "read",
+                    "arguments": { "path": "a" },
+                    "thoughtSignature": "opaque-tool-signature",
+                    "namespace": "tools",
+                },
+            }))
+            .unwrap();
+        let reply = decoder
+            .consume(json!({ "type": "done", "reason": "toolUse", "usage": {} }))
+            .unwrap()
+            .unwrap();
+        let input = ModelInput {
+            target: None,
+            max_output_tokens: None,
+            items: reply.items,
+            tools: vec![],
+        };
+        assert_eq!(
+            input
+                .items
+                .iter()
+                .filter(|item| matches!(item, Item::ToolCall { .. }))
+                .count(),
+            1
+        );
+        let same = project(&input, &target).unwrap();
+        assert_eq!(same["context"]["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            same["context"]["messages"][0]["content"],
+            json!([{
+                "type": "toolCall",
+                "id": "call",
+                "name": "read",
+                "arguments": { "path": "a" },
+                "thoughtSignature": "opaque-tool-signature",
+                "namespace": "tools",
+            }])
+        );
+        let mut other = target.clone();
+        other.model = "other".into();
+        let crossed = project(&input, &other).unwrap();
+        assert_eq!(crossed["context"]["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            crossed["context"]["messages"][0]["content"],
+            json!([{
+                "type": "toolCall",
+                "id": "call",
+                "name": "read",
+                "arguments": { "path": "a" },
+            }])
+        );
     }
 }

@@ -325,7 +325,12 @@ def verify(destination: pathlib.Path) -> dict[str, Any]:
                 if mode == "cancel" and os.name == "nt":
                     results[mode] = "unaccepted: CLI Ctrl-C injection requires a Windows console"
                     continue
-                login = Login(command + ["auth", "login", provider], caller, environment)
+                login_history = scratch / f"{mode}-login.jsonl"
+                login = Login(
+                    command + ["--session", str(login_history), "auth", "login", provider],
+                    caller,
+                    environment,
+                )
                 before = len(server.grants)
                 try:
                     challenge = login.challenge()
@@ -356,6 +361,19 @@ def verify(destination: pathlib.Path) -> dict[str, Any]:
                         assert len(server.grants) == before + 1, server.errors
                     else:
                         assert len(server.grants) == before, "cancel exchanged a token"
+                    recorded = login_history.read_text(encoding="utf-8")
+                    assert '"interaction"' not in recorded, (
+                        "login interaction leaked to durable history"
+                    )
+                    for private_value in (
+                        redirect,
+                        challenge["code_challenge"],
+                        challenge.get("state"),
+                    ):
+                        if private_value:
+                            assert private_value not in recorded, (
+                                "login challenge leaked to durable history"
+                            )
                     endpoint = urllib.parse.urlparse(redirect)
                     with socket.socket() as probe:
                         probe.settimeout(2)

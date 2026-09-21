@@ -253,7 +253,7 @@ mod transport_tests {
     }
     #[tokio::test]
     async fn codex_distinct_endpoint_body_and_private_account_header_reach_server() {
-        let (base,server)=server("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}],\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n").await;
+        let (base,server)=server("data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"EDEN_G3_OK\"}]}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n").await;
         let mut target = projection::test_target("openai-codex-responses");
         target.base_url = format!("{base}/backend-api");
         target.provider = "openai-codex".into();
@@ -262,9 +262,13 @@ mod transport_tests {
         credential
             .headers
             .insert("chatgpt-account-id".into(), "account".into());
-        crate::targeted::request(&target, &credential, &input(), |_, _| Ok(()))
+        let reply = crate::targeted::request(&target, &credential, &input(), |_, _| Ok(()))
             .await
             .unwrap();
+        assert!(
+            matches!(&reply.items[0], Item::Message{content,..} if content == &vec![Block::Text{text:"EDEN_G3_OK".into()}])
+        );
+        assert_eq!(reply.usage["raw"]["input_tokens"], 2);
         let request = server.await.unwrap();
         assert!(request.starts_with("POST /backend-api/codex/responses "));
         assert!(request.contains("chatgpt-account-id: account"));

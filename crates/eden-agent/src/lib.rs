@@ -354,6 +354,18 @@ impl Session {
         F: FnOnce(Session, u64, Cancellation) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Terminal> + Send + 'static,
     {
+        self.start_with_public_result(management, Clone::clone, operation)
+    }
+    fn start_with_public_result<F, Fut>(
+        &self,
+        management: bool,
+        public_result: fn(&Terminal) -> Terminal,
+        operation: F,
+    ) -> Result<u64, Fault>
+    where
+        F: FnOnce(Session, u64, Cancellation) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Terminal> + Send + 'static,
+    {
         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.closed || state.active.is_some() || state.pending_inputs > 0 {
             return Err(Fault::new(
@@ -389,7 +401,7 @@ impl Session {
                         for attempt in attempts::records(
                             &session.events(),
                             run_id,
-                            &terminal,
+                            &public_result(&terminal),
                             &history.records,
                         ) {
                             if let Err(error) =
@@ -408,7 +420,11 @@ impl Session {
                     terminal.cleanup_errors.push(error);
                 }
                 if let Err(error) = session
-                    .commit(run_id, "terminal", serde_json::json!(terminal))
+                    .commit(
+                        run_id,
+                        "terminal",
+                        serde_json::json!(public_result(&terminal)),
+                    )
                     .await
                 {
                     terminal.cleanup_errors.push(error);
@@ -416,10 +432,11 @@ impl Session {
             }
             let mut state = session.0.state.lock().unwrap_or_else(|e| e.into_inner());
             state.terminals.insert(run_id, terminal.clone());
-            session
-                .0
-                .events
-                .push(run_id, "settled", serde_json::json!(terminal));
+            session.0.events.push(
+                run_id,
+                "settled",
+                serde_json::json!(public_result(&terminal)),
+            );
             state.active = None;
             state.management = false;
             session.0.settled.notify_waiters();
@@ -444,6 +461,7 @@ impl Session {
         Err(Fault::new("InvalidInput", "session", "unknown run"))
     }
     /// The settled result of a run, without waiting for one that is still active.
+    /// Authentication results include private transient UI data; do not log or persist them.
     pub fn inspect(&self, run_id: u64) -> Option<Terminal> {
         self.0
             .state
@@ -456,6 +474,7 @@ impl Session {
     /// Wait for a run to settle and return its terminal. The registration
     /// happens before the state is read, so a run that settles in between is
     /// reported rather than waited for.
+    /// Authentication results include private transient UI data; do not log or persist them.
     pub async fn wait(&self, run_id: u64) -> Result<Terminal, Fault> {
         loop {
             let settled = self.0.settled.notified();

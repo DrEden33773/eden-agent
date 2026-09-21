@@ -47,11 +47,7 @@ fn tools() -> Vec<ToolDefinition> {
     [
         (
             "powershell",
-            concat!(
-                "Run native PowerShell without profiles at the explicit cwd. Waits for process-tree ",
-                "cleanup on completion, cancellation or optional timeout_seconds deadline. Returns ",
-                "separate bounded stream tails and persistent full-output artifacts.",
-            ),
+            "Run native PowerShell without profiles at the explicit cwd. Waits for process-tree cleanup on completion, cancellation or optional timeout_seconds deadline. Returns separate bounded stream tails and persistent full-output artifacts.",
             json!({
                 "type": "object",
                 "properties": {
@@ -74,10 +70,7 @@ fn tools() -> Vec<ToolDefinition> {
         ),
         (
             "skill",
-            concat!(
-                "Load an available skill on demand. Relative references resolve from its skill ",
-                "directory.",
-            ),
+            "Load an available skill on demand. Relative references resolve from its skill directory.",
             json!({
                 "type": "object",
                 "properties": { "name": { "type": "string" }, "arguments": { "type": "string" } },
@@ -112,11 +105,7 @@ fn tools() -> Vec<ToolDefinition> {
         ),
         (
             "edit",
-            concat!(
-                "Apply old_text/new_text or a batch of edits against the original file. All matches must be ",
-                "unique and nonoverlapping. Strict mode normalizes CRLF; tolerant mode additionally ",
-                "normalizes curly quotes, Unicode dashes and trailing spaces/tabs. Preserves BOM and newline style.",
-            ),
+            "Apply old_text/new_text or a batch of edits against the original file. All matches must be unique and nonoverlapping. Strict mode normalizes CRLF; tolerant mode additionally normalizes curly quotes, Unicode dashes and trailing spaces/tabs. Preserves BOM and newline style.",
             json!({
                 "type": "object",
                 "properties": {
@@ -143,11 +132,7 @@ fn tools() -> Vec<ToolDefinition> {
         ),
         (
             "bash",
-            concat!(
-                "Run bash in the session cwd. Returns separate bounded stream tails, persistent ",
-                "full-output artifacts and the exit code after process-tree cleanup. An optional ",
-                "timeout_seconds deadline stops this command; there is no default timeout.",
-            ),
+            "Run bash in the session cwd. Returns separate bounded stream tails, persistent full-output artifacts and the exit code after process-tree cleanup. An optional timeout_seconds deadline stops this command; there is no default timeout.",
             json!({
                 "type": "object",
                 "properties": {
@@ -545,6 +530,7 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
                                 if execution.call_id != original.call_id
                                     || execution.cwd != original.cwd
                                 {
+                                    // A single literal makes rustfmt skip this enclosing tool closure.
                                     return Err(Fault::new(
                                         "InvalidInput",
                                         "before-tool",
@@ -597,12 +583,13 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
                             "PersistenceFailure",
                             "coding-loop",
                             format!(
+                                // Keep this split: a single literal makes rustfmt skip the enclosing statement.
                                 concat!(
                                     "Tool call {call_id}: external side effects may already have ",
                                     "occurred; result commit failed: {error}",
                                 ),
                                 call_id = call_id,
-                                error = error,
+                                error = error
                             ),
                         )
                     })?;

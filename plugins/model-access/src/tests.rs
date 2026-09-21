@@ -59,8 +59,11 @@ async fn server(status: &str, body: String) -> (String, tokio::task::JoinHandle<
             .write_all(
                 format!(
                     concat!(
-                        "HTTP/1.1 {status}\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: ",
-                        "close\r\n\r\n",
+                        "HTTP/1.1 {status}\r\n",
+                        "Content-Type: text/event-stream\r\n",
+                        "Content-Length: {}\r\n",
+                        "Connection: close\r\n",
+                        "\r\n",
                     ),
                     body.len(),
                     status = status,
@@ -315,8 +318,10 @@ async fn cancelling_inflight_request_closes_its_socket() {
         socket
             .write_all(
                 concat!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n",
-                    "Transfer-Encoding: chunked\r\n\r\n",
+                    "HTTP/1.1 200 OK\r\n",
+                    "Content-Type: text/event-stream\r\n",
+                    "Transfer-Encoding: chunked\r\n",
+                    "\r\n",
                 )
                 .as_bytes(),
             )
@@ -367,8 +372,13 @@ async fn cancelling_inflight_request_closes_its_socket() {
 #[test]
 fn sse_preserves_utf8_crlf_multiline_data_and_ignores_comments_at_every_split() {
     let body = concat!(
-        ": keepalive\r\nevent: response.output_text.delta\r\ndata: {\r\ndata: \"type\":\"response.output_text.delta\",\"delta\":\"你好🙂\"}\r\n\r\ndata: ",
-        "[DONE]\r\n\r\n",
+        ": keepalive\r\n",
+        "event: response.output_text.delta\r\n",
+        "data: {\r\n",
+        "data: \"type\":\"response.output_text.delta\",\"delta\":\"你好🙂\"}\r\n",
+        "\r\n",
+        "data: [DONE]\r\n",
+        "\r\n",
     );
     for split in 0..=body.len() {
         let mut decoder = Sse::default();
@@ -951,18 +961,12 @@ fn explicit_context_errors_and_quota_messages_are_classified_without_echoing_the
     for (status, message, expected) in [
         (
             400,
-            concat!(
-                "This model's maximum context length is 1048576 tokens. Your messages resulted ",
-                "in too many tokens: test-secret",
-            ),
+            "This model's maximum context length is 1048576 tokens. Your messages resulted in too many tokens: test-secret",
             "ContextOverflow",
         ),
         (
             429,
-            concat!(
-                "You exceeded your current quota, please check your plan and billing details. ",
-                "test-secret",
-            ),
+            "You exceeded your current quota, please check your plan and billing details. test-secret",
             "ProviderFailure",
         ),
         (

@@ -107,8 +107,12 @@ fn skill_body_is_only_returned_when_invoked_and_snapshot_stays_fixed() {
     f.write(
         "project/.eden/skills/a/SKILL.md",
         concat!(
-            "---\nname: a\ndescription: do the task\ndisable-model-invocation: true\n---\nORIGINAL ",
-            "BODY",
+            "---\n",
+            "name: a\n",
+            "description: do the task\n",
+            "disable-model-invocation: true\n",
+            "---\n",
+            "ORIGINAL BODY",
         ),
     );
     let loaded = load(&f.config(), 1).unwrap();
@@ -181,8 +185,13 @@ fn template_windows_paths_survive_argument_expansion() {
         )
         .unwrap(),
         concat!(
-            r"C:\repo\src|C:\two words\src|\\server\share|\\server\share|C:\|",
-            r"C:\repo\src C:\two words\src \\server\share \\server\share C:\|C:\two words\src",
+            "C:\\repo\\src|",
+            "C:\\two words\\src|",
+            "\\\\server\\share|",
+            "\\\\server\\share|",
+            "C:\\|",
+            "C:\\repo\\src C:\\two words\\src \\\\server\\share \\\\server\\share C:\\|",
+            "C:\\two words\\src",
         )
     );
 }

@@ -42,8 +42,10 @@ mod tests {
         std::fs::write(
             &path,
             concat!(
-                "PRESERVED=file-value\nEMPTY=file-value\nLITERAL='$(not a shell command)'\nQUOTED=\"a ",
-                "value with spaces\"\n",
+                "PRESERVED=file-value\n",
+                "EMPTY=file-value\n",
+                "LITERAL='$(not a shell command)'\n",
+                "QUOTED=\"a value with spaces\"\n",
             ),
         )
         .unwrap();

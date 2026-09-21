@@ -238,6 +238,7 @@ impl Session {
                     return Err(Fault::new(
                         "Unavailable",
                         "composition",
+                        // Keep this split: a single literal makes rustfmt skip the enclosing statement.
                         concat!(
                             "saved package binding differs; explicitly switch ",
                             "the saved session composition",

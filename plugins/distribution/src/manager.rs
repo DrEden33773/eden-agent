@@ -358,10 +358,7 @@ impl Manager {
             {
                 return Err(error(
                     "BuildRequired",
-                    concat!(
-                        "matching plugin artifact is missing; source build requires an explicit install ",
-                        "--build",
-                    ),
+                    "matching plugin artifact is missing; source build requires an explicit install --build",
                 ));
             }
             if let Some(resources) = &bundle.resources {
@@ -628,10 +625,7 @@ impl Manager {
             return Err(error(
                 "PackageInUse",
                 format!(
-                    concat!(
-                        "version is referenced by {}; explicitly remove with force only after handling ",
-                        "these bindings",
-                    ),
+                    "version is referenced by {}; explicitly remove with force only after handling these bindings",
                     references.join(", ")
                 ),
             ));

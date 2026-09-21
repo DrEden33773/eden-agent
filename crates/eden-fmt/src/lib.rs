@@ -5,7 +5,8 @@
 //! a body into an equivalent Rust expression that rustfmt does parse, hands the
 //! whole file to rustfmt, and then lifts the formatted expression back into the
 //! DSL it came from.
-//! Every layout decision stays with rustfmt: lowering only renames syntax.
+//! rustfmt lays out the lowered Rust; lifting uses the same width target to
+//! compact JSON bodies and preserve breaks around select branches.
 //!
 //! The pipeline is `lower -> rustfmt -> lift`, and both directions work on byte
 //! ranges of the text being processed:

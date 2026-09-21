@@ -3,8 +3,8 @@
 //! rustfmt never rewrites a literal and `eden-fmt` never changes one either, so a
 //! string that is split with a backslash and a newline is accepted by both tools
 //! no matter how the author got there. This module reports those literals so the
-//! gate can refuse them: the text has to be carried by `concat!(...)` or by a raw
-//! string laid out by meaning, which is a decision only the author can make.
+//! gate can refuse them. Prefer a direct literal; meaningful text groups can
+//! use `concat!(...)`. The author chooses a form that preserves the value.
 //!
 //! The literals come from the lexer this crate already trusts. `proc-macro2`
 //! decides what is a literal, a character literal, a lifetime or a comment, and

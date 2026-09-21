@@ -230,10 +230,9 @@ impl Session {
         let bytes = std::fs::read(&options.source).map_err(|e| invalid(e.to_string()))?;
         let scan = eden_protocol::history::scan_records(&bytes);
         if scan.diagnostic.is_some() && !matches!(options.kind, CopyKind::Recover) {
-            return Err(invalid(concat!(
-                "source has damaged/uncommitted data; use explicit recover to copy the validated ",
-                "prefix",
-            )));
+            return Err(invalid(
+                "source has damaged/uncommitted data; use explicit recover to copy the validated prefix",
+            ));
         }
         let first = scan
             .records
@@ -276,6 +275,7 @@ impl Session {
         }
         if options.public_only {
             losses.push(
+                // Keep this split: a single literal makes rustfmt skip the enclosing statement.
                 concat!(
                     "Plugin private state and provider reasoning state are omitted; this is not a ",
                     "full state restoration.",
@@ -285,6 +285,7 @@ impl Session {
         }
         if cwd != first.payload["cwd"].as_str().unwrap_or("") {
             losses.push(
+                // Keep this split: a single literal makes rustfmt skip the enclosing statement.
                 concat!(
                     "Working directory binding changes; external project files are not copied or ",
                     "rolled back.",
@@ -386,6 +387,7 @@ impl Session {
             );
         }
         let mut preserved = vec![
+            // Keep this split: a single literal makes rustfmt skip the enclosing statement.
             concat!(
                 "Public selected history, attachments, branch links and source provenance; source ",
                 "bytes remain unchanged.",
@@ -449,10 +451,13 @@ impl Session {
                     .filter(|r| r.kind == "extension_state")
                     .count();
                 if reply.states.len() != count {
-                    return Err(invalid(concat!(
-                        "migrator must preserve one state result per source record; preview a ",
-                        "public-only copy to discard state",
-                    )));
+                    return Err(invalid(
+                        // Keep this split: a single literal makes rustfmt skip the enclosing statement.
+                        concat!(
+                            "migrator must preserve one state result per source record; preview a ",
+                            "public-only copy to discard state",
+                        ),
+                    ));
                 }
                 let mut states = reply.states.into_iter();
                 for record in &mut records {
@@ -692,6 +697,7 @@ impl Session {
                                     )
                                     .await
                                     .map_err(|restore| {
+                                        // Keep this split so rustfmt checks the error handler.
                                         Fault::new(
                                             "PersistenceFailure",
                                             "navigation",

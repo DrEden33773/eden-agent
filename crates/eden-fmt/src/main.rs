@@ -131,10 +131,7 @@ fn execute(arguments: &[String]) -> Result<ExitCode, String> {
 
 /// One diagnostic line: the rule, the fix, and the literal that breaks it.
 fn style_line(path: Option<&std::path::Path>, violation: &eden_fmt::engine::Violation) -> String {
-    let hint = concat!(
-        "string literal still uses a backslash continuation; ",
-        "carry the text with `concat!(...)` or lay it out as a raw string",
-    );
+    let hint = "string literal still uses a backslash continuation; use a direct literal or meaningful `concat!(...)` groups, preserving the value";
     match path {
         Some(path) => format!(
             "{}: {hint} ({})",

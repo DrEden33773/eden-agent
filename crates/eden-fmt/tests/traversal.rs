@@ -63,8 +63,11 @@ fn a_target_declared_under_a_dot_directory_is_collected() {
     fixture.write(
         "Cargo.toml",
         concat!(
-            "[package]\nname = \"hidden\"\n",
-            "[[bin]]\nname = \"hidden\"\npath = \".hidden/main.rs\"\n",
+            "[package]\n",
+            "name = \"hidden\"\n",
+            "[[bin]]\n",
+            "name = \"hidden\"\n",
+            "path = \".hidden/main.rs\"\n",
         ),
     );
     fixture.write(".hidden/main.rs", "fn main() {}\n");
@@ -77,9 +80,13 @@ fn a_nested_source_declared_under_a_dot_directory_is_collected() {
     fixture.write(
         "Cargo.toml",
         concat!(
-            "[workspace]\nmembers = [\".member\"]\n",
-            "[package]\nname = \"root\"\n",
-            "[[bin]]\nname = \"root\"\npath = \".hidden/deep/main.rs\"\n",
+            "[workspace]\n",
+            "members = [\".member\"]\n",
+            "[package]\n",
+            "name = \"root\"\n",
+            "[[bin]]\n",
+            "name = \"root\"\n",
+            "path = \".hidden/deep/main.rs\"\n",
         ),
     );
     fixture.write(".member/Cargo.toml", "[package]\nname = \"member\"\n");
@@ -119,8 +126,11 @@ fn a_dot_component_below_the_manifest_is_collected() {
     fixture.write(
         "Cargo.toml",
         concat!(
-            "[package]\nname = \"below\"\n",
-            "[[bin]]\nname = \"below\"\npath = \"src/.hidden/main.rs\"\n",
+            "[package]\n",
+            "name = \"below\"\n",
+            "[[bin]]\n",
+            "name = \"below\"\n",
+            "path = \"src/.hidden/main.rs\"\n",
         ),
     );
     fixture.write("src/.hidden/main.rs", "fn main() {}\n");
@@ -133,9 +143,14 @@ fn a_path_is_read_in_both_toml_spellings_and_both_separators() {
     fixture.write(
         "Cargo.toml",
         concat!(
-            "[package]\nname = \"spellings\"\n",
-            "[[bin]]\nname = \"one\"\npath = './.one/main.rs'\n",
-            "[[bin]]\nname = \"two\"\npath = \".two\\\\main.rs\"\n",
+            "[package]\n",
+            "name = \"spellings\"\n",
+            "[[bin]]\n",
+            "name = \"one\"\n",
+            "path = './.one/main.rs'\n",
+            "[[bin]]\n",
+            "name = \"two\"\n",
+            "path = \".two\\\\main.rs\"\n",
         ),
     );
     fixture.write(".one/main.rs", "fn one() {}\n");
@@ -149,8 +164,11 @@ fn a_comment_naming_a_dot_directory_does_not_exempt_it() {
     fixture.write(
         "Cargo.toml",
         concat!(
-            "[package]\nname = \"comment\"\n",
-            "[[bin]]\nname = \"comment\"\npath = \".hidden/main.rs\" # moved out of \".cache/main.rs\"\n",
+            "[package]\n",
+            "name = \"comment\"\n",
+            "[[bin]]\n",
+            "name = \"comment\"\n",
+            "path = \".hidden/main.rs\" # moved out of \".cache/main.rs\"\n",
         ),
     );
     fixture.write(".hidden/main.rs", "fn main() {}\n");
@@ -166,8 +184,11 @@ fn an_exclude_list_is_not_a_declaration() {
     fixture.write(
         "Cargo.toml",
         concat!(
-            "[workspace]\nmembers = []\nexclude = [\".git\", \".cache\"]\n",
-            "[package]\nname = \"exclude\"\n",
+            "[workspace]\n",
+            "members = []\n",
+            "exclude = [\".git\", \".cache\"]\n",
+            "[package]\n",
+            "name = \"exclude\"\n",
         ),
     );
     fixture.write("src/lib.rs", "pub fn kept() {}\n");
@@ -225,8 +246,11 @@ fn an_explicit_skip_still_wins_over_a_declared_dot_directory() {
     fixture.write(
         "Cargo.toml",
         concat!(
-            "[package]\nname = \"skip\"\n",
-            "[[bin]]\nname = \"vendor\"\npath = \".vendor/dependency.rs\"\n",
+            "[package]\n",
+            "name = \"skip\"\n",
+            "[[bin]]\n",
+            "name = \"vendor\"\n",
+            "path = \".vendor/dependency.rs\"\n",
         ),
     );
     fixture.write(".vendor/dependency.rs", "fn main() {}\n");

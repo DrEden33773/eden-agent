@@ -2,6 +2,7 @@
 mod engine;
 mod history;
 mod scope;
+mod stream;
 use std::io::{BufRead, Write};
 fn main() {
     let mut engine = engine::Engine::with_progress(|stage| {

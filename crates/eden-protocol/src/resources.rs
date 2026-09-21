@@ -33,6 +33,30 @@ pub struct SourceConfig {
     pub skill_paths: Vec<String>,
     #[serde(default)]
     pub template_paths: Vec<String>,
+    #[serde(default)]
+    pub resource_packages: Vec<LockedResourcePackage>,
+}
+
+/// Relative resource roots shipped by an explicitly installed package. These
+/// carry no executable roles and therefore need no native library or target.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[allow(missing_docs)]
+pub struct PackageResources {
+    pub name: String,
+    pub version: String,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[serde(default)]
+    pub templates: Vec<String>,
+}
+
+/// An installed resource selection tied to immutable bytes for session reopen.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[allow(missing_docs)]
+pub struct LockedResourcePackage {
+    pub manifest: PackageResources,
+    pub root: String,
+    pub digest: String,
 }
 /// One skill or template a source publishes.
 #[derive(Clone, Debug, Serialize, Deserialize)]

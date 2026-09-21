@@ -80,6 +80,8 @@ pub(crate) fn prepare(
             if !package.config.is_object() {
                 package.config = serde_json::json!({});
             }
+            package.config["artifact_dir"] =
+                serde_json::json!(workspace.global_dir.join("artifacts"));
             for key in ["tools", "exclude_tools", "read_only"] {
                 if let Some(value) = workspace.settings.get(key) {
                     package.config[key] = value.clone();
@@ -93,6 +95,16 @@ pub(crate) fn prepare(
         composition.parent().unwrap_or(Path::new(".")),
         &workspace.global_dir.join("distribution"),
     )?;
+    for package in &mut selected.packages {
+        if package
+            .descriptor
+            .provides
+            .iter()
+            .any(|role| role == eden_protocol::resources::SOURCE)
+        {
+            package.config["resource_packages"] = serde_json::json!(selected.resource_packages);
+        }
+    }
     Ok(selected)
 }
 

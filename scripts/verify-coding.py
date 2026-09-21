@@ -49,7 +49,7 @@ def answer(text: str) -> list[dict[str, Any]]:
     ]
 
 
-def call(identity: str, name: str, **arguments: str) -> list[dict[str, Any]]:
+def call(identity: str, name: str, **arguments: Any) -> list[dict[str, Any]]:
     return [
         {
             "type": "function_call",
@@ -200,11 +200,179 @@ def main() -> None:
     results: dict[str, Any] = {}
     with tempfile.TemporaryDirectory(prefix="eden-coding-acceptance-") as temp:
         scratch = pathlib.Path(temp)
+        os.environ["EDEN_AGENT_DIR"] = str(scratch / "global")
+        (scratch / "global").mkdir()
+        write(
+            scratch / "global/settings.json",
+            {"discover_skills": False, "discover_templates": False},
+        )
         author = build_author(destination, scratch)
         caller = scratch / "unrelated caller 工作目录"
         caller.mkdir()
         project = scratch / "coding project"
         project.mkdir()
+        # The installed read result must survive history and reach the next real
+        # HTTP request as an image block, rather than base64 inside display text.
+        import base64
+
+        image_bytes = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII="
+        )
+        (project / "pixel.png").write_bytes(image_bytes)
+        parity_history = scratch / "tool-parity.jsonl"
+        (project / "atomic.txt").write_bytes(b"\xef\xbb\xbfalpha\r\nbeta\r\n")
+        parity_calls = [
+            call("image-read", "read", path="pixel.png"),
+            call(
+                "batch-invalid",
+                "edit",
+                path="atomic.txt",
+                edits=[
+                    {"old_text": "alpha", "new_text": "A"},
+                    {"old_text": "missing", "new_text": "B"},
+                ],
+            ),
+            call(
+                "batch-valid",
+                "edit",
+                path="atomic.txt",
+                edits=[
+                    {"old_text": "alpha", "new_text": "A"},
+                    {"old_text": "beta", "new_text": "B"},
+                ],
+            ),
+            call("range-read", "read", path="atomic.txt", limit=1),
+        ]
+
+        def parity_response(body: dict[str, Any], index: int) -> list[dict[str, Any]]:
+            if index:
+                output = [item for item in body["input"] if item["type"] == "function_call_output"][
+                    -1
+                ]["output"]
+                if index == 1:
+                    assert isinstance(output, list)
+                    image = next(block for block in output if block["type"] == "input_image")
+                    assert base64.b64decode(image["image_url"].split(",", 1)[1]) == image_bytes
+                    stored = next(
+                        r["payload"]["result"]
+                        for r in records(parity_history)
+                        if r["kind"] == "tool_result"
+                    )
+                    assert base64.b64decode(stored["content"][0]["data"]) == image_bytes
+                else:
+                    result = json.loads(output)
+                    if index == 2:
+                        assert result["error"] is not None
+                        assert (
+                            project / "atomic.txt"
+                        ).read_bytes() == b"\xef\xbb\xbfalpha\r\nbeta\r\n"
+                    elif index == 3:
+                        assert result["error"] is None
+                        assert (project / "atomic.txt").read_bytes() == b"\xef\xbb\xbfA\r\nB\r\n"
+                    elif index == 4:
+                        assert result["details"]["next_offset"] == 2
+            return parity_calls[index] if index < len(parity_calls) else answer("parity complete")
+
+        parity_server = Server(parity_response)
+        try:
+            parity_config = configure(destination, composition, parity_server, "tool-parity")
+            events(
+                run(
+                    [
+                        host,
+                        "--composition",
+                        parity_config,
+                        "--cwd",
+                        project,
+                        "--global-dir",
+                        scratch / "global",
+                        "--session",
+                        parity_history,
+                        "--json",
+                        "Inspect image and perform validated file operations",
+                    ],
+                    caller,
+                )
+            )
+            assert len(parity_server.requests) == 5
+            results["tool_result_parity"] = {
+                "requests": 5,
+                "image_bytes_in_wire_and_history": len(image_bytes),
+                "batch_validation_preserves_original": True,
+                "bom_crlf_preserved": True,
+                "next_offset": 2,
+            }
+        finally:
+            parity_server.close()
+
+        skill_path = scratch / "frozen-skill.md"
+        skill_path.write_text(
+            "---\nname: frozen\ndescription: test frozen instructions\n---\nBODY", encoding="utf-8"
+        )
+        system_path = scratch / "global/SYSTEM.md"
+        system_path.write_text("CUSTOM-ROLE-PARITY", encoding="utf-8")
+        for selected_tools in [["skill"], ["read"], []]:
+
+            def inspect_prompt(
+                body: dict[str, Any], _index: int, selected_tools: list[str] = selected_tools
+            ) -> list[dict[str, Any]]:
+                prompt = "\n".join(
+                    block["text"]
+                    for item in body["input"]
+                    if item.get("role") == "system"
+                    for block in item["content"]
+                    if block["type"] == "input_text"
+                )
+                actual_cwd = next(
+                    line.removeprefix("Working directory: ")
+                    for line in prompt.splitlines()
+                    if line.startswith("Working directory: ")
+                )
+                assert "CUSTOM-ROLE-PARITY" in prompt
+                assert pathlib.Path(actual_cwd).samefile(project), (actual_cwd, str(project))
+                assert ("Use the skill tool" in prompt) is (selected_tools == ["skill"])
+                assert ("eden-resource://skill/frozen" in prompt) is (selected_tools == ["read"])
+                assert ("Available skill frozen" in prompt) is bool(selected_tools)
+                return answer("prompt consistent")
+
+            prompt_server = Server(inspect_prompt)
+            try:
+                selected = copy.deepcopy(composition)
+                for entry in selected["packages"]:
+                    if entry["descriptor"]["package"] == "workspace-resources":
+                        entry["config"] = {"skill_paths": [str(skill_path)]}
+                    if entry["descriptor"]["package"] == "coding-tools":
+                        entry["config"] = {"tools": selected_tools}
+                prompt_config = configure(destination, selected, prompt_server, "prompt-parity")
+                events(
+                    run(
+                        [
+                            host,
+                            "--composition",
+                            prompt_config,
+                            "--cwd",
+                            project,
+                            "--global-dir",
+                            scratch / "global",
+                            "--session",
+                            scratch / f"prompt-{len(selected_tools)}-{selected_tools}.jsonl",
+                            "--json",
+                            "Describe available skills",
+                        ],
+                        caller,
+                    )
+                )
+                assert len(prompt_server.requests) == 1
+            finally:
+                prompt_server.close()
+        system_path.unlink()
+        results["effective_skill_prompts"] = {
+            "default_skill": True,
+            "read_only_frozen_uri": True,
+            "no_reader_no_advertisement": True,
+            "custom_system_keeps_cwd": True,
+        }
+
         source = project / "arithmetic.py"
         original = "# TODO TODO\ndef add(a, b):\n    return a - b\n"
         source.write_text(original, encoding="utf-8")
@@ -284,6 +452,10 @@ class ArithmeticTests(unittest.TestCase):
                     )
                 if index == 6:
                     assert result["exit_code"] == 0 and result["truncated"] is True
+                    streams = {a["name"]: pathlib.Path(a["path"]) for a in result["artifacts"]}
+                    assert streams["stdout"].read_bytes() == b"x" * 100000 + os.linesep.encode()
+                    assert b"Ran 1 test" in streams["stderr"].read_bytes()
+                    assert "Ran 1 test" in result["text"]
                     assert (project / "tests-ran.txt").read_text(
                         encoding="utf-8"
                     ) == "passed after durable intent"

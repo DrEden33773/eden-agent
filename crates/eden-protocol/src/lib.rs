@@ -4,7 +4,7 @@ use serde_json::Value;
 pub mod resources;
 
 /// Exact host/SDK pairing for this development release.
-pub const CONTRACT: &str = "eden-native-0.2.0";
+pub const CONTRACT: &str = "eden-native-0.3.0";
 /// Agent loop role.
 pub const AGENT_LOOP: &str = "eden.agent-loop.v1";
 /// Context projection role.
@@ -136,6 +136,8 @@ pub struct PackageManifest {
 #[allow(missing_docs)]
 pub struct Composition {
     pub packages: Vec<PackageManifest>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resource_packages: Vec<resources::LockedResourcePackage>,
     pub roles: std::collections::BTreeMap<String, String>,
 }
 /// Input to the loop and context strategy.

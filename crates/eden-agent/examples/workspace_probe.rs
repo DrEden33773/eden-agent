@@ -4,6 +4,8 @@ use eden_plugin_sdk::Cancellation;
 use eden_protocol::{Request, coding as c, resources as r};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
+#[path = "workspace_probe/search_parity.rs"]
+mod workspace_search_parity;
 async fn call(
     session: &Session,
     contract: &str,
@@ -65,6 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let session = Session::open_with_workspace(&composition, options(), workspace()).await?;
     let result = match mode.as_str() {
+        "search-parity" => workspace_search_parity::run(&session, &cwd).await?,
         "switch" => {
             let old = session.role(c::LOOP)?;
             let bad = PathBuf::from(&args[4]);

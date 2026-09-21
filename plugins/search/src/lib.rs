@@ -198,6 +198,9 @@ impl State {
             stopped?;
         }
         result.map_err(|error| error.fault).map(|value| ToolResult {
+            content: vec![],
+            details: value.clone(),
+            artifacts: vec![],
             text: render::render(&value),
             truncated: false,
             exit_code: None,
@@ -365,6 +368,14 @@ fn catalog() -> Vec<ToolDefinition> {
                 json!({ "type": "string", "enum": ["fuzzy", "glob"], "default": "fuzzy" })
             };
             if name == "grep" {
+                properties["include"] = json!({
+                    "type": "array", "items": { "type": "string" },
+                    "description": "Positive relative-path globs; files must match at least one. Empty means unrestricted. Applied before counts and skipped-file diagnostics.",
+                });
+                properties["context"] = json!({
+                    "type": "integer", "minimum": 0, "maximum": 100, "default": 0,
+                    "description": "Lines before and after each match, deduplicated before pagination. Context rows do not count as matches.",
+                });
                 properties["fallback"] = json!({
                     "type": "string",
                     "enum": ["fuzzy"],
@@ -378,6 +389,7 @@ fn catalog() -> Vec<ToolDefinition> {
                     "minimum": 1,
                     "maximum": 10485760,
                     "default": 5242880,
+                    "description": "Directory-scan file limit. An explicitly selected larger file uses cancellable line-oriented exact streaming; fuzzy scans keep this limit.",
                 });
             }
             ToolDefinition {

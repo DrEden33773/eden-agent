@@ -201,6 +201,19 @@ fn copy_records(
                 );
             }
         }
+        if copy.kind == "model_response"
+            && let Some(generation) = copy.payload["usage_generation"].as_u64()
+            && generation != 0
+        {
+            // Usage belongs to a particular compaction, not its former number.
+            // A missing checkpoint invalidates calibration instead of silently
+            // rebinding it to generation zero or an unrelated copied record.
+            copy.payload["usage_generation"] = json!(mapping.get(&generation).filter(|_| {
+                records
+                    .get((generation - 1) as usize)
+                    .is_some_and(|record| record.kind == "compaction")
+            }));
+        }
         mapping.insert(record.sequence, copy.sequence);
         output.push(copy);
     }
@@ -1101,6 +1114,67 @@ mod tests {
         let compaction = copy.last().unwrap();
         let boundary = compaction.payload["first_kept"].as_u64().unwrap();
         assert_eq!(copy[(boundary - 1) as usize].payload["retained"], true);
+    }
+    #[test]
+    fn copied_usage_generation_follows_its_compaction_and_invalidates_missing_references() {
+        let records = vec![
+            r(1, None, "session", json!({})),
+            r(2, Some(1), "queue_accepted", json!({ "id": 2 })),
+            r(
+                3,
+                Some(2),
+                "compaction",
+                json!({ "summary": "saved", "first_kept": 0 }),
+            ),
+            r(
+                4,
+                Some(3),
+                "model_response",
+                json!({
+                    "usage_generation": 3,
+                    "usage": { "total_tokens": 90000 },
+                    "response_estimate": 25,
+                }),
+            ),
+            r(
+                5,
+                Some(4),
+                "model_response",
+                json!({ "usage_generation": 0 }),
+            ),
+            r(
+                6,
+                Some(5),
+                "model_response",
+                json!({ "usage_generation": 99 }),
+            ),
+            r(
+                7,
+                Some(6),
+                "model_response",
+                json!({ "request_id": "legacy" }),
+            ),
+        ];
+        let copy = copy_records(&records, &CopyKind::Clone, None, 99, false).unwrap();
+        let compaction = copy
+            .iter()
+            .find(|record| record.kind == "compaction")
+            .unwrap();
+        let responses: Vec<_> = copy
+            .iter()
+            .filter(|record| record.kind == "model_response")
+            .collect();
+        assert_eq!(compaction.sequence, 2);
+        assert_eq!(
+            responses[0].payload["usage_generation"],
+            compaction.sequence
+        );
+        assert_eq!(responses[0].payload["usage"]["total_tokens"], 90000);
+        assert_eq!(responses[0].payload["response_estimate"], 25);
+        assert_eq!(responses[1].payload["usage_generation"], 0);
+        assert_eq!(responses[2].payload["usage_generation"], Value::Null);
+        assert!(responses[3].payload.get("usage_generation").is_none());
+        assert_eq!(records[3].payload["usage_generation"], 3);
     }
     #[test]
     fn binding_ignores_unused_packages_and_compatible_inventory_changes() {

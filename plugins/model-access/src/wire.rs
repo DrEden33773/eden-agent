@@ -65,12 +65,49 @@ pub(crate) fn project(
                 "name": name,
                 "arguments": arguments,
             })),
-            Item::ToolResult { call_id, result } => Ok(json!({
-                "type": "function_call_output",
-                "call_id": call_id,
-                "output": serde_json::to_string(result)
-                    .map_err(|_| failure("tool output serialization failed"))?,
-            })),
+            Item::ToolResult { call_id, result } => {
+                let output = if result.content.is_empty() {
+                    Value::String(
+                        serde_json::to_string(result)
+                            .map_err(|_| failure("tool output serialization failed"))?,
+                    )
+                } else {
+                    let mut metadata = serde_json::to_value(result)
+                        .map_err(|_| failure("tool output serialization failed"))?;
+                    if let Some(fields) = metadata.as_object_mut() {
+                        fields.remove("content");
+                    }
+                    let mut blocks = vec![json!({
+                        "type": "input_text",
+                        "text": metadata.to_string(),
+                    })];
+                    for block in &result.content {
+                        blocks.push(match block {
+                            Block::Text { text } => json!({ "type": "input_text", "text": text }),
+                            Block::Image { media_type, data } => json!({
+                                "type": "input_image",
+                                "image_url": format!("data:{media_type};base64,{data}"),
+                            }),
+                            Block::File { .. } if options.profile == Profile::Deepseek => {
+                                return Err(failure(
+                                    "DeepSeek Responses does not support file tool output",
+                                ));
+                            }
+                            Block::File {
+                                name,
+                                media_type,
+                                data,
+                            } => json!({
+                                "type": "input_file",
+                                "filename": name,
+                                "file_data": format!("data:{media_type};base64,{data}"),
+                            }),
+                        });
+                    }
+                    Value::Array(blocks)
+                };
+                Ok(json!({ "type": "function_call_output", "call_id": call_id, "output": output }))
+            }
             Item::ProviderState { provider, value }
                 if provider == options.profile.state() && value["type"] == "reasoning" =>
             {

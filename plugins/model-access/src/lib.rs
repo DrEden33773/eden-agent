@@ -9,9 +9,14 @@ use eden_protocol::{
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::Value;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use wire::{Sse, failure};
 mod wire;
+
+static NEXT_ATTEMPT: AtomicU64 = AtomicU64::new(1);
 
 const DEEPSEEK_CONTEXT_WINDOW: u64 = 1_048_576;
 const DEEPSEEK_MAX_OUTPUT_TOKENS: u32 = 393_216;
@@ -170,7 +175,16 @@ fn create(config: Value) -> Result<Package, Fault> {
             async move {
                 let settings = config.settings()?;
                 let cancel = cx.scope.cancellation();
-                tokio::select! {
+                let attempt_id = format!(
+                    "{}:{}",
+                    cx.run_id(),
+                    NEXT_ATTEMPT.fetch_add(1, Ordering::Relaxed)
+                );
+                cx.emit(
+                    "model_attempt_started",
+                    serde_json::json!({ "attempt_id": attempt_id }),
+                )?;
+                let result = tokio::select! {
                     biased;
                     _ = cancel.cancelled() =>
                         Err(Fault::new("Cancelled", "model-access", "request cancelled",)),
@@ -180,9 +194,51 @@ fn create(config: Value) -> Result<Package, Fault> {
                             &settings.key,
                             &input,
                             &settings.options,
-                            |kind, payload| cx.emit(kind, payload),
+                            |kind, mut payload| {
+                                payload["attempt_id"] = serde_json::json!(attempt_id);
+                                cx.emit(kind, payload)
+                            },
                         ) => reply,
-                }
+                };
+                let status = match &result {
+                    Ok(_) => "completed",
+                    Err(error) if error.code == "Cancelled" => "cancelled",
+                    Err(_) => "failed",
+                };
+                cx.emit(
+                    "model_attempt_finished",
+                    serde_json::json!({
+                        "attempt_id": attempt_id,
+                        "status": status,
+                        "error": result.as_ref().err(),
+                        "text": result.as_ref().ok().map(|reply| reply
+                            .items
+                            .iter()
+                            .filter_map(|item| {
+                                if let eden_protocol::coding::Item::Message { role, content } = item
+                                {
+                                    (role == "assistant").then(|| {
+                                        content
+                                            .iter()
+                                            .filter_map(|block| {
+                                                if let eden_protocol::coding::Block::Text { text } =
+                                                    block
+                                                {
+                                                    Some(text.as_str())
+                                                } else {
+                                                    None
+                                                }
+                                            })
+                                            .collect::<String>()
+                                    })
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<String>()),
+                    }),
+                )?;
+                result
             }
         }))
 }

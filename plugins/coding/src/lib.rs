@@ -46,14 +46,55 @@ use settings::Settings;
 fn tools() -> Vec<ToolDefinition> {
     [
         (
+            "powershell",
+            concat!(
+                "Run native PowerShell without profiles at the explicit cwd. Waits for process-tree ",
+                "cleanup on completion, cancellation or optional timeout_seconds deadline. Returns ",
+                "separate bounded stream tails and persistent full-output artifacts.",
+            ),
+            json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string" },
+                    "timeout_seconds": { "type": "number", "exclusiveMinimum": 0,
+                        "description": "Optional positive deadline in seconds; no default timeout." },
+                },
+                "required": ["command"],
+                "additionalProperties": false,
+            }),
+        ),
+        (
+            "ls",
+            "List immediate directory entries in name order.",
+            json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "additionalProperties": false,
+            }),
+        ),
+        (
+            "skill",
+            concat!(
+                "Load an available skill on demand. Relative references resolve from its skill ",
+                "directory.",
+            ),
+            json!({
+                "type": "object",
+                "properties": { "name": { "type": "string" }, "arguments": { "type": "string" } },
+                "required": ["name"],
+                "additionalProperties": false,
+            }),
+        ),
+        (
             "read",
-            "Read a UTF-8 file. offset is a 1-based line; limit bounds lines.",
+            "Read UTF-8 text or PNG/JPEG/GIF/WebP images. Text uses 1-based offset and line limit; follow details.next_offset/next_byte_offset to continue.",
             json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
                     "offset": { "type": "integer", "minimum": 1 },
                     "limit": { "type": "integer", "minimum": 1 },
+                    "byte_offset": { "type": "integer", "minimum": 0 },
                 },
                 "required": ["path"],
                 "additionalProperties": false,
@@ -72,8 +113,9 @@ fn tools() -> Vec<ToolDefinition> {
         (
             "edit",
             concat!(
-                "Replace exactly one occurrence of old_text with new_text. Fails without changing ",
-                "the file if absent or ambiguous.",
+                "Apply old_text/new_text or a batch of edits against the original file. All matches must be ",
+                "unique and nonoverlapping. Strict mode normalizes CRLF; tolerant mode additionally ",
+                "normalizes curly quotes, Unicode dashes and trailing spaces/tabs. Preserves BOM and newline style.",
             ),
             json!({
                 "type": "object",
@@ -81,23 +123,45 @@ fn tools() -> Vec<ToolDefinition> {
                     "path": { "type": "string" },
                     "old_text": { "type": "string" },
                     "new_text": { "type": "string" },
+                    "mode": { "type": "string", "enum": ["strict", "tolerant"] },
+                    "edits": {
+                        "type": "array", "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": { "old_text": { "type": "string" }, "new_text": { "type": "string" } },
+                            "required": ["old_text", "new_text"], "additionalProperties": false,
+                        },
+                    },
                 },
-                "required": ["path", "old_text", "new_text"],
+                "required": ["path"],
+                "oneOf": [
+                    { "required": ["old_text", "new_text"], "not": { "required": ["edits"] } },
+                    { "required": ["edits"], "not": { "anyOf": [{ "required": ["old_text"] }, { "required": ["new_text"] }] } },
+                ],
                 "additionalProperties": false,
             }),
         ),
         (
             "bash",
-            "Run a bash command in the session cwd. Returns bounded output and the exit code.",
+            concat!(
+                "Run bash in the session cwd. Returns separate bounded stream tails, persistent ",
+                "full-output artifacts and the exit code after process-tree cleanup. An optional ",
+                "timeout_seconds deadline stops this command; there is no default timeout.",
+            ),
             json!({
                 "type": "object",
-                "properties": { "command": { "type": "string" } },
+                "properties": {
+                    "command": { "type": "string" },
+                    "timeout_seconds": { "type": "number", "exclusiveMinimum": 0,
+                        "description": "Optional positive deadline in seconds; no default timeout." },
+                },
                 "required": ["command"],
                 "additionalProperties": false,
             }),
         ),
     ]
     .into_iter()
+    .filter(|(name, _, _)| matches!(*name, "read" | "write" | "edit" | "bash"))
     .map(|(name, description, parameters)| ToolDefinition {
         name: name.into(),
         description: description.into(),
@@ -105,6 +169,7 @@ fn tools() -> Vec<ToolDefinition> {
     })
     .collect()
 }
+
 async fn model_limits(cx: &CallContext) -> Result<ModelLimits, Fault> {
     match cx.call(MODEL_INFO, &Value::Null).await {
         Ok(limits) => Ok(limits),
@@ -177,6 +242,45 @@ async fn optional_call<I: serde::Serialize, O: serde::de::DeserializeOwned>(
         Err(error) => Err(error),
     }
 }
+async fn prepare_input(
+    cx: &CallContext,
+    content: Vec<Block>,
+    resources: Option<&r::Snapshot>,
+) -> Result<Vec<Block>, Fault> {
+    let mut prepared = content;
+    if let Some(snapshot) = resources {
+        for block in &mut prepared {
+            if let Block::Text { text } = block {
+                let reply: r::ResourceReply = cx
+                    .call(
+                        r::SOURCE,
+                        &r::ResourceRequest::Expand { text: text.clone() },
+                    )
+                    .await?;
+                if reply.snapshot.revision != snapshot.revision {
+                    return Err(Fault::new(
+                        "ResourceFailure",
+                        "input",
+                        "resource revision changed during input preparation",
+                    ));
+                }
+                if let Some(expanded) = reply.text {
+                    *text = expanded;
+                }
+            }
+        }
+    }
+    Ok(optional_call::<_, r::InputHook>(
+        cx,
+        r::BEFORE_INPUT,
+        &r::InputHook {
+            content: prepared.clone(),
+            resource_revision: resources.map_or(0, |s| s.revision),
+        },
+    )
+    .await?
+    .map_or(prepared, |hook| hook.content))
+}
 async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result<String, Fault> {
     let resource_reply: Option<r::ResourceReply> =
         optional_call(&cx, r::SOURCE, &r::ResourceRequest::Snapshot).await?;
@@ -195,37 +299,20 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
     }
     if let Some(snapshot) = &resources {
         append(&cx, "resource_snapshot", json!(snapshot)).await?;
-        for block in &mut input.content {
-            if let Block::Text { text } = block {
-                let reply: r::ResourceReply = cx
-                    .call(
-                        r::SOURCE,
-                        &r::ResourceRequest::Expand { text: text.clone() },
-                    )
-                    .await?;
-                if let Some(expanded) = reply.text {
-                    *text = expanded;
-                }
-            }
-        }
     }
-    if let Some(hooked) = optional_call::<_, r::InputHook>(
-        &cx,
-        r::BEFORE_INPUT,
-        &r::InputHook {
-            content: input.content.clone(),
-            resource_revision: resources.as_ref().map_or(0, |s| s.revision),
-        },
-    )
-    .await?
-    {
+    if !input.resume {
+        let original = input.content.clone();
+        input.content = prepare_input(&cx, input.content, resources.as_ref()).await?;
         append(
             &cx,
-            "input_hook",
-            json!({ "original": input.content, "transformed": hooked.content }),
+            "input_prepared",
+            json!({
+                "original": original,
+                "content": input.content,
+                "resource_revision": resources.as_ref().map_or(0, |s| s.revision),
+            }),
         )
         .await?;
-        input.content = hooked.content;
     }
     if !input.resume {
         append(
@@ -239,8 +326,9 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
         .await?;
     }
     let limits = model_limits(&cx).await?;
+    let mut final_answer = None;
     loop {
-        let _: Vec<QueueEntry> = cx
+        let steering: Vec<QueueEntry> = cx
             .call(
                 QUEUE,
                 &QueueRequest::Take {
@@ -248,8 +336,28 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
                 },
             )
             .await?;
+        if steering.is_empty()
+            && let Some(answer) = final_answer.take()
+        {
+            let follow: Vec<QueueEntry> = cx
+                .call(
+                    QUEUE,
+                    &QueueRequest::Take {
+                        kind: "follow_up".into(),
+                    },
+                )
+                .await?;
+            if follow.is_empty() {
+                let pending: Vec<QueueEntry> = cx.call(QUEUE, &QueueRequest::Inspect).await?;
+                if pending.iter().any(|entry| entry.kind == "steering") {
+                    final_answer = Some(answer);
+                    continue;
+                }
+                return Ok(answer);
+            }
+        }
         let history: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
-        let projected: ModelInput = cx
+        let mut projected: ModelInput = cx
             .call(
                 CONTEXT,
                 &ContextInput {
@@ -264,6 +372,9 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
                 },
             )
             .await?;
+        // Context may have committed a summary request and checkpoint. Allocate
+        // the next identity from that resulting history, never the stale input.
+        let history: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
         let request_id = format!("{}:{}", cx.run_id(), history.sequence + 1);
         let deliveries = queue::statuses(&history.records);
         let queue_ids: Vec<_> = deliveries
@@ -279,6 +390,10 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
             json!({ "request_id": request_id, "queue_ids": queue_ids }),
         )
         .await?;
+        cx.emit(
+            "model_request",
+            json!({ "request_id": request_id, "queue_ids": queue_ids }),
+        )?;
         let reply = match provider_retry(&cx, &projected, &settings).await {
             Ok(reply) => reply,
             Err(error)
@@ -301,7 +416,12 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
                         },
                     )
                     .await?;
-                provider_retry(&cx, &compacted, &settings).await?
+                projected = compacted;
+                cx.emit(
+                    "model_request",
+                    json!({ "request_id": request_id, "queue_ids": queue_ids }),
+                )?;
+                provider_retry(&cx, &projected, &settings).await?
             }
             Err(error) => return Err(error),
         };
@@ -333,6 +453,7 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
                 ));
             }
         }
+        let response_history: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
         // Consumption and every intention share one durable response transaction.
         // A cancellation can therefore never consume input without its model response.
         let mut drafts: Vec<_> = reply
@@ -345,7 +466,17 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
             .collect();
         drafts.push(RecordDraft {
             kind: "model_response".into(),
-            payload: json!({ "request_id": request_id }),
+            payload: json!({
+                "request_id": request_id,
+                "usage": reply.usage,
+                "usage_generation": context::generation(
+                    &eden_plugin_sdk::protocol::history::active_path(&response_history.records)?
+                ),
+                "response_estimate": context::estimate(&projected.items)
+                        + context::estimate(&reply.items)
+                        + serde_json::to_string(&projected.tools)
+                            .map_or(0, |s| s.chars().count() as u64 / 4 + 1),
+            }),
         });
         for (state, record) in deliveries.values() {
             if *state == "queue_delivered" && record.run_id == cx.run_id() {
@@ -382,11 +513,11 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
         }
         let usage_overflow = settings.compaction_enabled
             && limits.context_window > 0
-            && reply
-                .usage
-                .get("total_tokens")
-                .and_then(Value::as_u64)
-                .is_some_and(|n| n > limits.context_window);
+            && context::usage_tokens(&reply.usage).is_some_and(|n| {
+                n > limits
+                    .context_window
+                    .saturating_sub(settings.reserve_tokens)
+            });
         cx.emit("model_usage", reply.usage)?;
         let mut called = false;
         let mut answer = String::new();
@@ -443,6 +574,9 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
                             return Err(error);
                         }
                         Err(error) => ToolResult {
+                            content: vec![],
+                            details: serde_json::Value::Null,
+                            artifacts: vec![],
                             text: error.to_string(),
                             exit_code: None,
                             truncated: false,
@@ -501,25 +635,7 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
                 )
                 .await?;
         }
-        if !called {
-            let entries: Vec<QueueEntry> = cx
-                .call(
-                    QUEUE,
-                    &QueueRequest::Take {
-                        kind: "follow_up".into(),
-                    },
-                )
-                .await?;
-            if entries.is_empty() {
-                let queued: Vec<QueueEntry> = cx.call(QUEUE, &QueueRequest::Inspect).await?;
-                // An answer is also a turn boundary. Steering received during
-                // its provider request must not require an unrelated follow-up
-                // to keep the loop alive. Take it at the next loop boundary.
-                if !queued.iter().any(|entry| entry.kind == "steering") {
-                    return Ok(answer);
-                }
-            }
-        }
+        final_answer = if called { None } else { Some(answer) };
     }
 }
 fn serde_json_decode(text: &str) -> Result<Value, Fault> {

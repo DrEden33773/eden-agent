@@ -1,6 +1,13 @@
 use super::*;
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
+fn load(config: &SourceConfig, revision: u64) -> Result<Loaded, Fault> {
+    super::load_with_home(
+        config,
+        revision,
+        Some(Path::new(&config.global_dir).join("isolated-home")),
+    )
+}
 static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Fixture(PathBuf);
 impl Fixture {
@@ -138,4 +145,142 @@ fn template_arguments_defaults_and_slices_do_not_execute_shell() {
     );
     assert_eq!(expand(&loaded, "/test").unwrap(), "|||fallback||empty");
     assert!(expand(&loaded, "/test 'unterminated").is_err());
+}
+
+#[test]
+fn bom_markdown_preserves_skill_metadata_and_template_body() {
+    let f = Fixture::new();
+    f.write(
+        "project/.eden/skills/a/SKILL.md",
+        "\u{feff}---\r\nname: renamed\r\ndescription: usable skill\r\n---\r\nFrozen body",
+    );
+    f.write(
+        "global/prompts/test.md",
+        "\u{feff}---\ndescription: test\n---\n$1",
+    );
+    let loaded = load(&f.config(), 1).unwrap();
+    assert_eq!(loaded.snapshot.skills[0].name, "renamed");
+    assert_eq!(loaded.snapshot.skills[0].description, "usable skill");
+    assert!(
+        expand(&loaded, "/skill:renamed")
+            .unwrap()
+            .ends_with("Frozen body\n\nUser: ")
+    );
+    assert_eq!(expand(&loaded, "/test content").unwrap(), "content");
+}
+
+#[test]
+fn template_windows_paths_survive_argument_expansion() {
+    let f = Fixture::new();
+    f.write("global/prompts/test.md", "$1|$2|$3|$4|$5|$@|${@:2:1}");
+    let loaded = load(&f.config(), 1).unwrap();
+    assert_eq!(
+        expand(
+            &loaded,
+            r#"/test C:\repo\src "C:\two words\src" '\\server\share' \\server\share C:\"#
+        )
+        .unwrap(),
+        concat!(
+            r"C:\repo\src|C:\two words\src|\\server\share|\\server\share|C:\|",
+            r"C:\repo\src C:\two words\src \\server\share \\server\share C:\|C:\two words\src",
+        )
+    );
+}
+
+#[test]
+fn template_explicit_escapes_empty_arguments_and_dollars_are_preserved() {
+    let f = Fixture::new();
+    f.write("global/prompts/test.md", "$1|$2|$3|$4|${5:-default}");
+    let loaded = load(&f.config(), 1).unwrap();
+    assert_eq!(
+        expand(&loaded, r#"/test two\ words "say \"hi\"" '' '$1'"#).unwrap(),
+        "two words|say \"hi\"||$1|default"
+    );
+}
+
+#[test]
+fn double_quoted_windows_directory_accepts_escaped_trailing_separator() {
+    let f = Fixture::new();
+    f.write("global/prompts/test.md", "$1|$2");
+    let loaded = load(&f.config(), 1).unwrap();
+    assert_eq!(
+        expand(&loaded, r#"/test "C:\two words\\" "\\server\share\\""#).unwrap(),
+        r"C:\two words\|\\server\share\"
+    );
+}
+
+#[test]
+fn startup_isolates_optional_bad_entries_but_reload_and_required_entries_fail() {
+    let f = Fixture::new();
+    f.write(
+        "project/.eden/skills/a/SKILL.md",
+        "---\nname: a\ndescription: good\n---\ngood body",
+    );
+    f.write("global/prompts/broken.md", "---\nname: [\n---\nbad");
+    let loaded = load(&f.config(), 1).unwrap();
+    assert_eq!(loaded.snapshot.skills.len(), 1);
+    assert!(
+        loaded
+            .snapshot
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("broken.md"))
+    );
+    assert!(load(&f.config(), 2).is_err());
+    let mut required = f.config();
+    required.template_paths = vec![f.0.join("global/prompts/broken.md").display().to_string()];
+    assert!(load(&required, 1).is_err());
+    required.template_paths = vec![f.0.join("missing.md").display().to_string()];
+    assert!(load(&required, 1).is_err());
+}
+
+#[test]
+fn discovery_respects_ignore_hidden_dependencies_and_selective_exclusions() {
+    let f = Fixture::new();
+    for name in [
+        "visible",
+        "excluded",
+        "ignored",
+        ".hidden",
+        "node_modules/dependency",
+    ] {
+        let directory = f.0.join("global/skills").join(name);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("SKILL.md"),
+            format!(
+                "---\nname: {}\ndescription: skill\n---\nbody",
+                name.replace('/', "-")
+            ),
+        )
+        .unwrap();
+    }
+    std::fs::create_dir_all(f.0.join("global/skills/nested")).unwrap();
+    f.write(
+        "global/skills/nested/notes.md",
+        "---\nname: notes\ndescription: not a skill\n---\nbody",
+    );
+    f.write("global/skills/.ignore", "ignored/\n");
+    f.write(
+        "global/skills/excluded/SKILL.md",
+        "---\nname: different-name\ndescription: excluded directory\n---\nbody",
+    );
+    let mut config = f.config();
+    config.settings = json!({ "skill_excludes": ["excluded"] });
+    let names: Vec<_> = load(&config, 1)
+        .unwrap()
+        .snapshot
+        .skills
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    assert_eq!(names, ["visible"]);
+    let directory = f.0.join("global/skills/new");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("SKILL.md"),
+        "---\nname: new\ndescription: future entry\n---\nbody",
+    )
+    .unwrap();
+    assert_eq!(load(&config, 2).unwrap().snapshot.skills.len(), 2);
 }

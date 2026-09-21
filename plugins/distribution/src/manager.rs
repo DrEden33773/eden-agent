@@ -1,7 +1,10 @@
 //! Installed-package records, receipts and the install, list, resolve and remove operations.
 use eden_plugin_sdk::{
     Cancellation,
-    protocol::{Fault, PackageManifest},
+    protocol::{
+        Fault, PackageManifest,
+        resources::{LockedResourcePackage, PackageResources},
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -15,7 +18,9 @@ pub(crate) enum Source {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Bundle {
-    pub manifest: PackageManifest,
+    pub manifest: Option<PackageManifest>,
+    #[serde(default)]
+    pub resources: Option<PackageResources>,
     #[serde(default)]
     pub dependencies: Vec<Source>,
     pub build: Option<Build>,
@@ -32,7 +37,9 @@ pub(crate) struct Manager {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Receipt {
     pub path: PathBuf,
-    pub manifest: PackageManifest,
+    pub manifest: Option<PackageManifest>,
+    #[serde(default)]
+    pub resources: Option<PackageResources>,
     pub source: Value,
     pub digest: String,
     pub dependencies: Vec<PathBuf>,
@@ -42,6 +49,14 @@ struct Prepared {
     receipt: Receipt,
 }
 struct Staging(PathBuf);
+struct OperationLock(std::fs::File);
+impl Drop for OperationLock {
+    fn drop(&mut self) {
+        // Closing only this descriptor leaves a forked child's copy holding the
+        // same lock until exec. Completion must release the shared lock now.
+        let _ = self.0.unlock();
+    }
+}
 impl Drop for Staging {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
@@ -53,8 +68,47 @@ pub(crate) fn error(code: &str, message: impl Into<String>) -> Fault {
 pub(crate) fn io(error_value: std::io::Error) -> Fault {
     error("PackageFailure", error_value.to_string())
 }
+fn identity<'a>(
+    native: Option<&'a PackageManifest>,
+    resources: Option<&'a PackageResources>,
+) -> Result<(&'a str, &'a str), Fault> {
+    match (native, resources) {
+        (Some(native), Some(resources))
+            if native.descriptor.package != resources.name
+                || native.descriptor.version != resources.version =>
+        {
+            Err(error(
+                "InvalidInput",
+                "native and resource package identities must match",
+            ))
+        }
+        (Some(native), _) => Ok((&native.descriptor.package, &native.descriptor.version)),
+        (None, Some(resources)) => Ok((&resources.name, &resources.version)),
+        (None, None) => Err(error(
+            "InvalidInput",
+            "package needs a native manifest or resources",
+        )),
+    }
+}
 impl Manager {
-    fn lock(&self) -> Result<std::fs::File, Fault> {
+    fn installed_path(&self, name: &str, version: &str) -> Result<PathBuf, Fault> {
+        let base = self.root.join("packages").join(name).join(version);
+        let native = base.join(eden_plugin_sdk::abi::TARGET);
+        let resources = base.join("resources");
+        match (native.exists(), resources.exists()) {
+            (true, true) => Err(error(
+                "VersionConflict",
+                "version has both native and text-only identities",
+            )),
+            (true, false) => Ok(native),
+            (false, true) => Ok(resources),
+            (false, false) => Err(error(
+                "MissingPackage",
+                format!("{name}@{version} is not installed"),
+            )),
+        }
+    }
+    fn lock(&self) -> Result<OperationLock, Fault> {
         std::fs::create_dir_all(&self.root).map_err(io)?;
         let file = std::fs::OpenOptions::new()
             .create(true)
@@ -64,7 +118,7 @@ impl Manager {
             .map_err(io)?;
         file.try_lock()
             .map_err(|e| error("PackageBusy", e.to_string()))?;
-        Ok(file)
+        Ok(OperationLock(file))
     }
     pub(crate) async fn install(
         &self,
@@ -165,27 +219,30 @@ impl Manager {
                 &std::fs::read(source_root.join("package.json")).map_err(io)?,
             )
             .map_err(|e| error("InvalidInput", format!("package.json: {e}")))?;
-            let name = files::component(&bundle.manifest.descriptor.package)?.to_owned();
-            let version = files::component(&bundle.manifest.descriptor.version)?.to_owned();
+            let (name, version) = identity(bundle.manifest.as_ref(), bundle.resources.as_ref())?;
+            let name = files::component(name)?.to_owned();
+            let version = files::component(version)?.to_owned();
             let identity = format!("{name}@{version}");
             if !active.insert(identity.clone()) {
                 return Err(error("DependencyCycle", identity));
             }
-            if bundle.manifest.host != eden_plugin_sdk::protocol::CONTRACT
-                || bundle.manifest.sdk != eden_plugin_sdk::protocol::CONTRACT
-            {
-                return Err(error(
-                    "IncompatibleContract",
-                    "package host or SDK mismatch",
-                ));
+            if let Some(manifest) = &bundle.manifest {
+                if manifest.host != eden_plugin_sdk::protocol::CONTRACT
+                    || manifest.sdk != eden_plugin_sdk::protocol::CONTRACT
+                {
+                    return Err(error(
+                        "IncompatibleContract",
+                        "package host or SDK mismatch",
+                    ));
+                }
+                if !build && manifest.target != eden_plugin_sdk::abi::TARGET {
+                    return Err(error(
+                        "BuildRequired",
+                        "no matching native target; explicitly build this plugin from source",
+                    ));
+                }
+                files::relative(std::path::Path::new(&manifest.library))?;
             }
-            if !build && bundle.manifest.target != eden_plugin_sdk::abi::TARGET {
-                return Err(error(
-                    "BuildRequired",
-                    "no matching native target; explicitly build this plugin from source",
-                ));
-            }
-            files::relative(std::path::Path::new(&bundle.manifest.library))?;
             let mut dependencies = vec![];
             for dependency in &bundle.dependencies {
                 let mut dependency = dependency.clone();
@@ -205,7 +262,7 @@ impl Manager {
                 NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
             files::copy(&source_root, &output, cancel)?;
-            if build {
+            if build && bundle.manifest.is_some() {
                 let spec = bundle.build.as_ref().ok_or_else(|| {
                     error(
                         "BuildRequired",
@@ -287,12 +344,18 @@ impl Manager {
                 );
                 std::fs::create_dir_all(output.join("lib")).map_err(io)?;
                 std::fs::copy(&artifact, output.join(&library)).map_err(io)?;
-                bundle.manifest.library = library.to_string_lossy().replace('\\', "/");
-                bundle.manifest.target = eden_plugin_sdk::abi::TARGET.into();
+                if let Some(manifest) = &mut bundle.manifest {
+                    manifest.library = library.to_string_lossy().replace('\\', "/");
+                    manifest.target = eden_plugin_sdk::abi::TARGET.into();
+                }
                 std::fs::remove_file(output.join("package.json")).map_err(io)?;
                 files::write_json(&output.join("package.json"), &bundle)?;
             }
-            if !output.join(&bundle.manifest.library).is_file() {
+            if bundle
+                .manifest
+                .as_ref()
+                .is_some_and(|manifest| !output.join(&manifest.library).is_file())
+            {
                 return Err(error(
                     "BuildRequired",
                     concat!(
@@ -301,16 +364,39 @@ impl Manager {
                     ),
                 ));
             }
+            if let Some(resources) = &bundle.resources {
+                eden_workspace::packages::validate_resource_paths(&output, resources)?;
+            }
             let digest = files::digest(&output, cancel)?;
-            let destination = self
-                .root
-                .join("packages")
-                .join(name)
-                .join(version)
-                .join(eden_plugin_sdk::abi::TARGET);
+            let destination = self.root.join("packages").join(name).join(version).join(
+                if bundle.manifest.is_some() {
+                    eden_plugin_sdk::abi::TARGET
+                } else {
+                    "resources"
+                },
+            );
+            let alternate = destination
+                .parent()
+                .ok_or_else(|| error("InvalidInput", "invalid destination"))?
+                .join(if bundle.manifest.is_some() {
+                    "resources"
+                } else {
+                    eden_plugin_sdk::abi::TARGET
+                });
+            if alternate.exists()
+                || prepared
+                    .iter()
+                    .any(|package| package.receipt.path == alternate)
+            {
+                return Err(error(
+                    "VersionConflict",
+                    "same version cannot change between text-only and native bundle identity",
+                ));
+            }
             let receipt = Receipt {
                 path: destination,
                 manifest: bundle.manifest,
+                resources: bundle.resources,
                 source: locked_source,
                 digest,
                 dependencies,
@@ -380,13 +466,7 @@ impl Manager {
                 .ok_or_else(|| error("InvalidInput", "package version is required"))?;
             super::files::component(name)?;
             super::files::component(version)?;
-            pending.push(
-                self.root
-                    .join("packages")
-                    .join(name)
-                    .join(version)
-                    .join(eden_plugin_sdk::abi::TARGET),
-            );
+            pending.push(self.installed_path(name, version)?);
         }
         let mut seen = std::collections::BTreeMap::new();
         while let Some(path) = pending.pop() {
@@ -394,7 +474,9 @@ impl Manager {
             let receipt: Receipt =
                 serde_json::from_slice(&std::fs::read(path.join("receipt.json")).map_err(io)?)
                     .map_err(|e| error("InvalidInput", e.to_string()))?;
-            let name = receipt.manifest.descriptor.package.clone();
+            let name = identity(receipt.manifest.as_ref(), receipt.resources.as_ref())?
+                .0
+                .to_owned();
             if let Some(previous) = seen.insert(name.clone(), path.clone()) {
                 if previous != path {
                     return Err(error(
@@ -405,19 +487,34 @@ impl Manager {
                 continue;
             }
             pending.extend(receipt.dependencies);
-            let mut manifest = receipt.manifest;
-            manifest.library = path.join(&manifest.library).to_string_lossy().into_owned();
-            if let Some(previous) = composition
-                .packages
-                .iter()
-                .find(|p| p.descriptor.package == name)
-            {
-                manifest.config = previous.config.clone();
-            }
             composition
-                .packages
-                .retain(|p| p.descriptor.package != name);
-            composition.packages.push(manifest);
+                .resource_packages
+                .retain(|p| p.manifest.name != name);
+            if let Some(resources) = receipt.resources {
+                composition.resource_packages.push(LockedResourcePackage {
+                    manifest: resources,
+                    root: path.to_string_lossy().into_owned(),
+                    digest: receipt.digest,
+                });
+            }
+            if let Some(mut manifest) = receipt.manifest {
+                manifest.library = path.join(&manifest.library).to_string_lossy().into_owned();
+                if let Some(previous) = composition
+                    .packages
+                    .iter()
+                    .find(|p| p.descriptor.package == name)
+                {
+                    manifest.config = previous.config.clone();
+                }
+                composition
+                    .packages
+                    .retain(|p| p.descriptor.package != name);
+                composition.packages.push(manifest);
+            } else {
+                composition
+                    .packages
+                    .retain(|p| p.descriptor.package != name);
+            }
         }
         for (role, name) in roles
             .as_object()
@@ -449,6 +546,7 @@ impl Manager {
                 }
             }
         }
+        eden_workspace::packages::validate_resource_packages(&composition.resource_packages)?;
         let bytes =
             serde_json::to_vec(&composition).map_err(|e| error("InvalidInput", e.to_string()))?;
         let id = format!("{:x}", Sha256::digest(&bytes));
@@ -489,12 +587,7 @@ impl Manager {
         let _lock = self.lock()?;
         super::files::component(name)?;
         super::files::component(version)?;
-        let target = self
-            .root
-            .join("packages")
-            .join(name)
-            .join(version)
-            .join(eden_plugin_sdk::abi::TARGET);
+        let target = self.installed_path(name, version)?;
         if !target.join("receipt.json").is_file() {
             return Err(error(
                 "MissingPackage",
@@ -521,6 +614,10 @@ impl Manager {
                     .packages
                     .iter()
                     .any(|p| std::path::Path::new(&p.library).starts_with(&target))
+                    || composition
+                        .resource_packages
+                        .iter()
+                        .any(|p| std::path::Path::new(&p.root).starts_with(&target))
                 {
                     references.push(path.display().to_string());
                 }
@@ -598,6 +695,119 @@ mod tests {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
+    #[test]
+    fn operation_completion_releases_lock_even_if_child_inherits_handle() {
+        let f = Fixture::new();
+        let manager = f.manager();
+        let operation = manager.lock().unwrap();
+        // A duplicated file description models the handle retained between fork and exec.
+        let inherited = operation.0.try_clone().unwrap();
+        drop(operation);
+        let next = manager.lock();
+        assert!(
+            next.is_ok(),
+            "completed operation retained lock: {:?}",
+            next.err()
+        );
+        drop(inherited);
+    }
+    #[tokio::test]
+    async fn text_package_installs_without_library_and_locks_versions_and_references() {
+        let f = Fixture::new();
+        let m = f.manager();
+        let source = f.0.join("text-source");
+        std::fs::create_dir_all(source.join("skills/check")).unwrap();
+        std::fs::write(
+            source.join("skills/check/SKILL.md"),
+            "---\ndescription: check\n---\nVERSION ONE",
+        )
+        .unwrap();
+        std::fs::write(
+            source.join("package.json"),
+            serde_json::to_vec(&json!({
+                "resources": {
+                    "name": "text-only",
+                    "version": "1.0.0",
+                    "skills": ["skills/check"],
+                    "templates": [],
+                },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let installed = m
+            .install(
+                Source::Local {
+                    path: source.clone(),
+                },
+                false,
+                Cancellation::default(),
+            )
+            .await
+            .unwrap();
+        assert!(installed["manifest"].is_null());
+        let empty = serde_json::from_value(json!({ "packages": [], "roles": {} })).unwrap();
+        let resolved = m
+            .resolve(
+                empty,
+                &json!([{ "name": "text-only", "version": "1.0.0" }]),
+                &json!({}),
+            )
+            .unwrap();
+        assert_eq!(resolved["composition"]["packages"], json!([]));
+        assert_eq!(
+            resolved["composition"]["resource_packages"][0]["digest"],
+            installed["digest"]
+        );
+        let composition = serde_json::from_value(resolved["composition"].clone()).unwrap();
+        eden_workspace::packages::validate(&composition, &m.root).unwrap();
+        let history = f.0.join("text-history.jsonl");
+        std::fs::write(&history, "saved history").unwrap();
+        eden_workspace::packages::register(&m.root, &history, &composition).unwrap();
+        std::fs::remove_dir_all(m.root.join("compositions")).unwrap();
+        assert!(
+            m.remove("text-only", "1.0.0", false)
+                .unwrap_err()
+                .message
+                .contains("text-history.jsonl")
+        );
+        std::fs::write(
+            source.join("package.json"),
+            serde_json::to_vec(&json!({
+                "resources": {
+                    "name": "text-only",
+                    "version": "2.0.0",
+                    "skills": ["skills/check"],
+                    "templates": [],
+                },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            source.join("skills/check/SKILL.md"),
+            "---\ndescription: check\n---\nVERSION TWO",
+        )
+        .unwrap();
+        m.install(
+            Source::Local { path: source },
+            true,
+            Cancellation::default(),
+        )
+        .await
+        .unwrap();
+        eden_workspace::packages::validate(&composition, &m.root).unwrap();
+        assert!(
+            std::fs::read_to_string(
+                PathBuf::from(installed["path"].as_str().unwrap()).join("skills/check/SKILL.md")
+            )
+            .unwrap()
+            .contains("VERSION ONE")
+        );
+        m.remove("text-only", "1.0.0", true).unwrap();
+        assert!(eden_workspace::packages::validate(&composition, &m.root).is_err());
+        assert_eq!(std::fs::read_to_string(history).unwrap(), "saved history");
+    }
     #[tokio::test]
     async fn versions_coexist_and_same_version_cannot_change_bytes() {
         let f = Fixture::new();
@@ -644,6 +854,7 @@ mod tests {
             .unwrap();
         let root = PathBuf::from(installed["path"].as_str().unwrap());
         let empty = eden_plugin_sdk::protocol::Composition {
+            resource_packages: vec![],
             packages: vec![],
             roles: Default::default(),
         };
@@ -679,6 +890,133 @@ mod tests {
         assert!(eden_workspace::packages::validate(&composition, &m.root).is_err());
         m.remove("example", "1.0.0", true).unwrap();
         assert_eq!(std::fs::read_to_string(history).unwrap(), "history");
+    }
+    #[tokio::test]
+    async fn mixed_package_resolves_native_and_resource_roles_and_rejects_escaped_roots() {
+        let f = Fixture::new();
+        let m = f.manager();
+        let source = f.bundle("1.0.0", b"native bytes");
+        let Source::Local { path } = &source else {
+            unreachable!()
+        };
+        std::fs::create_dir(path.join("prompts")).unwrap();
+        std::fs::write(path.join("prompts/check.md"), "Check $1").unwrap();
+        let mut bundle: Value =
+            serde_json::from_slice(&std::fs::read(path.join("package.json")).unwrap()).unwrap();
+        bundle["resources"] = json!({
+            "name": "example",
+            "version": "1.0.0",
+            "templates": ["prompts"],
+        });
+        std::fs::write(
+            path.join("package.json"),
+            serde_json::to_vec(&bundle).unwrap(),
+        )
+        .unwrap();
+        let installed = m
+            .install(source.clone(), false, Cancellation::default())
+            .await
+            .unwrap();
+        let empty = serde_json::from_value(json!({ "packages": [], "roles": {} })).unwrap();
+        let resolved = m
+            .resolve(
+                empty,
+                &json!([{ "name": "example", "version": "1.0.0" }]),
+                &json!({ "example.service.v1": "example" }),
+            )
+            .unwrap();
+        assert_eq!(
+            resolved["composition"]["packages"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            resolved["composition"]["resource_packages"][0]["manifest"]["templates"],
+            json!(["prompts"])
+        );
+        let mut locked = serde_json::from_value::<eden_plugin_sdk::protocol::Composition>(
+            resolved["composition"].clone(),
+        )
+        .unwrap();
+        locked.resource_packages[0].digest = "changed".into();
+        assert!(eden_workspace::packages::validate(&locked, &m.root).is_err());
+        assert_eq!(installed["resources"]["name"], "example");
+        bundle["resources"]["templates"] = json!(["../outside"]);
+        std::fs::write(
+            path.join("package.json"),
+            serde_json::to_vec(&bundle).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            m.install(source, false, Cancellation::default())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn text_package_git_install_uses_the_selected_commit() {
+        let f = Fixture::new();
+        let source = f.0.join("git-source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(
+            source.join("package.json"),
+            serde_json::to_vec(&json!({
+                "resources": { "name": "git-text", "version": "1.0.0", "templates": ["check.md"] },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(source.join("check.md"), "FROZEN $1").unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&source)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        git(&["init", "--quiet"]);
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ]);
+        let revision = git(&["rev-parse", "HEAD"]);
+        std::fs::write(source.join("check.md"), "UNCOMMITTED CHANGE").unwrap();
+        let installed = f
+            .manager()
+            .install(
+                Source::Git {
+                    url: source.to_string_lossy().into_owned(),
+                    revision: revision.clone(),
+                },
+                false,
+                Cancellation::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(installed["source"]["commit"], revision);
+        let root = PathBuf::from(installed["path"].as_str().unwrap());
+        assert_eq!(
+            std::fs::read_to_string(root.join("check.md")).unwrap(),
+            "FROZEN $1"
+        );
     }
     #[tokio::test]
     async fn cancelled_local_install_never_publishes() {

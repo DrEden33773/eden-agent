@@ -167,6 +167,9 @@ async fn streams_unicode_and_complete_multiple_calls_and_projects_all_input() {
             Item::ToolResult {
                 call_id: "old".into(),
                 result: ToolResult {
+                    content: vec![],
+                    details: serde_json::Value::Null,
+                    artifacts: vec![],
                     text: "file".into(),
                     exit_code: Some(0),
                     truncated: false,
@@ -621,6 +624,9 @@ async fn deepseek_reasoning_and_tool_result_roundtrip_preserves_images_and_full_
     conversation.items.push(Item::ToolResult {
         call_id: "read_1".into(),
         result: ToolResult {
+            content: vec![],
+            details: serde_json::Value::Null,
+            artifacts: vec![],
             text: "fn main() {}".into(),
             exit_code: Some(0),
             truncated: false,
@@ -972,4 +978,32 @@ fn explicit_context_errors_and_quota_messages_are_classified_without_echoing_the
         assert_eq!(fault.code, expected);
         assert!(!fault.to_string().contains("test-secret"));
     }
+}
+
+#[test]
+fn image_tool_output_is_native_content_with_metadata_and_old_text_is_compatible() {
+    let legacy = json!({ "text": "old", "exit_code": null, "truncated": false, "error": null });
+    let mut result: ToolResult = serde_json::from_value(legacy.clone()).unwrap();
+    assert!(result.content.is_empty());
+    assert_eq!(serde_json::to_value(&result).unwrap(), legacy);
+    result.content.push(Block::Image {
+        media_type: "image/png".into(),
+        data: "YWJj".into(),
+    });
+    result.details = json!({ "kind": "image" });
+    let input = ModelInput {
+        max_output_tokens: None,
+        tools: vec![],
+        items: vec![Item::ToolResult {
+            call_id: "image-1".into(),
+            result,
+        }],
+    };
+    let body = wire::project(&input, "controlled", &RequestOptions::default()).unwrap();
+    let output = &body["input"][0]["output"];
+    assert_eq!(output[1]["type"], "input_image");
+    assert_eq!(output[1]["image_url"], "data:image/png;base64,YWJj");
+    let metadata: Value = serde_json::from_str(output[0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(metadata["details"]["kind"], "image");
+    assert!(!metadata.to_string().contains("YWJj"));
 }

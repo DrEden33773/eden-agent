@@ -28,6 +28,16 @@ fn decode(value: &Value) -> Result<QueueEntry, Fault> {
     serde_json::from_value(value.clone())
         .map_err(|error| Fault::new("PersistenceFailure", "queue", error.to_string()))
 }
+fn select_entries(entries: Vec<QueueEntry>, kind: &str, all: bool) -> Vec<QueueEntry> {
+    if kind == "follow_up" && entries.iter().any(|entry| entry.kind == "steering") {
+        return vec![];
+    }
+    entries
+        .into_iter()
+        .filter(|entry| entry.kind == kind)
+        .take(if all { usize::MAX } else { 1 })
+        .collect()
+}
 pub(crate) async fn queue(
     request: QueueRequest,
     cx: CallContext,
@@ -45,6 +55,8 @@ pub(crate) async fn queue(
                 branch: history.active_branch,
                 kind,
                 content,
+                original_content: None,
+                resource_revision: None,
             };
             append(&cx, "queue_accepted", json!(entry)).await?;
             cx.emit("queue_accepted", json!(entry))?;
@@ -80,11 +92,28 @@ pub(crate) async fn queue(
                 .and_then(|record| record.payload.get(&kind))
                 .and_then(Value::as_str)
                 == Some("all");
-            let selected: Vec<_> = entries
-                .into_iter()
-                .filter(|entry| entry.kind == kind)
-                .take(if all { usize::MAX } else { 1 })
-                .collect();
+            let mut selected = select_entries(entries, &kind, all);
+            if selected
+                .iter()
+                .any(|entry| entry.original_content.is_none())
+            {
+                let resources: Option<r::ResourceReply> =
+                    optional_call(&cx, r::SOURCE, &r::ResourceRequest::Snapshot).await?;
+                for entry in &mut selected {
+                    if entry.original_content.is_none() {
+                        let original = entry.content.clone();
+                        entry.content = prepare_input(
+                            &cx,
+                            original.clone(),
+                            resources.as_ref().map(|r| &r.snapshot),
+                        )
+                        .await?;
+                        entry.original_content = Some(original);
+                        entry.resource_revision =
+                            Some(resources.as_ref().map_or(0, |r| r.snapshot.revision));
+                    }
+                }
+            }
             if !selected.is_empty() {
                 let _: StoreReply = cx
                     .call(
@@ -141,5 +170,20 @@ pub(crate) async fn queue(
             let history: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
             pending(&history.records)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn follow_up_cannot_pass_waiting_steering() {
+        let entries: Vec<QueueEntry> = serde_json::from_value(json!([
+            { "id": 1, "kind": "follow_up", "content": [] },
+            { "id": 2, "kind": "steering", "content": [] }
+        ]))
+        .unwrap();
+        assert!(select_entries(entries.clone(), "follow_up", false).is_empty());
+        assert_eq!(select_entries(entries, "steering", false)[0].id, 2);
     }
 }

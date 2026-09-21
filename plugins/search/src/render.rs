@@ -18,6 +18,8 @@ pub fn render(value: &Value) -> String {
         "complete": value["complete"],
         "total_matches": value["total_matches"],
         "returned": value["returned"],
+        "returned_matches": value["returned_matches"],
+        "context_lines": value["context_lines"],
         "has_more": value["has_more"],
         "index": value["index"],
         "ranking": value["ranking"],
@@ -40,6 +42,7 @@ pub fn render(value: &Value) -> String {
             if group["matches"]
                 .as_array()
                 .is_some_and(|items| items.iter().all(|item| item.get("line").is_none()))
+                && group["context"].as_array().is_none_or(Vec::is_empty)
             {
                 output.push_str(&quoted);
                 output.push('\n');
@@ -47,21 +50,26 @@ pub fn render(value: &Value) -> String {
             }
             output.push_str(&quoted);
             output.push_str(":\n");
-            if let Some(items) = group["matches"].as_array() {
-                for item in items {
+            let mut lines: Vec<_> = ["matches", "context"]
+                .into_iter()
+                .filter_map(|field| group[field].as_array())
+                .flatten()
+                .collect();
+            lines.sort_by_key(|item| item["line"].as_u64());
+            for item in lines {
+                output.push_str(&format!(
+                    "{}{} {}",
+                    item["line"],
+                    if item["context"] == true { "-" } else { ":" },
+                    item["text"].as_str().unwrap_or("")
+                ));
+                if item["line_truncated"] == true {
                     output.push_str(&format!(
-                        "{}: {}",
-                        item["line"],
-                        item["text"].as_str().unwrap_or("")
+                        " [display truncated; {} bytes in full line; use read]",
+                        item["line_bytes"]
                     ));
-                    if item["line_truncated"] == true {
-                        output.push_str(&format!(
-                            " [display truncated; {} bytes in full line; use read]",
-                            item["line_bytes"]
-                        ));
-                    }
-                    output.push('\n');
                 }
+                output.push('\n');
             }
         }
     }

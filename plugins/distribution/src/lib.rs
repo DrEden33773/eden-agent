@@ -95,6 +95,14 @@ async fn dispatch(
                     .to_string_lossy()
                     .into_owned();
             }
+            for package in &mut base.resource_packages {
+                package.root = base_path
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .join(&package.root)
+                    .to_string_lossy()
+                    .into_owned();
+            }
             manager.resolve(
                 base,
                 &args["packages"],

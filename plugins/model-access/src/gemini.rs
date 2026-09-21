@@ -184,6 +184,18 @@ pub(crate) fn project(input: &ModelInput, target: &ModelTarget) -> Result<Value,
                 } else {
                     "MINIMAL"
                 }
+            } else if target.model.contains("pro") {
+                if matches!(effort.as_str(), "minimal" | "low") {
+                    "LOW"
+                } else {
+                    "HIGH"
+                }
+            } else if target.model.contains("gemma-4") {
+                if matches!(effort.as_str(), "minimal" | "low") {
+                    "MINIMAL"
+                } else {
+                    "HIGH"
+                }
             } else {
                 match effort.as_str() {
                     "minimal" => "MINIMAL",
@@ -361,6 +373,25 @@ impl Decoder {
 mod tests {
     use super::*;
     use crate::projection::test_target;
+    #[test]
+    fn custom_pro_and_gemma_targets_map_supported_thinking_levels() {
+        let input: ModelInput =
+            serde_json::from_value(json!({ "items": [], "tools": [] })).unwrap();
+        for (model, level, expected) in [
+            ("gemini-3.1-pro", "minimal", "LOW"),
+            ("gemini-3-pro", "medium", "HIGH"),
+            ("gemma-4-31b-it", "low", "MINIMAL"),
+            ("gemma-4-31b-it", "medium", "HIGH"),
+        ] {
+            let mut target = test_target("google-generative-ai");
+            target.model = model.into();
+            target.thinking.effective = Some(level.into());
+            assert_eq!(
+                project(&input, &target).unwrap()["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+                expected
+            );
+        }
+    }
     #[test]
     fn gemini_three_replays_paired_ids_and_keeps_each_tools_image_attached() {
         let mut target = test_target("google-generative-ai");

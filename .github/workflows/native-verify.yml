@@ -6,6 +6,11 @@ name: Native verification
 # sharing one job.
 on:
   workflow_call:
+    inputs:
+      selected:
+        description: Associated checks selected from the complete change comparison
+        required: true
+        type: string
 # These variables are part of the derived build cache identity.
 env:
   CARGO_INCREMENTAL: '0'
@@ -174,6 +179,8 @@ jobs:
         if: ${{ !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: node scripts/ci-run.mjs installed python scripts/verify-all.py --output artifacts/verification
       - name: Checkout the fixed Pi reference
+        id: pi-checkout
+        if: ${{ fromJSON(inputs.selected).pi_reference == true }}
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: earendil-works/pi
@@ -181,13 +188,19 @@ jobs:
           path: artifacts/pi-reference
           persist-credentials: false
       - name: Install fixed reference dependencies
+        id: pi-deps
+        if: ${{ fromJSON(inputs.selected).pi_reference == true }}
         working-directory: artifacts/pi-reference
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Prepare fixed reference catalog data
+        id: pi-prepare
+        if: ${{ fromJSON(inputs.selected).pi_reference == true }}
         env:
           PI_REFERENCE_ROOT: ${{ github.workspace }}/artifacts/pi-reference
         run: node scripts/prepare-pi-reference.mjs
       - name: Execute fixed core reference corpus
+        id: pi-corpus
+        if: ${{ fromJSON(inputs.selected).pi_reference == true }}
         working-directory: artifacts/pi-reference
         env:
           PI_REFERENCE_ROOT: ${{ github.workspace }}/artifacts/pi-reference
@@ -221,6 +234,12 @@ jobs:
             !target/verification/seeds
             !target/verification/examples
           key: ${{ steps.cargo-target.outputs.cache-primary-key }}
+      - name: Require selected Pi reference steps
+        if: always()
+        env:
+          CI_SELECTED: ${{ inputs.selected }}
+          CI_STEPS: ${{ toJson(steps) }}
+        run: node scripts/ci-scope.mjs pi-gate
       - name: Record final step outcomes
         if: always()
         shell: python

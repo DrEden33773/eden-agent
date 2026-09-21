@@ -59,6 +59,7 @@ export function fixture(t) {
     "biome.json",
     "package.json",
     "rustfmt.toml",
+    "rustfmt-toolchain",
     "rust-toolchain.toml",
     ".gitattributes",
   ]) {

@@ -117,7 +117,8 @@ fn windows_shell(
         if legacy(&actual) || legacy(&path) {
             Err(fault(
                 "UnsupportedShellTransport",
-                "legacy Windows WSL bash transport is unsupported: Linux descendants cannot be owned by the native Windows job; configure Git Bash",
+                "legacy Windows WSL bash transport is unsupported: Linux descendants cannot be \
+                 owned by the native Windows job; configure Git Bash",
             ))
         } else if exists(&path) {
             Ok(path)
@@ -362,7 +363,20 @@ mod native_windows_tests {
                 .to_ascii_lowercase()
                 .ends_with("powershell.exe")
         );
-        let (mut child, tree) = crate::spawn(selected.to_str().unwrap(), &["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "[IO.File]::WriteAllText((Join-Path (Get-Location) 'probe.txt'), 'native-powershell5'); [Console]::Out.Write('ok')"], &cwd).await.unwrap();
+        let (mut child, tree) = crate::spawn(
+            selected.to_str().unwrap(),
+            &[
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "[IO.File]::WriteAllText((Join-Path (Get-Location) 'probe.txt'), \
+                 'native-powershell5'); [Console]::Out.Write('ok')",
+            ],
+            &cwd,
+        )
+        .await
+        .unwrap();
         let mut bytes = Vec::new();
         child
             .stdout

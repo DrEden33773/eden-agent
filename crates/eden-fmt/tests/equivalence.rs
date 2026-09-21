@@ -128,17 +128,19 @@ fn compare(source: &str) {
 
 #[test]
 fn reordering_keeps_every_json_value_equal() {
+    compare(include_str!(
+        "fixtures/reordering_keeps_every_json_value_equal-1.rs.txt"
+    ));
     compare(
-        "fn f() {\n    let v = json!({\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},\"required\":[\"command\"],\"additionalProperties\":false});\n}\n",
-    );
-    compare(
-        "fn f() {\n    let v = json!({\"a\":1,\"b\":{\"c\":2,\"d\":[1,2,{\"e\":3}]},\"f\":{}});\n}\n",
+        "fn f() {\n    let v = \
+         json!({\"a\":1,\"b\":{\"c\":2,\"d\":[1,2,{\"e\":3}]},\"f\":{}});\n}\n",
     );
     compare("fn f() {\n    let v = json!({\"kind\":\"local\",\"path\":\"a\",\"count\":2});\n}\n");
     compare("fn f() {\n    let v = json!([{\"a\":1},{\"b\":2}]);\n}\n");
     compare("fn f() {\n    let v = json!({\"多字节\":\"值\"});\n}\n");
     compare(
-        "fn f() {\n    let v = json!({\"nested\":{\"deep\":{\"deeper\":[true,false,null,1.5]}}});\n}\n",
+        "fn f() {\n    let v = \
+         json!({\"nested\":{\"deep\":{\"deeper\":[true,false,null,1.5]}}});\n}\n",
     );
 }
 
@@ -197,7 +199,8 @@ fn reordering_keeps_the_repository_json_values_equal() {
         files += 1;
     }
     println!(
-        "compared {compared} json! values in {files} files; skipped {skipped} bodies with Rust expressions"
+        "compared {compared} json! values in {files} files; skipped {skipped} bodies with Rust \
+         expressions"
     );
     assert!(
         compared > 0,

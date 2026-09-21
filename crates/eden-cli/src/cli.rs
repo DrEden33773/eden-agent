@@ -198,7 +198,9 @@ pub enum Family {
     },
     /// Inspect or change a stored session
     #[command(
-        after_help = "Session commands accept --composition PATH. Copy actions preview by default; --apply creates the new file. The default Responses provider requires explicit model configuration and credentials."
+        after_help = "Session commands accept --composition PATH. Copy actions preview by \
+                      default; --apply creates the new file. The default Responses provider \
+                      requires explicit model configuration and credentials."
     )]
     Session {
         #[command(subcommand)]

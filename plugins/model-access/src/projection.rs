@@ -60,17 +60,16 @@ pub(crate) fn items(input: &ModelInput, target: &ModelTarget) -> Result<Vec<Item
     for item in &input.items {
         if let Item::ToolCall { call_id, .. } = item {
             let mut suffix = ids.len();
-            let next =
-                loop {
-                    let candidate = format!("eden_call_{suffix}");
-                    if !input.items.iter().any(
-                        |item| matches!(item,Item::ToolCall{call_id,..} if call_id==&candidate),
-                    ) && !ids.values().any(|id| id == &candidate)
-                    {
-                        break candidate;
-                    }
-                    suffix += 1;
-                };
+            let next = loop {
+                let candidate = format!("eden_call_{suffix}");
+                if !input.items.iter().any(
+                    |item| matches!(item, Item::ToolCall { call_id, .. } if call_id == &candidate),
+                ) && !ids.values().any(|id| id == &candidate)
+                {
+                    break candidate;
+                }
+                suffix += 1;
+            };
             let valid = !call_id.is_empty()
                 && call_id.len() <= 64
                 && call_id
@@ -81,21 +80,68 @@ pub(crate) fn items(input: &ModelInput, target: &ModelTarget) -> Result<Vec<Item
         }
     }
     let blocks = |content: &[Block]| {
-        content.iter().map(|b|match b {
-        Block::Image{..} if !target.capabilities.images => Block::Text{text:"(image omitted: model does not support images; original attachment retained in history)".into()},
-        other=>other.clone(),
-    }).collect()
+        content
+            .iter()
+            .map(|b| match b {
+                Block::Image { .. } if !target.capabilities.images => Block::Text {
+                    text: "(image omitted: model does not support images; original attachment \
+                           retained in history)"
+                        .into(),
+                },
+                other => other.clone(),
+            })
+            .collect()
     };
     let mut output = Vec::new();
     for item in &input.items {
         output.push(match item {
-            Item::Message{role,content}=>Item::Message{role:role.clone(),content:blocks(content)},
-            Item::ToolCall{call_id,name,arguments}=>Item::ToolCall{call_id:ids[call_id].clone(),name:name.clone(),arguments:arguments.clone()},
-            Item::ToolResult{call_id,result}=>{let mut result=result.clone();result.content=blocks(&result.content); Item::ToolResult{call_id:ids.get(call_id).cloned().ok_or_else(||failure("tool result has no matching call"))?,result}},
-            Item::ProviderState{value,..}=>{
-                let identity=&value["target"];
-                if identity["provider"]==target.provider && identity["model"]==target.model && identity["api"]==target.api {item.clone()}
-                else {let text=visible(value); if text.is_empty() {if identity.is_null() {return Err(failure("legacy opaque provider state has no model identity; cannot safely project it"));} continue;} Item::Message{role:"assistant".into(),content:vec![Block::Text{text}]}}
+            Item::Message { role, content } => Item::Message {
+                role: role.clone(),
+                content: blocks(content),
+            },
+            Item::ToolCall {
+                call_id,
+                name,
+                arguments,
+            } => Item::ToolCall {
+                call_id: ids[call_id].clone(),
+                name: name.clone(),
+                arguments: arguments.clone(),
+            },
+            Item::ToolResult { call_id, result } => {
+                let mut result = result.clone();
+                result.content = blocks(&result.content);
+                Item::ToolResult {
+                    call_id: ids
+                        .get(call_id)
+                        .cloned()
+                        .ok_or_else(|| failure("tool result has no matching call"))?,
+                    result,
+                }
+            }
+            Item::ProviderState { value, .. } => {
+                let identity = &value["target"];
+                if identity["provider"] == target.provider
+                    && identity["model"] == target.model
+                    && identity["api"] == target.api
+                {
+                    item.clone()
+                } else {
+                    let text = visible(value);
+                    if text.is_empty() {
+                        if identity.is_null() {
+                            return Err(failure(
+                                "legacy opaque provider state has no model identity; cannot \
+                                 safely project it",
+                            ));
+                        }
+                        continue;
+                    }
+                    Item::Message {
+                        role: "assistant".into(),
+                        content: vec![Block::Text { text }],
+                    }
+                }
             }
         });
     }
@@ -168,7 +214,7 @@ mod tests {
         ]);
         let transformed = items(&original, &destination).unwrap();
         assert!(
-            matches!(&transformed[0],Item::Message{content,..} if content==&vec![Block::Text{text:"visible".into()}])
+            matches!(&transformed[0], Item::Message { content, .. } if content == &vec![Block::Text { text:"visible".into() }])
         );
         assert!(
             serde_json::to_string(&transformed[1])
@@ -176,7 +222,7 @@ mod tests {
                 .contains("image omitted")
         );
         assert!(
-            matches!(&original.items[1],Item::Message{content,..} if matches!(content[0],Block::Image{..}))
+            matches!(&original.items[1], Item::Message { content, .. } if matches!(content[0], Block::Image { .. }))
         );
         assert_eq!(items(&original, &source).unwrap()[0], original.items[0]);
     }
@@ -196,6 +242,8 @@ mod tests {
             },
         ]);
         let projected = items(&source, &target).unwrap();
-        assert!(matches!(&projected[0],Item::ToolCall{call_id,..} if call_id=="eden_call_1"));
+        assert!(
+            matches!(&projected[0], Item::ToolCall { call_id, .. } if call_id == "eden_call_1")
+        );
     }
 }

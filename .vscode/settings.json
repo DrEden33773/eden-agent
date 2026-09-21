@@ -18,5 +18,9 @@
     "editor.formatOnSave": true,
     "editor.formatOnPaste": false
   },
-  "markdown.validate.enabled": true
+  "markdown.validate.enabled": true,
+  "rust-analyzer.rustfmt.overrideCommand": [
+    "node",
+    "${workspaceFolder}/scripts/format-editor.mjs"
+  ]
 }

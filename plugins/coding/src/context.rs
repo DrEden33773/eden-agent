@@ -113,7 +113,9 @@ fn project_path(path: &[Record], records: &[Record]) -> Result<Vec<Item>, Fault>
         .map(|item| match item {
             Item::ToolCall { ref call_id, .. } if !completed.contains(call_id) => {
                 text_item(format!(
-                    "Historical tool call {call_id} was interrupted; result and external effects are unknown. It was not replayed."))
+                    "Historical tool call {call_id} was interrupted; result and external effects \
+                     are unknown. It was not replayed."
+                ))
             }
             other => other,
         })
@@ -256,10 +258,10 @@ fn retained_cut(path: &[Record], keep_recent_tokens: u64) -> Result<usize, Fault
         let safe = record.kind == "queue_delivered"
             || record.kind == "branch_summary"
             || (record.kind == "message"
-                && matches!(decode(record)?,Item::Message{role,..} if role=="user"));
+                && matches!(decode(record)?, Item::Message { role, .. } if role == "user"));
         let round = record.kind == "provider_state"
             || (record.kind == "message"
-                && matches!(decode(record)?,Item::Message{role,..} if role=="assistant"))
+                && matches!(decode(record)?, Item::Message { role, .. } if role == "assistant"))
             || record.kind == "tool_intent";
         if safe {
             break;
@@ -273,7 +275,7 @@ fn retained_cut(path: &[Record], keep_recent_tokens: u64) -> Result<usize, Fault
                     previous.kind.as_str(),
                     "provider_state" | "tool_intent"
                 ) || (previous.kind == "message"
-                    && matches!(decode(previous)?,Item::Message{role,..} if role=="assistant"));
+                    && matches!(decode(previous)?, Item::Message { role, .. } if role == "assistant"));
                 if !same_response {
                     break;
                 }
@@ -383,18 +385,38 @@ fn summary_safe_items(items: Vec<Item>) -> Vec<Item> {
                             name, media_type, ..
                         } => Block::Text {
                             text: format!(
-                                "[File attachment {name} ({media_type}); preserved in original record]"),
+                                "[File attachment {name} ({media_type}); preserved in original \
+                                 record]"
+                            ),
                         },
                         other => other,
                     })
                     .collect(),
             },
-            Item::ToolResult { call_id, mut result } => {
-                result.content = result.content.into_iter().map(|block| match block {
-                    Block::Text { .. } => block,
-                    Block::Image { media_type, .. } => Block::Text { text: format!("[Image tool output {media_type}; preserved in original record]") },
-                    Block::File { name, media_type, .. } => Block::Text { text: format!("[File tool output {name} ({media_type}); preserved in original record]") },
-                }).collect();
+            Item::ToolResult {
+                call_id,
+                mut result,
+            } => {
+                result.content = result
+                    .content
+                    .into_iter()
+                    .map(|block| match block {
+                        Block::Text { .. } => block,
+                        Block::Image { media_type, .. } => Block::Text {
+                            text: format!(
+                                "[Image tool output {media_type}; preserved in original record]"
+                            ),
+                        },
+                        Block::File {
+                            name, media_type, ..
+                        } => Block::Text {
+                            text: format!(
+                                "[File tool output {name} ({media_type}); preserved in original \
+                                 record]"
+                            ),
+                        },
+                    })
+                    .collect();
                 Item::ToolResult { call_id, result }
             }
             Item::ProviderState { provider, .. } => text_item(format!(
@@ -439,8 +461,16 @@ async fn interpreted(records: &[Record], cx: &CallContext) -> Result<Vec<Item>, 
 }
 fn system_item(input: &ContextInput) -> Item {
     let selected = input.tools.clone().unwrap_or_else(tools);
-    let mut system = input.resources.as_ref().and_then(|r| r.system.clone()).unwrap_or_else(||
-        "You are eden, a coding assistant. Use the available tools to inspect, change and verify the project. Report observed results accurately. Tool failures are evidence to address; do not claim unexecuted checks passed.".into());
+    let mut system = input
+        .resources
+        .as_ref()
+        .and_then(|r| r.system.clone())
+        .unwrap_or_else(|| {
+            "You are eden, a coding assistant. Use the available tools to inspect, change and \
+             verify the project. Report observed results accurately. Tool failures are evidence to \
+             address; do not claim unexecuted checks passed."
+                .into()
+        });
     system.push_str(&format!("\n\nWorking directory: {}", input.cwd));
     if let Some(resources) = &input.resources {
         system.push_str("\n\n");
@@ -458,7 +488,8 @@ fn system_item(input: &ContextInput) -> Item {
                     "Use the skill tool to load its instructions on demand.".to_owned()
                 } else {
                     format!(
-                        "Use read with path eden-resource://skill/{} to load its frozen instructions.",
+                        "Use read with path eden-resource://skill/{} to load its frozen \
+                         instructions.",
                         skill.name
                     )
                 };
@@ -551,17 +582,22 @@ pub(crate) async fn context(
         if cut > 0 {
             let split = cut < path.len()
                 && !(path[cut].kind == "message"
-                    && matches!(decode(&path[cut]),Ok(Item::Message{role,..}) if role=="user"))
+                    && matches!(decode(&path[cut]), Ok(Item::Message { role, .. }) if role == "user"))
                 && path[..cut].iter().any(|record| {
                     record.kind == "message"
-                        && matches!(decode(record),Ok(Item::Message{role,..}) if role=="user")
+                        && matches!(decode(record), Ok(Item::Message { role, .. }) if role == "user")
                 });
             let allowance = settings.summary_allowance(split, input.limits.max_output_tokens);
             let mut summary_items = vec![Item::Message {
                 role: "system".into(),
                 content: vec![Block::Text {
                     text: format!(
-                        "Summarize this coding conversation for continuation. Use headings: Goal, Constraints, Progress (Done/In Progress/Blocked), Key Decisions, Next Steps, Critical Context. Preserve user requirements, exact paths/functions/errors, failed checks, pending work, and unknown external tool effects. Update previous summaries rather than discarding them. Do not continue the task. {}",
+                        "Summarize this coding conversation for continuation. Use headings: Goal, \
+                         Constraints, Progress (Done/In Progress/Blocked), Key Decisions, Next \
+                         Steps, Critical Context. Preserve user requirements, exact \
+                         paths/functions/errors, failed checks, pending work, and unknown \
+                         external tool effects. Update previous summaries rather than discarding \
+                         them. Do not continue the task. {}",
                         input.instructions
                     ),
                 }],
@@ -814,7 +850,8 @@ mod tests {
         let cut = compaction_cut(&path, "compact", &Settings::default()).unwrap();
         assert_eq!(
             cut, 0,
-            "a short transcript must have no compactable prefix, not one that replaces recent messages"
+            "a short transcript must have no compactable prefix, not one that replaces recent \
+             messages"
         );
         let projected = project_records(&path).unwrap();
         for item in original {

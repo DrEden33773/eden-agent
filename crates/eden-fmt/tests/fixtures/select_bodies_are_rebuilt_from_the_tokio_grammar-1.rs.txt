@@ -1,0 +1,10 @@
+async fn f() {
+    tokio::select! {
+    biased;
+    _=cancel.cancelled()=>return Err(Fault::new("Cancelled",
+    "composition")),
+    _=std::future::ready(())=>{
+
+    }
+    }
+}

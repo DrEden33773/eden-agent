@@ -121,7 +121,8 @@ fn catalog() -> Vec<CommandDefinition> {
     [
         (
             "package.install",
-            "Prepare a local directory/tar/tar.gz, pinned Git revision or HTTPS archive. Installation does not enable the package.",
+            "Prepare a local directory/tar/tar.gz, pinned Git revision or HTTPS archive. \
+             Installation does not enable the package.",
             json!({
                 "source": { "type": "object" },
                 "build": { "type": "boolean", "default": false },
@@ -136,7 +137,8 @@ fn catalog() -> Vec<CommandDefinition> {
         ),
         (
             "package.remove",
-            "Remove one installed version. Referenced versions require explicit force; history is retained.",
+            "Remove one installed version. Referenced versions require explicit force; history is \
+             retained.",
             json!({
                 "name": { "type": "string" },
                 "version": { "type": "string" },
@@ -146,7 +148,8 @@ fn catalog() -> Vec<CommandDefinition> {
         ),
         (
             "package.resolve",
-            "Save an immutable resolved composition using installed versions. Missing dependencies are never downloaded here.",
+            "Save an immutable resolved composition using installed versions. Missing \
+             dependencies are never downloaded here.",
             json!({
                 "base": { "type": "string" },
                 "packages": { "type": "array" },

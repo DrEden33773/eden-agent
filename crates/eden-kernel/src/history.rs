@@ -26,7 +26,8 @@ mod tests {
     fn inspect_exposes_prefix_without_repairing_damaged_tail() {
         let path = std::env::temp_dir().join(format!("eden-inspect-{}.jsonl", std::process::id()));
         let text = concat!(
-            "{\"schema_version\":1,\"session_id\":7,\"sequence\":1,\"run_id\":1,\"kind\":\"user\",\"payload\":{}}\n",
+            "{\"schema_version\":1,\"session_id\":7,\"sequence\":1,\"run_id\":1,\"kind\":\"user\",\
+             \"payload\":{}}\n",
             "{\"partial\":",
         );
         let bytes = text.as_bytes();

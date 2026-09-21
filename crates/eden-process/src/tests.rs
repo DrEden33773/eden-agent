@@ -315,7 +315,8 @@ async fn group_termination_is_idempotent() {
     loop {
         if let Some(status) = joiner.try_wait().expect("probe process") {
             panic!(
-                "repeated group stop signalled a process that joined after the first stop: {status}"
+                "repeated group stop signalled a process that joined after the first stop: \
+                 {status}"
             );
         }
         if tokio::time::Instant::now() >= deadline {

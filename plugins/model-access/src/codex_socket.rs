@@ -225,7 +225,7 @@ mod tests {
         let reply = crate::targeted::request(&target, &credential, &input, |_, _| Ok(()))
             .await
             .unwrap();
-        assert!(matches!(&reply.items[0],Item::ToolCall{call_id,..} if call_id=="c"));
+        assert!(matches!(&reply.items[0], Item::ToolCall { call_id, .. } if call_id == "c"));
         server.await.unwrap();
     }
     #[tokio::test]
@@ -293,8 +293,21 @@ mod tests {
             let (mut socket, _) = listener.accept().await.unwrap();
             let n = socket.read(&mut bytes).await.unwrap();
             assert!(String::from_utf8_lossy(&bytes[..n]).starts_with("POST "));
-            let event = "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}],\"usage\":{}}}\n\n";
-            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{event}",event.len()).as_bytes()).await.unwrap();
+            let event = "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"\
+                         completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"\
+                         content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}],\"usage\":\
+                         {}}}\n\n";
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: \
+                         {}\r\nConnection: close\r\n\r\n{event}",
+                        event.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
         });
         crate::targeted::request(&target, &credential, &input, |_, _| Ok(()))
             .await

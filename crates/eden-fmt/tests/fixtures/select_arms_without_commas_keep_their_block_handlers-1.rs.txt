@@ -1,0 +1,8 @@
+async fn f() {
+    tokio::select! {
+        _ = cancel.cancelled() => {
+            tree.terminate();
+        }
+        _ = std::future::ready(()) => {}
+    }
+}

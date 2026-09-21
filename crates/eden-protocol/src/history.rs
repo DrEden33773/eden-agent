@@ -34,7 +34,8 @@ fn validate_next(records: &[Record], record: &Record) -> Result<(), Fault> {
         })
     {
         return Err(invalid(
-            "unsupported or mixed schema, discontinuous sequence, empty branch/kind, or mixed identity",
+            "unsupported or mixed schema, discontinuous sequence, empty branch/kind, or mixed \
+             identity",
         ));
     }
     if let Some(parent) = record.parent_id {
@@ -242,8 +243,10 @@ mod tests {
     #[test]
     fn v1_is_readable_with_linear_parent_projection() {
         let text = concat!(
-            "{\"schema_version\":1,\"session_id\":7,\"sequence\":1,\"run_id\":1,\"kind\":\"user\",\"payload\":{}}\n",
-            "{\"schema_version\":1,\"session_id\":7,\"sequence\":2,\"run_id\":1,\"kind\":\"assistant\",\"payload\":{}}\n",
+            "{\"schema_version\":1,\"session_id\":7,\"sequence\":1,\"run_id\":1,\"kind\":\"user\",\
+             \"payload\":{}}\n",
+            "{\"schema_version\":1,\"session_id\":7,\"sequence\":2,\"run_id\":1,\"kind\":\"\
+             assistant\",\"payload\":{}}\n",
         );
         let bytes = text.as_bytes();
         let scan = scan_records(bytes);

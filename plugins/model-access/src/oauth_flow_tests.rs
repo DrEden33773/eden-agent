@@ -98,7 +98,17 @@ async fn serve(provider: &str) -> (String, Arc<Mutex<Vec<String>>>, tokio::task:
             };
             logged.lock().unwrap().push(request);
             let body = body.to_string();
-            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \
+                         {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
             stream.shutdown().await.unwrap();
         }
     });
@@ -230,7 +240,17 @@ async fn denied_exchange_redacts_response_canaries() {
         let (mut stream, _) = listener.accept().await.unwrap();
         read_request(&mut stream).await;
         let body = json!({ "error": "invalid_grant", "message": "secret-canary" }).to_string();
-        stream.write_all(format!("HTTP/1.1 401 Unauthorized\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 401 Unauthorized\r\nContent-Length: {}\r\nConnection: \
+                     close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
     });
     let flow = Flow::start("openrouter", None, &config).await.unwrap();
     let error = match flow.submit("private-code-canary").await {

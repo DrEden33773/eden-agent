@@ -407,7 +407,8 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let command = format!(
-            "exec 3<>/dev/tcp/127.0.0.1/{port}; sleep 300 & printf R >&3; read -r gate <&3; printf output; wait"
+            "exec 3<>/dev/tcp/127.0.0.1/{port}; sleep 300 & printf R >&3; read -r gate <&3; \
+             printf output; wait"
         );
         let mut files = OutputFiles::create(&f.0.join("artifacts")).unwrap();
         files.stdout = tokio::fs::OpenOptions::new()

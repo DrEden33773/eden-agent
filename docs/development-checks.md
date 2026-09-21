@@ -10,16 +10,18 @@ Install Node.js 22+, pnpm 10.32.1, Python 3.12+ and uv 0.9.7, then run these com
 pnpm install --frozen-lockfile
 uv sync --locked
 pnpm hooks:install
+node scripts/install-formatter.mjs
+cargo build --locked -p eden-fmt
 ```
 
-The explicit installer sets this repository's local `core.hooksPath` to `.githooks`. It does not change global Git configuration or run automatically during dependency installation. Git for Windows runs the same shell entry points; `.gitattributes` keeps their line endings LF. The Rust toolchain remains pinned by `rust-toolchain.toml`.
+The explicit installer sets this repository's local `core.hooksPath` to `.githooks`. It does not change global Git configuration or run automatically during dependency installation. Git for Windows runs the same shell entry points; `.gitattributes` keeps their line endings LF. The build, test and Clippy compiler remains Rust 1.98.1 from `rust-toolchain.toml`. The formatter installer reads `rustfmt-toolchain` and installs official `nightly-2026-09-21` with rustfmt. No patched formatter is used. Rebuild eden-fmt after pulling formatter changes; it embeds the pin, and snapshot checks reject a binary with a different pin. VS Code/rust-analyzer uses the checked-in `scripts/format-editor.mjs` stdin entry; open the product root as the editor workspace, including when editing independent author projects.
 
 ## Checks and fixes
 
 | Check | Hook | Explicit repair |
 | --- | --- | --- |
 | `pnpm markdown:check` | pre-commit and pre-push, when Markdown or its root configuration changes | `pnpm markdown:fix` |
-| `pnpm rust:check` | pre-commit, when Rust sources, manifests or Rust configuration change | `pnpm rust:fmt` |
+| `pnpm rust:check` | pre-commit and pre-push, when Rust sources, manifests or Rust configuration change | `pnpm rust:fmt` |
 | `pnpm clippy:check` | pre-push, when the pushed changes affect Rust | `pnpm clippy:fix` |
 | `pnpm python:check` | pre-commit and pre-push, when Python/configuration changes | `pnpm python:format`; fix lint/types explicitly |
 | `pnpm js:check` | pre-commit and pre-push, when mjs/configuration changes | `pnpm js:fix` |
@@ -79,7 +81,7 @@ Biome 2.5.3 is pinned in pnpm and applies its recommended lint preset, formattin
 
 ## Macro call formatting
 
-`rustfmt` never enters a `json!` body that uses object syntax, because `"key": value` is not a Rust expression, and it never enters a brace-delimited statement macro such as `tokio::select!` at all. `eden-fmt` is a workspace member that formats exactly those bodies: it lowers a body into the Rust expression rustfmt does parse, formats the file, and lifts the result back into the DSL. rustfmt lays out the lowered Rust; lifting uses the same width target to compact JSON objects and arrays and to retain breaks around select branches. It refuses to touch a file whose target macro it cannot read (`pnpm rust:check` then reports the position and leaves the file alone), and its output is a fixed point of both `cargo fmt` and itself. It also refuses a file that still carries a long string as a backslash continuation, a decision no formatter can make for the author; [String literals](#string-literals) states the shapes it accepts. Build it once with `cargo build --locked -p eden-fmt`; `pnpm rust:check` and `pnpm rust:fmt` run it for the root workspace and for every independent author.
+`eden-fmt` uses the pinned official nightly rustfmt for ordinary Rust and adapts `json!` and `tokio::select!` bodies that rustfmt cannot parse as Rust expressions. It lowers the DSL, formats it, then lifts the result. Each formatter output must parse as Rust, including valid literal escapes inside opaque macro bodies; literal values and identifiers must survive every formatter pass and the complete pipeline. The pipeline repeats until it reaches a fixed point, or reports failure without writing the file. The CLI, editor stdin, hooks and CI all enter this pipeline. `pnpm rust:check` and `pnpm rust:fmt` cover the root and independent authors; do not run stable `cargo fmt` as a second formatter.
 
 The shape it enforces is the shape rustfmt gives a struct literal and an array:
 
@@ -114,11 +116,11 @@ let long = json!({
 });
 ```
 
-`pnpm rust:fmt` applies both formatters: `cargo fmt` for the Rust around a macro, and `eden-fmt write` for the macro bodies.
+`pnpm rust:fmt` invokes `eden-fmt write`, which owns both ordinary Rust and macro formatting. Direct use is `cargo run --locked -p eden-fmt -- write path/to/file.rs`; `check` is read-only and `stdin` emits only a validated result.
 
 ## String literals
 
-Prefer direct string literals, including long messages and format strings with implicit captures. The 100-column rustfmt target guides code layout; it is not a string-length limit. A literal can exceed it without being split solely to meet that target.
+Prefer direct string literals, including long messages and format strings with implicit captures. The 100-column rustfmt target guides code layout; it is not a string-length limit. Official nightly rustfmt may introduce backslash continuations in ordinary strings. Raw, byte and unbreakable strings may still exceed the target.
 
 Use `concat!(...)` when its members express meaningful groups, such as HTTP headers, JSONL records or sections of a test input. Split at those boundaries even when one member is long. A byte-oriented fixture can use a byte literal or `concat!(...).as_bytes()`; `concat!` itself does not accept byte string literals. Raw strings can make quoting clearer, but their physical line breaks and indentation belong to the value. Preserve the exact text, escapes and line endings when changing its source representation.
 
@@ -134,9 +136,11 @@ If a format string needs macro-generated text, Rust requires explicit arguments 
 format!(concat!("status: {status}\r\n", "content: {}\r\n"), body, status = status)
 ```
 
-`eden-fmt check`, `write` and `stdin` refuse backslash line continuations without rewriting the literals. File diagnostics report their positions; stdin diagnostics identify the literal by its opening. Replace one with a direct literal or meaningful `concat!` groups, keeping its value unchanged. Neither formatter automatically changes the way a string is carried.
+`eden-fmt` accepts existing and generated backslash continuations and compares decoded string values, byte strings and C strings. It preserves literal spelling inside unknown macros, `stringify!`, macro definitions and attributes: these contexts can observe tokens instead of values. Nested opaque macros keep that protection inside known value macros. The value-macro convention covers `json!`, `select!`, standard formatting/output/assertion macros, `vec!`, `concat!` and `matches!`; do not shadow these names with a macro that observes literal spelling.
 
-Some expression shapes containing an unbreakable string make rustfmt leave an enclosing statement unchanged, including unrelated formatting inside it. Keep a local `concat!` workaround when that behavior has been demonstrated, and explain the affected region near the call. When simplifying such a call, misformat ordinary Rust syntax inside the affected statement in a temporary copy and confirm the formatter repairs it; a passing check on already formatted code alone cannot establish that. For example, the tool-execution closure in `plugins/coding/src/lib.rs` retains a split message for this reason. This is a local formatter limitation, not a reason to split every long string.
+The pinned official formatter can split an escape incorrectly or change whitespace inside a literal. Such output is rejected with a diagnostic before writing. Adjust that input using a raw literal, meaningful `concat!` groups, or a byte-preserving `include_str!`/`include_bytes!` fixture. The adapter does not repair arbitrary string syntax. Merge concat groups that exist only for the old formatter's width limitation into direct literals and let the formatter choose breaks; retain meaningful protocol or record boundaries.
+
+`matches!` with guards and other unsupported macro grammars still need readable source: put spaces around operators and inside struct patterns, and use separate lines for long arguments and guards. For complicated guards, use an ordinary `match` expression when automatic layout is needed. A passing check does not prove every opaque macro was formatted. When fixing a skipped ordinary statement, perturb its ordinary syntax in a temporary copy and verify that the pipeline repairs or rejects it.
 
 ## Doc comments
 
@@ -154,7 +158,7 @@ The one escape is honesty. When no real intent can be stated for an item, it is 
 
 ## Rustfmt limitations
 
-`rustfmt.toml` sets edition and style edition 2024. It does not set a width: 100 columns is rustfmt's own default. `eden-fmt` uses that layout target for both its rustfmt subprocess and macro lifting; it does not read a separate width from this file. Independent author projects use the same tool options. All commands continue using the pinned stable Rust toolchain. A passing `cargo fmt --check` is not a strict line-length guarantee: rustfmt may leave an enclosing closure or block untouched when an unbreakable macro string overflows, as tracked in [rustfmt #6870](https://github.com/rust-lang/rustfmt/issues/6870). Editor format-on-save can encounter the same limitation. The nightly-only `error_on_line_overflow` excludes strings and comments; `error_on_unformatted` is a separate option. The stable checks do not provide either as a universal detector of skipped regions.
+`rustfmt.toml` records edition/style edition 2024, `unstable_features = true` and `format_strings = true`. The adapter passes these settings and `--unstable-features` explicitly to the pinned binary, with a 100-column target and child-module traversal disabled; its own collector owns file traversal. The compiler remains stable. CLI width/edition overrides apply to the whole adapter pipeline. Format-on-save uses the same defaults as the repository checks. A passing check is not a universal line-length or skipped-region detector; raw strings, comments and unsupported macros may remain wider.
 
 Four more limits are worth knowing before reading `eden-fmt`'s output as a verdict on style. A comment written where a lowered arm has no room for it — between a pattern and its `=`, between `=` and the future, between the future and `=>`, or between `=>` and the handler — is refused rather than moved, and so is a multi-argument closure used as a future or a handler. A piece rustfmt moved to its own line keeps the indentation the lowered form gave it, which can sit one level deeper than the lifted arm suggests. A refusal raised while lifting names a position in the intermediate lowercase text rather than in the author's file, although the file is still left untouched. Any macro named `select!` is treated as tokio's grammar, and rustfmt itself drops a redundant leading `|` from an or-pattern.
 

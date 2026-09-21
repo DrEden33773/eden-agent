@@ -750,7 +750,7 @@ mod tests {
             .finish(&projection::test_target("bedrock-converse-stream"))
             .unwrap();
         assert!(
-            matches!(&reply.items[0],Item::ToolCall{arguments,..} if arguments=="{\"path\":\"file\"}")
+            matches!(&reply.items[0], Item::ToolCall { arguments, .. } if arguments == "{\"path\":\"file\"}")
         );
         assert_eq!(reply.usage["raw"]["totalTokens"], 8);
     }
@@ -794,7 +794,20 @@ mod tests {
                 let n = socket.read(&mut bytes).await.unwrap();
                 let request = String::from_utf8_lossy(&bytes[..n]).to_string();
                 let body = "{\"message\":\"secret-token-should-never-escape\"}";
-                socket.write_all(format!("HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nx-amzn-errortype: ThrottlingException\r\nRetry-After: 2\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).as_bytes()).await.unwrap();
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 429 Too Many Requests\r\nContent-Type: \
+                             application/json\r\nx-amzn-errortype: \
+                             ThrottlingException\r\nRetry-After: 2\r\nContent-Length: \
+                             {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
                 (request, listener)
             });
             let credential = if bearer {

@@ -203,7 +203,7 @@ pub(crate) fn completed(response: &Value, profile: Profile) -> Result<ModelReply
                     return Err(failure("tool call identity is empty"));
                 }
                 if items.iter().any(
-                    |existing| matches!(existing,Item::ToolCall {call_id: id,..} if id == call_id),
+                    |existing| matches!(existing, Item::ToolCall { call_id: id, .. } if id == call_id),
                 ) {
                     return Err(failure("duplicate tool call identity"));
                 }
@@ -533,7 +533,7 @@ mod output_tests {
             )
             .unwrap();
         assert!(
-            matches!(&reply.items[0],Item::ProviderState{value,..} if value["encrypted_content"]=="signed" && value["summary"].is_array())
+            matches!(&reply.items[0], Item::ProviderState { value, .. } if value["encrypted_content"] == "signed" && value["summary"].is_array())
         );
     }
 }

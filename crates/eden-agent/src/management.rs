@@ -231,7 +231,8 @@ impl Session {
         let scan = eden_protocol::history::scan_records(&bytes);
         if scan.diagnostic.is_some() && !matches!(options.kind, CopyKind::Recover) {
             return Err(invalid(
-                "source has damaged/uncommitted data; use explicit recover to copy the validated prefix",
+                "source has damaged/uncommitted data; use explicit recover to copy the validated \
+                 prefix",
             ));
         }
         let first = scan
@@ -275,22 +276,16 @@ impl Session {
         }
         if options.public_only {
             losses.push(
-                // Keep this split: a single literal makes rustfmt skip the enclosing statement.
-                concat!(
-                    "Plugin private state and provider reasoning state are omitted; this is not a ",
-                    "full state restoration.",
-                )
-                .into(),
+                "Plugin private state and provider reasoning state are omitted; this is not a \
+                 full state restoration."
+                    .into(),
             );
         }
         if cwd != first.payload["cwd"].as_str().unwrap_or("") {
             losses.push(
-                // Keep this split: a single literal makes rustfmt skip the enclosing statement.
-                concat!(
-                    "Working directory binding changes; external project files are not copied or ",
-                    "rolled back.",
-                )
-                .into(),
+                "Working directory binding changes; external project files are not copied or \
+                 rolled back."
+                    .into(),
             );
         }
         let composition = std::fs::canonicalize(composition).map_err(|e| invalid(e.to_string()))?;
@@ -387,12 +382,9 @@ impl Session {
             );
         }
         let mut preserved = vec![
-            // Keep this split: a single literal makes rustfmt skip the enclosing statement.
-            concat!(
-                "Public selected history, attachments, branch links and source provenance; source ",
-                "bytes remain unchanged.",
-            )
-            .into(),
+            "Public selected history, attachments, branch links and source provenance; source \
+             bytes remain unchanged."
+                .into(),
         ];
         if let Some(reply) = &migration {
             preserved.extend(reply.preserved.clone());
@@ -452,11 +444,8 @@ impl Session {
                     .count();
                 if reply.states.len() != count {
                     return Err(invalid(
-                        // Keep this split: a single literal makes rustfmt skip the enclosing statement.
-                        concat!(
-                            "migrator must preserve one state result per source record; preview a ",
-                            "public-only copy to discard state",
-                        ),
+                        "migrator must preserve one state result per source record; preview a \
+                         public-only copy to discard state",
                     ));
                 }
                 let mut states = reply.states.into_iter();
@@ -703,12 +692,8 @@ impl Session {
                                             "PersistenceFailure",
                                             "navigation",
                                             format!(
-                                                concat!(
-                                                    "summary failed ({error}); could not restore ",
-                                                    "selection: {restore}",
-                                                ),
-                                                error = error,
-                                                restore = restore,
+                                                "summary failed ({error}); could not restore \
+                                                 selection: {restore}",
                                             ),
                                         )
                                     })?;

@@ -338,7 +338,8 @@ async fn requested_termination_stops_the_leader_and_its_descendants() {
 async fn cleanup_reaches_descendants_started_while_it_enumerates() {
     const WANTED: usize = 24;
     let command = format!(
-        "while :; do sleep 300 & descendant=$!; {REPORT_WINDOWS_PID}; done & descendant=$!; {REPORT_WINDOWS_PID}; exit 0"
+        "while :; do sleep 300 & descendant=$!; {REPORT_WINDOWS_PID}; done & descendant=$!; \
+         {REPORT_WINDOWS_PID}; exit 0"
     );
     let mut shell = Shell::spawn(&command).await;
     let mut descendants = Vec::with_capacity(WANTED);

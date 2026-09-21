@@ -120,6 +120,7 @@ jobs:
           config = tomllib.loads(pathlib.Path("rust-toolchain.toml").read_text())["toolchain"]
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"channel={config['channel']}\n")
+              output.write(f"formatter={pathlib.Path('rustfmt-toolchain').read_text().strip()}\n")
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         if: ${{ needs.scope.outputs.rust == 'true' }}
         id: toolchain-cache
@@ -127,7 +128,9 @@ jobs:
           path: |
             ~/.rustup/toolchains/${{ steps.toolchain-config.outputs.channel }}-*
             ~/.rustup/update-hashes/${{ steps.toolchain-config.outputs.channel }}-*
-          key: toolchain-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}
+            ~/.rustup/toolchains/${{ steps.toolchain-config.outputs.formatter }}-*
+            ~/.rustup/update-hashes/${{ steps.toolchain-config.outputs.formatter }}-*
+          key: toolchain-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rustfmt-toolchain') }}
       - name: Fixed Rust toolchain
         if: ${{ needs.scope.outputs.rust == 'true' }}
         id: toolchain
@@ -142,6 +145,8 @@ jobs:
           for component in config["components"]:
               command.extend(["--component", component])
           subprocess.run(command, check=True)
+          formatter = pathlib.Path("rustfmt-toolchain").read_text().strip()
+          subprocess.run(["rustup", "toolchain", "install", formatter, "--profile", "minimal", "--component", "rustfmt", "--no-self-update"], check=True)
       - name: Node development dependencies
         if: ${{ needs.scope.outputs.markdown == 'true' || needs.scope.outputs.javascript == 'true' }}
         run: node scripts/ci-run.mjs pnpm-install pnpm install --frozen-lockfile
@@ -178,6 +183,8 @@ jobs:
           path: |
             ~/.rustup/toolchains/${{ steps.toolchain-config.outputs.channel }}-*
             ~/.rustup/update-hashes/${{ steps.toolchain-config.outputs.channel }}-*
+            ~/.rustup/toolchains/${{ steps.toolchain-config.outputs.formatter }}-*
+            ~/.rustup/update-hashes/${{ steps.toolchain-config.outputs.formatter }}-*
           key: ${{ steps.toolchain-cache.outputs.cache-primary-key }}
       - name: Require selected static steps
         if: always()

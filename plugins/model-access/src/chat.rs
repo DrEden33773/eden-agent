@@ -46,7 +46,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(
-            matches!(&reply.items[0], Item::ToolCall { arguments,.. } if arguments == "{\"x\":1}")
+            matches!(&reply.items[0], Item::ToolCall { arguments, .. } if arguments == "{\"x\":1}")
         );
         assert_eq!(reply.usage["raw"]["completion_tokens"], 3);
     }

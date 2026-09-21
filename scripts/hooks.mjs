@@ -16,7 +16,8 @@ const rust = (path) =>
   /(^|\/)(Cargo\.(toml|lock)|\.?rustfmt\.toml|\.?clippy\.toml|rust-toolchain(\.toml)?)$/.test(
     path,
   ) ||
-  path.startsWith(".cargo/");
+  path.startsWith(".cargo/") ||
+  path === "rustfmt-toolchain";
 const python = (path) => /\.py$/.test(path) || ["pyproject.toml", "uv.lock"].includes(path);
 const javascript = (path) =>
   /\.mjs$/.test(path) ||
@@ -32,7 +33,7 @@ function kindsFor(changed, push = false) {
   const all = changed.some(infrastructure);
   return [
     ...(all || changed.some(markdown) ? ["markdown"] : []),
-    ...(all || changed.some(rust) ? [push ? "clippy" : "fmt"] : []),
+    ...(all || changed.some(rust) ? (push ? ["fmt", "clippy"] : ["fmt"]) : []),
     // The doc check is part of the pushed Rust check: it is what catches a link
     // to an item that moved, which no compile and no formatter can see.
     ...(all || (push && changed.some(rust)) ? ["doc"] : []),

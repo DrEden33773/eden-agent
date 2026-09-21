@@ -52,10 +52,8 @@ async fn powershell_uses_native_paths_and_explicit_cwd() {
         project.request(
             "powershell",
             json!({
-                "command": concat!(
-                    "[IO.File]::WriteAllText((Join-Path (Get-Location) 'space dir/value.txt'), ",
-                    "'native UTF-8'); Get-Content -LiteralPath 'space dir/value.txt'",
-                ),
+                "command": "[IO.File]::WriteAllText((Join-Path (Get-Location) 'space dir/value.txt'), \
+                     'native UTF-8'); Get-Content -LiteralPath 'space dir/value.txt'",
             }),
         ),
         Scope::default(),
@@ -80,13 +78,18 @@ async fn powershell_cancellation_reaps_native_descendant_before_completion() {
     std::fs::write(
         project.0.join("child.ps1"),
         format!(
-            "$client=[Net.Sockets.TcpClient]::new('127.0.0.1',{port}); $stream=$client.GetStream(); $stream.WriteByte(82); $stream.Flush(); Start-Sleep -Seconds 300"),
+            "$client=[Net.Sockets.TcpClient]::new('127.0.0.1',{port}); \
+             $stream=$client.GetStream(); $stream.WriteByte(82); $stream.Flush(); Start-Sleep \
+             -Seconds 300"
+        ),
     )
     .unwrap();
     let request = project.request(
         "powershell",
         json!({
-            "command": "$child=Start-Process pwsh -ArgumentList '-NoProfile','-NonInteractive','-File','child.ps1' -PassThru; Wait-Process -Id $child.Id",
+            "command": "$child=Start-Process pwsh -ArgumentList \
+                 '-NoProfile','-NonInteractive','-File','child.ps1' -PassThru; Wait-Process -Id \
+                 $child.Id",
         }),
     );
     let scope = Scope::default();
@@ -427,7 +430,8 @@ async fn foreground_exit_waits_for_descendant_that_closed_stdio() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let command = format!(
-        "mkfifo ready; (exec 1>&- 2>&-; exec 3<>/dev/tcp/127.0.0.1/{port}; printf R >&3; echo ready >ready; exec sleep 300) & read line <ready; exit 0"
+        "mkfifo ready; (exec 1>&- 2>&-; exec 3<>/dev/tcp/127.0.0.1/{port}; printf R >&3; echo \
+         ready >ready; exec sleep 300) & read line <ready; exit 0"
     );
     let task = tokio::spawn(execute(
         project.request("bash", json!({ "command": command })),
@@ -803,7 +807,8 @@ async fn bash_path_roundtrip_read_edit_preserves_space_and_unicode_cwd() {
         .map(|entry| entry.map(|entry| entry.file_name()))
         .collect();
     let diagnosis = format!(
-        "cwd={cwd:?}; expected={expected:?}; entries={entries:?}; emitted={path:?}; resolved={resolved:?}; resolved_exists={}",
+        "cwd={cwd:?}; expected={expected:?}; entries={entries:?}; emitted={path:?}; \
+         resolved={resolved:?}; resolved_exists={}",
         resolved.is_file(),
     );
     assert!(

@@ -199,6 +199,9 @@ fn calibrated_estimate(path: &[Record], estimate: u64) -> u64 {
     let current = generation(path);
     path.iter()
         .rev()
+        // Copies renumber checkpoints. A matching number before the latest
+        // compaction is still stale evidence for the current projection.
+        .take_while(|record| record.kind != "compaction")
         .find_map(|record| {
             if record.kind != "model_response"
                 || record.payload["usage_generation"].as_u64()? != current
@@ -760,6 +763,31 @@ mod tests {
             }),
         ));
         assert_eq!(calibrated_estimate(&path, 40), 815);
+    }
+    #[test]
+    fn copied_usage_cannot_cross_a_newer_compaction_with_a_colliding_sequence() {
+        let path = vec![
+            record(
+                2,
+                "compaction",
+                json!({ "summary": "old", "first_kept": 0 }),
+            ),
+            record(
+                3,
+                "model_response",
+                json!({
+                    "usage": { "total_tokens": 90000 },
+                    "usage_generation": 8,
+                    "response_estimate": 25,
+                }),
+            ),
+            record(
+                8,
+                "compaction",
+                json!({ "summary": "new", "first_kept": 0 }),
+            ),
+        ];
+        assert_eq!(calibrated_estimate(&path, 40), 40);
     }
     #[test]
     fn failed_attempt_text_and_partial_tools_never_enter_projection() {

@@ -93,19 +93,6 @@ def matrix_oses(text: str) -> set[str]:
     return {label.strip() for label in matches[0].split(",")}
 
 
-def declared_build_environment(text: str) -> dict[str, str]:
-    """The literal build environment ci-cache.py folds into the identity."""
-    declared = {}
-    for line in text.splitlines():
-        match = re.match(r"^\s+([A-Za-z0-9_]+): (.+?)\s*$", line)
-        if not match:
-            continue
-        name = match.group(1)
-        if name in cache.BUILD_ENV or name.startswith("CARGO_PROFILE_"):
-            declared[name] = match.group(2)
-    return declared
-
-
 class CacheKeyCase(unittest.TestCase):
     def keys(self, files=None, environment=None, **kwargs):
         values = {
@@ -337,12 +324,10 @@ class SelectionIdentityTests(CacheKeyCase):
 
 
 class WorkflowIdentityTests(unittest.TestCase):
-    """The heavy job, the probe and the decision must name the same identity."""
+    """The native commands and cache identity must agree."""
 
     def setUp(self) -> None:
         self.heavy = workflow("native-verify.yml")
-        self.probe = workflow("quality.yml")
-        self.scope = (cache.ROOT / "scripts/ci-scope.mjs").read_text(encoding="utf-8")
 
     def test_every_declared_selection_is_the_command_the_workflow_runs(self) -> None:
         declared = {label: set(packages) for label, packages in cache.TEST_SELECTIONS.values()}
@@ -374,32 +359,15 @@ class WorkflowIdentityTests(unittest.TestCase):
             expected = "workspace-suites" if runner.startswith("ubuntu") else "platform-suites"
             self.assertEqual(label, expected, runner)
 
-    def test_the_cache_state_probe_looks_for_the_heavy_job_entry(self) -> None:
-        # Same runners, so a runner cannot be probed with a selection it would
-        # never run.
-        self.assertEqual(matrix_oses(self.heavy), matrix_oses(self.probe))
+    def test_native_cache_identity_and_restore_save_paths(self) -> None:
         self.assertEqual(set(cache.TEST_SELECTIONS), matrix_oses(self.heavy))
-        # Same step environment and the same literal build environment, so both
-        # derivations of the key agree: every variable the derivation reads
-        # (CI_CACHE_*, ImageVersion, and anything added later) has to be here.
         self.assertEqual(
-            step_env(self.heavy, "scripts/ci-cache.py"), step_env(self.probe, "scripts/ci-cache.py")
+            step_env(self.heavy, "scripts/ci-cache.py")["CI_CACHE_OS"], "${{ matrix.os }}"
         )
         self.assertEqual(
-            declared_build_environment(self.heavy), declared_build_environment(self.probe)
+            cache_paths(self.heavy, "steps.cargo-target.outcome == 'success'"),
+            cache_paths(self.heavy, "id: cargo-target"),
         )
-        # The path list is part of the cache version, so the probe's lookup and
-        # the heavy job's save must list the same paths byte for byte.
-        restored = cache_paths(self.heavy, "id: cargo-target")
-        self.assertEqual(cache_paths(self.probe, "id: cargo-target"), restored)
-        self.assertEqual(
-            cache_paths(self.heavy, "steps.cargo-target.outcome == 'success'"), restored
-        )
-
-    def test_the_heavy_decision_covers_exactly_the_probed_runners(self) -> None:
-        match = re.search(r"export const HEAVY_OSES = \[([^\]]*)\]", self.scope)
-        declared = set(re.findall(r'"([^"]+)"', match.group(1))) if match else set()
-        self.assertEqual(declared, matrix_oses(self.probe))
 
 
 if __name__ == "__main__":

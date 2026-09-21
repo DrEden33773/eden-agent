@@ -6,8 +6,7 @@ name: Native verification
 # sharing one job.
 on:
   workflow_call:
-# These variables are part of the derived build cache identity and must match
-# the caller's values, or the cache-state probe cannot find these entries.
+# These variables are part of the derived build cache identity.
 env:
   CARGO_INCREMENTAL: '0'
   CARGO_PROFILE_DEV_DEBUG: '1'
@@ -241,16 +240,34 @@ jobs:
                   item = json.loads(path.read_text(encoding="utf-8"))
                   if "duration_seconds" in item:
                       summary.write(f"| {item['label']} | {item['duration_seconds']:.2f} | {item['exit_code']} | {item['cargo_compiling_lines']} | {item['cargo_checking_lines']} |\n")
-      - name: Upload native results, failure logs and timings
+      - name: Upload native receipts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: native-${{ runner.os }}-${{ runner.arch }}
+          name: native-receipts-${{ runner.os }}-${{ runner.arch }}
           path: |
-            artifacts/ci
-            artifacts/verification
+            artifacts/ci/*.json
+            artifacts/verification/timings.json
+            artifacts/verification/*/result.json
             artifacts/*verification.json
+          if-no-files-found: error
+      - name: Upload native diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-diagnostics-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            artifacts/ci/*.log
+            artifacts/verification
             artifacts/pi-reference-raw.json
             artifacts/pi-reference-shell-output.bin
-            artifacts/eden-*.tar.gz
+            !artifacts/verification/timings.json
+            !artifacts/verification/*/result.json
+          if-no-files-found: warn
+      - name: Upload native archive
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-archive-${{ runner.os }}-${{ runner.arch }}
+          path: artifacts/eden-*.tar.gz
           if-no-files-found: warn

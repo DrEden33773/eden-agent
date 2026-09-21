@@ -1,0 +1,4 @@
+data: {"type":"text_start","contentIndex":0}
+
+data: {"type":"text_delta","contentIndex":0,"delta":"hello"}
+

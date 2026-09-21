@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { command, fixture, git, unchanged } from "./development-hooks-fixture.mjs";
 
 test("pre-commit rejects bad staged Markdown despite an unstaged fix, without rewriting either", (t) => {
@@ -28,7 +29,7 @@ test("pre-commit checks staged Rust and preserves partial staging in both direct
   writeFileSync(join(root, "src/lib.rs"), good);
   let result = command(root, "git", ["commit", "-m", "bad staged Rust"]);
   assert.notEqual(result.status, 0);
-  assert.match(result.stdout + result.stderr, /Diff in/);
+  assert.match(result.stdout + result.stderr, /would be reformatted/);
   unchanged(root, "src/lib.rs", bad, good);
   git(root, "add", "src/lib.rs");
   writeFileSync(join(root, "src/lib.rs"), bad);
@@ -223,4 +224,43 @@ test("autocrlf checkout preserves Biome source and configuration line endings", 
   }
   const result = command(root, process.execPath, ["scripts/checks.mjs", "javascript"]);
   assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
+test("nightly checks catch long-string layout in an independent author and preserve staging", (t) => {
+  const root = fixture(t);
+  const author = join(root, "tests/contract-authors/long-message");
+  mkdirSync(join(author, "src"), { recursive: true });
+  writeFileSync(
+    join(author, "Cargo.toml"),
+    '[package]\nname="long-message"\nversion="0.1.0"\nedition="2024"\n[workspace]\n',
+  );
+  const path = "tests/contract-authors/long-message/src/lib.rs";
+  const bad = `pub fn message()-> &'static str { "${"ordinary long message ".repeat(12)}" }\n`;
+  writeFileSync(join(root, path), bad);
+  git(root, "add", "tests");
+  const failed = command(root, process.execPath, ["scripts/hooks.mjs", "pre-commit"]);
+  assert.notEqual(failed.status, 0);
+  unchanged(root, path, bad, bad);
+  const fixed = command(root, process.execPath, ["scripts/checks.mjs", "format"]);
+  assert.equal(fixed.status, 0, fixed.stdout + fixed.stderr);
+  assert.match(readFileSync(join(root, path), "utf8"), /\\\n/);
+  git(root, "add", "tests");
+  const passed = command(root, process.execPath, ["scripts/hooks.mjs", "pre-commit"]);
+  assert.equal(passed.status, 0, passed.stdout + passed.stderr);
+});
+
+test("editor command from a nested source directory matches CLI stdin", () => {
+  const root = fileURLToPath(new URL("../", import.meta.url));
+  const settings = JSON.parse(readFileSync(join(root, ".vscode/settings.json"), "utf8"));
+  const [program, ...args] = settings["rust-analyzer.rustfmt.overrideCommand"].map((value) =>
+    value.replace("${workspaceFolder}", root),
+  );
+  const source = `fn f(){let message="${"a long ordinary message ".repeat(12)}";}\n`;
+  const nested = join(root, "tests/contract-authors/service-a/src");
+  const editor = command(nested, program, args, { input: source });
+  assert.equal(editor.status, 0, editor.stderr);
+  const cli = command(root, process.env.EDEN_FMT, ["stdin"], { input: source });
+  assert.equal(cli.status, 0, cli.stderr);
+  assert.equal(editor.stdout, cli.stdout);
+  assert.match(editor.stdout, /\\\n/);
 });

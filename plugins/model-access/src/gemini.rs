@@ -307,7 +307,7 @@ impl Decoder {
                     if self
                         .calls
                         .iter()
-                        .any(|c| matches!(c,Item::ToolCall{call_id,..} if call_id==&id))
+                        .any(|c| matches!(c, Item::ToolCall { call_id, .. } if call_id == &id))
                     {
                         return Err(failure("duplicate Gemini tool call identity"));
                     }
@@ -387,7 +387,8 @@ mod tests {
             target.model = model.into();
             target.thinking.effective = Some(level.into());
             assert_eq!(
-                project(&input, &target).unwrap()["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+                project(&input, &target).unwrap()["generationConfig"]["thinkingConfig"]
+                    ["thinkingLevel"],
                 expected
             );
         }

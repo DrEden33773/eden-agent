@@ -31,9 +31,9 @@ fn create(_: Value) -> Result<Package, Fault> {
             Ok(CommandCatalog {
                 commands: vec![CommandDefinition {
                     name: "example.compute".into(),
-                    description:
-                        "Independent B calls independent A through an author-defined contract."
-                            .into(),
+                    description: "Independent B calls independent A through an author-defined \
+                                  contract."
+                        .into(),
                     parameters: json!({
                         "type": "object",
                         "properties": { "value": { "type": "integer" } },

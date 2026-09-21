@@ -1,0 +1,8 @@
+async fn f() {
+    tokio::select! {
+        biased;
+        Some(x) = rx.recv() => handle(x),
+        _ = other(), if ready && armed => ok(),
+        else => fallback(),
+    }
+}

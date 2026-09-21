@@ -967,12 +967,14 @@ fn explicit_context_errors_and_quota_messages_are_classified_without_echoing_the
     for (status, message, expected) in [
         (
             400,
-            "This model's maximum context length is 1048576 tokens. Your messages resulted in too many tokens: test-secret",
+            "This model's maximum context length is 1048576 tokens. Your messages resulted in too \
+             many tokens: test-secret",
             "ContextOverflow",
         ),
         (
             429,
-            "You exceeded your current quota, please check your plan and billing details. test-secret",
+            "You exceeded your current quota, please check your plan and billing details. \
+             test-secret",
             "ProviderFailure",
         ),
         (

@@ -1,3 +1,7 @@
 .githooks/* text eol=lf
 *.mjs text eol=lf
 biome.json text eol=lf
+# These include_str! fixtures carry exact protocol/source bytes on every platform.
+crates/eden-cli/tests/fixtures/*.txt -text
+crates/eden-fmt/tests/fixtures/*.txt -text
+plugins/model-access/src/fixtures/*.txt -text

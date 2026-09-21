@@ -164,7 +164,8 @@ fn successful(status: u16) -> Result<(), Fault> {
         Ok(())
     } else {
         Err(fault(&format!(
-            "OAuth endpoint rejected request (HTTP {status}); check client admission and account access"
+            "OAuth endpoint rejected request (HTTP {status}); check client admission and account \
+             access"
         )))
     }
 }
@@ -176,7 +177,8 @@ impl Settings {
                 "https://platform.claude.com/v1/oauth/token",
                 "",
                 "http://localhost:53692/callback",
-                "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload",
+                "org:create_api_key user:profile user:inference user:sessions:claude_code \
+                 user:mcp_servers user:file_upload",
             ),
             "openai-codex" => (
                 "https://auth.openai.com/oauth/authorize",
@@ -225,7 +227,16 @@ impl Settings {
         let client_id = if provider == "openrouter" {
             String::new()
         } else {
-            config.client_id.clone().filter(|id| !id.trim().is_empty()).ok_or_else(|| fault("OAuth client admission is not configured; set credentials.oauth.<provider>.client_id to an authorized client"))?
+            config
+                .client_id
+                .clone()
+                .filter(|id| !id.trim().is_empty())
+                .ok_or_else(|| {
+                    fault(
+                        "OAuth client admission is not configured; set \
+                         credentials.oauth.<provider>.client_id to an authorized client",
+                    )
+                })?
         };
         let domain = config.domain.clone().unwrap_or_else(|| "github.com".into());
         if domain.contains('/') || domain.contains(':') || domain.is_empty() {
@@ -357,7 +368,15 @@ impl Flow {
                     "OAuth callback must use an IPv4 loopback HTTP address",
                 ));
             }
-            let listener = TcpListener::bind(("127.0.0.1", redirect.port_or_known_default().unwrap_or(80))).await.map_err(|_| fault("OAuth callback port is unavailable; close the other login or configure an admitted redirect_uri"))?;
+            let listener =
+                TcpListener::bind(("127.0.0.1", redirect.port_or_known_default().unwrap_or(80)))
+                    .await
+                    .map_err(|_| {
+                        fault(
+                            "OAuth callback port is unavailable; close the other login or \
+                             configure an admitted redirect_uri",
+                        )
+                    })?;
             let port = listener
                 .local_addr()
                 .map_err(|_| fault("cannot inspect callback address"))?
@@ -490,34 +509,74 @@ impl Flow {
     pub async fn wait(&mut self) -> Result<Token, Fault> {
         let deadline = self.interaction.expires_at.saturating_sub(now());
         tokio::time::timeout(Duration::from_secs(deadline), async {
-            if self.method == "device" { return self.poll().await; }
-            let listener = self.listener.as_ref().ok_or_else(|| fault("callback listener is closed"))?;
+            if self.method == "device" {
+                return self.poll().await;
+            }
+            let listener = self
+                .listener
+                .as_ref()
+                .ok_or_else(|| fault("callback listener is closed"))?;
             loop {
-                let (mut stream, _) = listener.accept().await.map_err(|_| fault("OAuth callback failed"))?;
+                let (mut stream, _) = listener
+                    .accept()
+                    .await
+                    .map_err(|_| fault("OAuth callback failed"))?;
                 let mut bytes = Vec::new();
                 let request = tokio::time::timeout(Duration::from_secs(5), async {
                     loop {
-                        let byte = stream.read_u8().await.map_err(|_| fault("OAuth callback interrupted"))?;
+                        let byte = stream
+                            .read_u8()
+                            .await
+                            .map_err(|_| fault("OAuth callback interrupted"))?;
                         bytes.push(byte);
-                        if bytes.ends_with(b"\r\n\r\n") { break; }
-                        if bytes.len() > 16384 { return Err(fault("OAuth callback too large")); }
+                        if bytes.ends_with(b"\r\n\r\n") {
+                            break;
+                        }
+                        if bytes.len() > 16384 {
+                            return Err(fault("OAuth callback too large"));
+                        }
                     }
                     Ok::<_, Fault>(())
-                }).await;
-                if !matches!(request, Ok(Ok(()))) { continue; }
+                })
+                .await;
+                if !matches!(request, Ok(Ok(()))) {
+                    continue;
+                }
                 let request = String::from_utf8_lossy(&bytes);
                 let mut parts = request.split_whitespace();
-                let method = parts.next(); let path = parts.next().unwrap_or_default();
+                let method = parts.next();
+                let path = parts.next().unwrap_or_default();
                 let incoming = format!("http://localhost{path}");
-                let matches_path = reqwest::Url::parse(&incoming).ok().zip(reqwest::Url::parse(&self.settings.redirect_uri).ok()).is_some_and(|(a,b)| a.path() == b.path());
-                let parsed = if method == Some("GET") && matches_path { self.parse_code(&incoming, true) } else { Err(fault("invalid callback route")) };
-                let status = if parsed.is_ok() { "200 OK" } else { "400 Bad Request" };
-                let answer = format!("HTTP/1.1 {status}\r\nContent-Length: 26\r\nConnection: close\r\nCache-Control: no-store\r\n\r\nReturn to the application.\n");
-                let _ = stream.write_all(answer.as_bytes()).await; let _ = stream.shutdown().await;
-                if let Ok(code) = parsed { return self.exchange(&code).await; }
-                if matches_path && request.contains("error=") { return Err(fault("OAuth authorization was denied")); }
+                let matches_path = reqwest::Url::parse(&incoming)
+                    .ok()
+                    .zip(reqwest::Url::parse(&self.settings.redirect_uri).ok())
+                    .is_some_and(|(a, b)| a.path() == b.path());
+                let parsed = if method == Some("GET") && matches_path {
+                    self.parse_code(&incoming, true)
+                } else {
+                    Err(fault("invalid callback route"))
+                };
+                let status = if parsed.is_ok() {
+                    "200 OK"
+                } else {
+                    "400 Bad Request"
+                };
+                let answer = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: 26\r\nConnection: \
+                     close\r\nCache-Control: no-store\r\n\r\nReturn to the application.\n"
+                );
+                let _ = stream.write_all(answer.as_bytes()).await;
+                let _ = stream.shutdown().await;
+                if let Ok(code) = parsed {
+                    return self.exchange(&code).await;
+                }
+                if matches_path && request.contains("error=") {
+                    return Err(fault("OAuth authorization was denied"));
+                }
             }
-        }).await.map_err(|_| fault("OAuth login expired; restart login"))?
+        })
+        .await
+        .map_err(|_| fault("OAuth login expired; restart login"))?
     }
     async fn poll(&mut self) -> Result<Token, Fault> {
         let device = self

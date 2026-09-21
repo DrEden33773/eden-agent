@@ -1,6 +1,6 @@
 // Shared check commands for contributors, hooks and CI.
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -192,6 +192,14 @@ for dependency in config["dependency-groups"]["dev"]:
       ? manifests(root).filter((manifest) => manifest !== "Cargo.toml")
       : manifests(root);
   const formatter = kind === "fmt" || kind === "format" ? edenFmt(toolRoot, env) : "";
+  if (formatter) {
+    const expected = readFileSync(join(root, "rustfmt-toolchain"), "utf8").trim();
+    const identity = spawnSync(formatter, ["--version"], { env: rustEnv, encoding: "utf8" });
+    if (identity.status !== 0 || identity.stdout.trim() !== `eden-fmt ${expected}`)
+      throw new Error(
+        "eden-fmt version differs from this snapshot; run cargo build --locked -p eden-fmt.",
+      );
+  }
   // Each manifest owns its own tree: the root run leaves the independent
   // authors to the runs their own manifests get below.
   const owned = manifests(root).map((other) => dirname(other));
@@ -206,28 +214,20 @@ for dependency in config["dependency-groups"]["dev"]:
     const args =
       kind === "test"
         ? ["test", "--manifest-path", manifest, "--locked", "--no-fail-fast"]
-        : kind === "fmt" || kind === "format"
-          ? [
-              "fmt",
-              "--manifest-path",
-              manifest,
-              "--all",
-              ...(kind === "fmt" ? ["--", "--check"] : []),
-            ]
-          : [
-              "clippy",
-              "--manifest-path",
-              manifest,
-              "--workspace",
-              "--all-targets",
-              "--locked",
-              ...(kind === "clippy-fix" ? ["--fix", ...extra] : []),
-              "--",
-              "-D",
-              "warnings",
-            ];
+        : [
+            "clippy",
+            "--manifest-path",
+            manifest,
+            "--workspace",
+            "--all-targets",
+            "--locked",
+            ...(kind === "clippy-fix" ? ["--fix", ...extra] : []),
+            "--",
+            "-D",
+            "warnings",
+          ];
     try {
-      run(cargo.program, args, root, rustEnv);
+      if (!formatter) run(cargo.program, args, root, rustEnv);
       if (formatter) {
         const directory = dirname(manifest);
         run(

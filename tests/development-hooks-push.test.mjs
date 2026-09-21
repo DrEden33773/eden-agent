@@ -73,7 +73,7 @@ test("standalone author crates participate in formatting and Clippy hooks", (t) 
   let result = command(root, "git", ["commit", "-m", "bad author format"]);
   assert.notEqual(result.status, 0);
   assert.match(result.stdout + result.stderr, /new-author/);
-  assert.match(result.stdout + result.stderr, /Diff in/);
+  assert.match(result.stdout + result.stderr, /would be reformatted/);
   writeFileSync(
     join(author, "src/lib.rs"),
     "pub fn value() -> u32 {\n    let unused = 2;\n    2\n}\n",

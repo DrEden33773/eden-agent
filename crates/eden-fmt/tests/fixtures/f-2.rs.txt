@@ -1,0 +1,8 @@
+fn f() {
+    let v = json!({
+        "type": "object",
+        "properties": { "command": { "type": "string" } },
+        "required": ["command"],
+        "additionalProperties": false,
+    });
+}

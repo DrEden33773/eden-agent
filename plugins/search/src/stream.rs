@@ -102,15 +102,21 @@ pub(crate) fn search(
     };
     if consumes_newline(&hir) {
         result.skipped.push(json!({
-            "path": relative, "reason": "multiline_pattern_unsupported_for_large_file",
-            "continuation": "Large explicit files support line-oriented exact matching; choose a pattern that cannot consume newlines.",
+            "path": relative,
+            "reason": "multiline_pattern_unsupported_for_large_file",
+            "continuation":
+                "Large explicit files support line-oriented exact matching; choose a pattern that \
+                 cannot consume newlines.",
         }));
         return Ok(result);
     }
     if has_file_anchor(&hir) {
         result.skipped.push(json!({
-            "path": relative, "reason": "file_anchor_unsupported_for_large_file",
-            "continuation": "Large explicit files support line-oriented matching; file-boundary anchors are not reinterpreted as line boundaries.",
+            "path": relative,
+            "reason": "file_anchor_unsupported_for_large_file",
+            "continuation":
+                "Large explicit files support line-oriented matching; file-boundary anchors are \
+                 not reinterpreted as line boundaries.",
         }));
         return Ok(result);
     }

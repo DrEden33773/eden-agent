@@ -403,7 +403,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(reply.items.iter().any(
-            |item| matches!(item, Item::ToolCall{arguments,..} if arguments == "{\"path\":\"x\"}")
+            |item| matches!(item, Item::ToolCall { arguments, .. } if arguments == "{\"path\":\"x\"}")
         ));
         let input = serde_json::from_value(json!({ "items": reply.items, "tools": [] })).unwrap();
         let body = project(&input, &target()).unwrap();
@@ -522,7 +522,7 @@ mod tests {
             .consume(json!({ "type": "eden.done" }))
             .unwrap()
             .unwrap();
-        assert!(reply.items.iter().any(|item| matches!(item,Item::ToolCall{name,arguments,..} if name == "read" && arguments == "{\"x\":1}")));
+        assert!(reply.items.iter().any(|item| matches!(item, Item::ToolCall { name, arguments, .. } if name == "read" && arguments == "{\"x\":1}")));
         assert!(decoder.consume(json!({ "type": "eden.done" })).is_err());
     }
 

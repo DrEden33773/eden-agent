@@ -186,7 +186,8 @@ async fn google_headers(
         }
         if contains_executable(&json) {
             return Err(fault(if commands_trusted {
-                "Google executable ADC is unsupported because its subprocess cannot be cancelled safely"
+                "Google executable ADC is unsupported because its subprocess cannot be cancelled \
+                 safely"
             } else {
                 "Google executable credentials require command trust"
             }));
@@ -375,7 +376,12 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("eden-cloud-profile-{}", std::process::id()));
         std::fs::create_dir_all(directory.join(".aws")).unwrap();
-        std::fs::write(directory.join(".aws/credentials"), "[fixture]\naws_access_key_id = fixture-access\naws_secret_access_key = fixture-secret\naws_session_token = fixture-session\n").unwrap();
+        std::fs::write(
+            directory.join(".aws/credentials"),
+            "[fixture]\naws_access_key_id = fixture-access\naws_secret_access_key = \
+             fixture-secret\naws_session_token = fixture-session\n",
+        )
+        .unwrap();
         std::fs::write(
             directory.join(".aws/config"),
             "[profile fixture]\nregion = eu-west-1\n",
@@ -428,10 +434,16 @@ mod tests {
             let config = if web {
                 "[profile fixture]\nregion = eu-west-1\n"
             } else {
-                "[profile fixture]\nregion = eu-west-1\nrole_arn = arn:aws:iam::123456789012:role/fixture\nsource_profile = base\n"
+                "[profile fixture]\nregion = eu-west-1\nrole_arn = \
+                 arn:aws:iam::123456789012:role/fixture\nsource_profile = base\n"
             };
             std::fs::write(directory.join("config"), config).unwrap();
-            std::fs::write(directory.join("credentials"),"[base]\naws_access_key_id = source-access\naws_secret_access_key = source-secret\n").unwrap();
+            std::fs::write(
+                directory.join("credentials"),
+                "[base]\naws_access_key_id = source-access\naws_secret_access_key = \
+                 source-secret\n",
+            )
+            .unwrap();
             std::fs::write(directory.join("token"), "fixture-web-token").unwrap();
             let server = tokio::spawn(async move {
                 let (mut socket, _) = listener.accept().await.unwrap();
@@ -462,7 +474,17 @@ mod tests {
                 let body = format!(
                     "<{action}Response xmlns=\"https://sts.amazonaws.com/doc/2011-06-15/\"><{action}Result><Credentials><AccessKeyId>fixture-access</AccessKeyId><SecretAccessKey>fixture-secret</SecretAccessKey><SessionToken>fixture-session</SessionToken><Expiration>2099-01-01T00:00:00Z</Expiration></Credentials><AssumedRoleUser><AssumedRoleId>id:fixture</AssumedRoleId><Arn>arn:aws:sts::123456789012:assumed-role/fixture/session</Arn></AssumedRoleUser></{action}Result><ResponseMetadata><RequestId>fixture</RequestId></ResponseMetadata></{action}Response>"
                 );
-                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/xml\r\nContent-Length: \
+                             {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
                 String::from_utf8(bytes).unwrap()
             });
             let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
@@ -558,7 +580,17 @@ mod tests {
                 seen.send(()).unwrap();
                 if !cancel {
                     let body = r#"{"access_token":"fixture-google-token","token_type":"Bearer","expires_in":3600}"#;
-                    socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+                    socket
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: \
+                                 application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                                body.len()
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
                 }
                 socket.read(&mut chunk).await.unwrap()
             });

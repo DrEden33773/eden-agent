@@ -47,13 +47,19 @@ fn tools() -> Vec<ToolDefinition> {
     [
         (
             "powershell",
-            "Run native PowerShell without profiles at the explicit cwd. Waits for process-tree cleanup on completion, cancellation or optional timeout_seconds deadline. Returns separate bounded stream tails and persistent full-output artifacts.",
+            "Run native PowerShell without profiles at the explicit cwd. Waits for process-tree \
+             cleanup on completion, cancellation or optional timeout_seconds deadline. Returns \
+             separate bounded stream tails and persistent full-output artifacts.",
             json!({
                 "type": "object",
                 "properties": {
                     "command": { "type": "string" },
-                    "timeout_seconds": { "type": "number", "exclusiveMinimum": 0,
-                        "description": "Optional positive deadline in seconds; no default timeout." },
+                    "timeout_seconds": {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "description":
+                            "Optional positive deadline in seconds; no default timeout.",
+                    },
                 },
                 "required": ["command"],
                 "additionalProperties": false,
@@ -70,7 +76,8 @@ fn tools() -> Vec<ToolDefinition> {
         ),
         (
             "skill",
-            "Load an available skill on demand. Relative references resolve from its skill directory.",
+            "Load an available skill on demand. Relative references resolve from its skill \
+             directory.",
             json!({
                 "type": "object",
                 "properties": { "name": { "type": "string" }, "arguments": { "type": "string" } },
@@ -80,7 +87,8 @@ fn tools() -> Vec<ToolDefinition> {
         ),
         (
             "read",
-            "Read UTF-8 text or PNG/JPEG/GIF/WebP images. Text uses 1-based offset and line limit; follow details.next_offset/next_byte_offset to continue.",
+            "Read UTF-8 text or PNG/JPEG/GIF/WebP images. Text uses 1-based offset and line \
+             limit; follow details.next_offset/next_byte_offset to continue.",
             json!({
                 "type": "object",
                 "properties": {
@@ -105,7 +113,10 @@ fn tools() -> Vec<ToolDefinition> {
         ),
         (
             "edit",
-            "Apply old_text/new_text or a batch of edits against the original file. All matches must be unique and nonoverlapping. Strict mode normalizes CRLF; tolerant mode additionally normalizes curly quotes, Unicode dashes and trailing spaces/tabs. Preserves BOM and newline style.",
+            "Apply old_text/new_text or a batch of edits against the original file. All matches \
+             must be unique and nonoverlapping. Strict mode normalizes CRLF; tolerant mode \
+             additionally normalizes curly quotes, Unicode dashes and trailing spaces/tabs. \
+             Preserves BOM and newline style.",
             json!({
                 "type": "object",
                 "properties": {
@@ -114,31 +125,47 @@ fn tools() -> Vec<ToolDefinition> {
                     "new_text": { "type": "string" },
                     "mode": { "type": "string", "enum": ["strict", "tolerant"] },
                     "edits": {
-                        "type": "array", "minItems": 1,
+                        "type": "array",
+                        "minItems": 1,
                         "items": {
                             "type": "object",
-                            "properties": { "old_text": { "type": "string" }, "new_text": { "type": "string" } },
-                            "required": ["old_text", "new_text"], "additionalProperties": false,
+                            "properties": {
+                                "old_text": { "type": "string" },
+                                "new_text": { "type": "string" },
+                            },
+                            "required": ["old_text", "new_text"],
+                            "additionalProperties": false,
                         },
                     },
                 },
                 "required": ["path"],
                 "oneOf": [
                     { "required": ["old_text", "new_text"], "not": { "required": ["edits"] } },
-                    { "required": ["edits"], "not": { "anyOf": [{ "required": ["old_text"] }, { "required": ["new_text"] }] } },
+                    {
+                        "required": ["edits"],
+                        "not": {
+                            "anyOf": [{ "required": ["old_text"] }, { "required": ["new_text"] }],
+                        },
+                    },
                 ],
                 "additionalProperties": false,
             }),
         ),
         (
             "bash",
-            "Run bash in the session cwd. Returns separate bounded stream tails, persistent full-output artifacts and the exit code after process-tree cleanup. An optional timeout_seconds deadline stops this command; there is no default timeout.",
+            "Run bash in the session cwd. Returns separate bounded stream tails, persistent \
+             full-output artifacts and the exit code after process-tree cleanup. An optional \
+             timeout_seconds deadline stops this command; there is no default timeout.",
             json!({
                 "type": "object",
                 "properties": {
                     "command": { "type": "string" },
-                    "timeout_seconds": { "type": "number", "exclusiveMinimum": 0,
-                        "description": "Optional positive deadline in seconds; no default timeout." },
+                    "timeout_seconds": {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "description":
+                            "Optional positive deadline in seconds; no default timeout.",
+                    },
                 },
                 "required": ["command"],
                 "additionalProperties": false,
@@ -544,10 +571,8 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
                                     return Err(Fault::new(
                                         "InvalidInput",
                                         "before-tool",
-                                        concat!(
-                                            "hooks may change tool name and arguments, ",
-                                            "but not call identity or cwd",
-                                        ),
+                                        "hooks may change tool name and arguments, but not call \
+                                         identity or cwd",
                                     ));
                                 }
                                 append(
@@ -593,12 +618,8 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
                             "PersistenceFailure",
                             "coding-loop",
                             format!(
-                                // Keep this split: a single literal makes rustfmt skip the enclosing statement.
-                                concat!(
-                                    "Tool call {call_id}: external side effects may already have ",
-                                    "occurred; result commit failed: {error}",
-                                ),
-                                call_id = call_id,
+                                "Tool call {call_id}: external side effects may already have \
+                                 occurred; result commit failed: {error}",
                                 error = error
                             ),
                         )

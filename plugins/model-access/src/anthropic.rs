@@ -43,7 +43,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(
-            matches!(&reply.items[0], Item::ToolCall {arguments,..} if arguments == "{\"a\":1}")
+            matches!(&reply.items[0], Item::ToolCall { arguments, .. } if arguments == "{\"a\":1}")
         );
     }
 }

@@ -25,7 +25,6 @@ fn a_long_direct_format_string_preserves_its_literal_and_capture() {
     let message = format!("{}{{name}}", "A diagnostic with useful context. ".repeat(6));
     let literal = format!("{message:?}");
     let source = format!("fn f(name: &str) {{ let message=format!({literal}); }}\n");
-    assert!(eden_fmt::engine::check_source(&source).is_empty());
     let formatted = assert_idempotent(&source);
     let file = syn::parse_file(&formatted).expect("formatted Rust");
     let syn::Item::Fn(function) = &file.items[0] else {
@@ -40,7 +39,7 @@ fn a_long_direct_format_string_preserves_its_literal_and_capture() {
     assert!(call.mac.path.is_ident("format"));
     let argument: syn::LitStr = syn::parse2(call.mac.tokens.clone()).expect("one direct literal");
     assert_eq!(argument.value(), message);
-    assert!(formatted.lines().any(|line| line.chars().count() > 100));
+    assert!(formatted.contains("\\\n"));
     assert!(formatted.contains("let message = format!("));
 }
 
@@ -50,10 +49,9 @@ fn a_long_json_string_preserves_its_value_while_the_body_is_formatted() {
     let literal = format!("{message:?}");
     let source =
         format!("fn f() {{ let value=json!({{\"description\":{literal},\"required\":true}}); }}\n");
-    assert!(eden_fmt::engine::check_source(&source).is_empty());
     let formatted = assert_idempotent(&source);
-    assert!(formatted.contains(&literal));
-    assert!(formatted.lines().any(|line| line.chars().count() > 100));
+    assert!(formatted.contains("A description with useful context."));
+    assert!(formatted.contains("\\\n"));
     assert!(formatted.contains("\"required\": true"));
 }
 
@@ -63,13 +61,8 @@ fn objects_collapse_when_they_fit_and_expand_when_they_do_not() {
         assert_idempotent("fn f() {\n    let v = json!({\"a\":1,\"b\":{\"c\":2}});\n}\n"),
         "fn f() {\n    let v = json!({ \"a\": 1, \"b\": { \"c\": 2 } });\n}\n"
     );
-    let long = assert_idempotent(
-        "fn f() {\n    let v = json!({\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},\"required\":[\"command\"],\"additionalProperties\":false});\n}\n",
-    );
-    assert_eq!(
-        long,
-        "fn f() {\n    let v = json!({\n        \"type\": \"object\",\n        \"properties\": { \"command\": { \"type\": \"string\" } },\n        \"required\": [\"command\"],\n        \"additionalProperties\": false,\n    });\n}\n"
-    );
+    let long = assert_idempotent(include_str!("fixtures/f-1.rs.txt"));
+    assert_eq!(long, include_str!("fixtures/f-2.rs.txt"));
 }
 
 #[test]
@@ -135,7 +128,8 @@ fn utf8_and_raw_strings_survive() {
 
 #[test]
 fn comments_inside_a_macro_body_stay_where_they_were() {
-    let source = "async fn f() {\n    tokio::select! {\n        biased;\n        // why\n        _ = cancel.cancelled() => value,\n    }\n}\n";
+    let source = "async fn f() {\n    tokio::select! {\n        biased;\n        // why\n        \
+                  _ = cancel.cancelled() => value,\n    }\n}\n";
     let formatted = assert_idempotent(source);
     assert!(formatted.contains("// why"), "{formatted}");
     let inside = assert_idempotent("fn f() {\n    let v = json!({\"a\": /* why */ 1});\n}\n");
@@ -206,7 +200,7 @@ fn a_literal_that_spans_lines_is_refused_rather_than_rewritten() {
 }
 #[test]
 fn select_bodies_are_rebuilt_from_the_tokio_grammar() {
-    let source = "async fn f() {\n    tokio::select! {\n    biased;\n    _=cancel.cancelled()=>return Err(Fault::new(\"Cancelled\",\n    \"composition\")),\n    _=std::future::ready(())=>{\n\n    }\n    }\n}\n";
+    let source = include_str!("fixtures/select_bodies_are_rebuilt_from_the_tokio_grammar-1.rs.txt");
     let formatted = assert_idempotent(source);
     assert!(formatted.contains("biased;"), "{formatted}");
     assert!(
@@ -221,7 +215,8 @@ fn select_bodies_are_rebuilt_from_the_tokio_grammar() {
 
 #[test]
 fn select_arms_without_commas_keep_their_block_handlers() {
-    let source = "async fn f() {\n    tokio::select! {\n        _ = cancel.cancelled() => {\n            tree.terminate();\n        }\n        _ = std::future::ready(()) => {}\n    }\n}\n";
+    let source =
+        include_str!("fixtures/select_arms_without_commas_keep_their_block_handlers-1.rs.txt");
     let formatted = assert_idempotent(source);
     assert!(
         formatted.contains("=> {\n            tree.terminate();\n        }"),
@@ -231,7 +226,7 @@ fn select_arms_without_commas_keep_their_block_handlers() {
 
 #[test]
 fn select_guards_and_else_are_part_of_the_grammar() {
-    let source = "async fn f() {\n    tokio::select! {\n        biased;\n        Some(x) = rx.recv() => handle(x),\n        _ = other(), if ready && armed => ok(),\n        else => fallback(),\n    }\n}\n";
+    let source = include_str!("fixtures/select_guards_and_else_are_part_of_the_grammar-1.rs.txt");
     let formatted = assert_idempotent(source);
     assert!(
         formatted.contains("Some(x) = rx.recv() => handle(x),"),
@@ -246,7 +241,9 @@ fn select_guards_and_else_are_part_of_the_grammar() {
 
 #[test]
 fn a_json_object_inside_a_select_handler_is_lowered_once_with_it() {
-    let source = "async fn f() {\n    tokio::select! {\n        biased;\n        _ = cancel.cancelled() => Err(Fault::new(\"Cancelled\", json!({\"endpoint\":\"model-access\"}))),\n        reply = request() => reply,\n    }\n}\n";
+    let source = include_str!(
+        "fixtures/a_json_object_inside_a_select_handler_is_lowered_once_with_it-1.rs.txt"
+    );
     let formatted = assert_idempotent(source);
     assert!(
         formatted.contains("json!({ \"endpoint\": \"model-access\" })"),

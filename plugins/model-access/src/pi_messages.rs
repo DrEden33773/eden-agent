@@ -415,7 +415,7 @@ mod tests {
             }))
             .unwrap()
             .unwrap();
-        assert!(matches!(&reply.items[1], Item::ToolCall{call_id,..} if call_id=="c"));
+        assert!(matches!(&reply.items[1], Item::ToolCall { call_id, .. } if call_id == "c"));
         assert!(
             serde_json::to_string(&reply.items[0])
                 .unwrap()

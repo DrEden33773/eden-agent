@@ -65,7 +65,17 @@ async fn request(stream: &mut tokio::net::TcpStream) -> String {
 }
 async fn reply(stream: &mut tokio::net::TcpStream, value: Value) {
     let body = value.to_string();
-    stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+    stream
+        .write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \
+                 {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
     stream.shutdown().await.unwrap();
 }
 #[tokio::test]

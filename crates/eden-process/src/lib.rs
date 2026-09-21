@@ -110,7 +110,8 @@ pub async fn spawn(shell: &str, args: &[&str], cwd: &Path) -> Result<(Child, Tre
         fault(
             "ShellUnavailable",
             format!(
-                "cannot launch shell executable {shell:?}: {error}; configure coding-tools.bash or coding-tools.powershell with its executable path"
+                "cannot launch shell executable {shell:?}: {error}; configure coding-tools.bash \
+                 or coding-tools.powershell with its executable path"
             ),
         )
     })?;

@@ -99,7 +99,8 @@ pub(crate) async fn prepare(
                 if actual_destination.starts_with(&path) {
                     return Err(error(
                         "InvalidInput",
-                        "package source contains its staging destination; choose a separate global directory",
+                        "package source contains its staging destination; choose a separate \
+                         global directory",
                     ));
                 }
                 files::copy(&path, destination, cancel)?;

@@ -2,7 +2,6 @@
 
 use crate::edit::{LineIndex, advance_column, has_comment};
 use crate::json;
-use crate::lint;
 use crate::scan::{self, MacroCall};
 use crate::select;
 use proc_macro2::{Delimiter, Group, LineColumn, TokenStream, TokenTree};
@@ -21,9 +20,7 @@ pub struct Options {
     pub edition: String,
     pub style_edition: String,
     pub max_width: usize,
-    pub rustfmt: String,
     pub jobs: usize,
-    pub verify: bool,
 }
 
 impl Default for Options {
@@ -32,9 +29,7 @@ impl Default for Options {
             edition: "2024".to_string(),
             style_edition: "2024".to_string(),
             max_width: 100,
-            rustfmt: "rustfmt".to_string(),
             jobs: 1,
-            verify: true,
         }
     }
 }
@@ -101,7 +96,8 @@ impl fmt::Display for Error {
             Error::Verification { line, message } => {
                 write!(
                     formatter,
-                    "{line}: formatting is not a fixed point: {message}"
+                    "{line}: unsafe formatter output: {message}; use a raw literal, meaningful \
+                     concat! groups, or a fixture while preserving the value"
                 )
             }
         }
@@ -128,6 +124,7 @@ const ROUNDS: usize = 8;
 /// a fixed point of both rustfmt and this formatter, and refuses to answer when
 /// it never is.
 pub fn format_source(source: &str, options: &Options) -> Result<String, Error> {
+    validate(source)?;
     let mut current = source.to_string();
     for _ in 0..ROUNDS {
         let baseline = rustfmt(&current, options)?;
@@ -139,16 +136,7 @@ pub fn format_source(source: &str, options: &Options) -> Result<String, Error> {
         // is what makes the answer stable for `cargo fmt` as well.
         let spliced = splice(&baseline, &lifted, &macros, &pieces)?;
         let next = rustfmt(&spliced, options)?;
-        // The first round's rustfmt already re-indented any opaque body the
-        // input carried, so the comparison starts at the input rather than at
-        // the splice: a literal's text is one token and rustfmt never rewrites
-        // one on purpose.
-        if words(&current)? != words(&next)? {
-            return Err(Error::Verification {
-                line: 1,
-                message: "rustfmt changed a literal or a name inside a macro body".to_string(),
-            });
-        }
+        verify_values(&current, &next)?;
         if next == current {
             return Ok(next);
         }
@@ -251,25 +239,138 @@ pub fn lift_pieces(
     Ok((lifter.out, outermost(lifter.pieces)))
 }
 
-/// Every identifier and literal a text contains, in source order.
-///
-/// Whitespace and separators are dropped, so a re-indented or re-commaed text
-/// compares equal while a changed literal does not.
+/// Decode literals in value contexts; opaque macros retain their token spelling.
+/// Nested opaque macros stay protected even inside a known value macro.
 fn words(text: &str) -> Result<Vec<String>, Error> {
-    fn walk(tokens: TokenStream, out: &mut Vec<String>) {
-        for token in tokens {
+    fn walk(tokens: &[TokenTree], exact: bool, out: &mut Vec<String>) -> Result<(), Error> {
+        for (at, token) in tokens.iter().enumerate() {
             match token {
-                TokenTree::Ident(ident) => out.push(ident.to_string()),
-                TokenTree::Literal(literal) => out.push(literal.to_string()),
-                TokenTree::Group(group) => walk(group.stream(), out),
+                TokenTree::Ident(ident) => out.push(format!("ident:{ident}")),
+                TokenTree::Literal(literal) => {
+                    let spelling = literal.to_string();
+                    let value = syn::parse_str::<syn::Lit>(&spelling)
+                        .map_err(|error| Error::Tokens(error.to_string()))?;
+                    let word = match value {
+                        syn::Lit::Str(value) if !exact => format!("str:{:?}", value.value()),
+                        syn::Lit::ByteStr(value) if !exact => format!("bytes:{:?}", value.value()),
+                        syn::Lit::CStr(value) if !exact => format!("cstr:{:?}", value.value()),
+                        _ => format!("literal:{spelling}"),
+                    };
+                    out.push(word);
+                }
+                TokenTree::Group(group) => {
+                    let macro_name = at.checked_sub(1).and_then(|i| {
+                        if scan::is_punct(&tokens[i], '!') {
+                            i.checked_sub(1).and_then(|j| match &tokens[j] {
+                                TokenTree::Ident(name) => Some(name.to_string()),
+                                _ => None,
+                            })
+                        } else {
+                            None
+                        }
+                    });
+                    // macro_rules! has an identifier between ! and its group.
+                    let definition = at >= 3
+                        && matches!(&tokens[at - 3], TokenTree::Ident(name) if name == "macro_rules");
+                    let opaque = macro_name.is_some_and(|name| {
+                        !matches!(
+                            name.as_str(),
+                            "json"
+                                | "select"
+                                | "format"
+                                | "format_args"
+                                | "println"
+                                | "print"
+                                | "eprintln"
+                                | "eprint"
+                                | "write"
+                                | "writeln"
+                                | "panic"
+                                | "assert"
+                                | "assert_eq"
+                                | "assert_ne"
+                                | "debug_assert"
+                                | "debug_assert_eq"
+                                | "debug_assert_ne"
+                                | "vec"
+                                | "concat"
+                                | "matches"
+                        )
+                    });
+                    let attribute = group.delimiter() == Delimiter::Bracket
+                        && (at > 0 && scan::is_punct(&tokens[at - 1], '#')
+                            || at > 1
+                                && scan::is_punct(&tokens[at - 1], '!')
+                                && scan::is_punct(&tokens[at - 2], '#'));
+                    walk(
+                        &group.stream().into_iter().collect::<Vec<_>>(),
+                        exact || opaque || definition || attribute,
+                        out,
+                    )?;
+                }
                 TokenTree::Punct(_) => {}
             }
         }
+        Ok(())
     }
-    let stream = TokenStream::from_str(text).map_err(|error| Error::Tokens(error.to_string()))?;
+    let tokens = tokenize(text)?;
     let mut out = Vec::new();
-    walk(stream, &mut out);
+    walk(&tokens, false, &mut out)?;
     Ok(out)
+}
+
+fn validate(text: &str) -> Result<(), Error> {
+    syn::parse_file(text).map_err(|error| Error::Verification {
+        line: error.span().start().line,
+        message: format!("invalid Rust syntax: {error}"),
+    })?;
+    // syn leaves macro bodies opaque; validate their literal escapes too.
+    words(text).map_err(|error| Error::Verification {
+        line: 1,
+        message: format!("invalid literal: {error}"),
+    })?;
+    Ok(())
+}
+
+fn verify_values(before: &str, after: &str) -> Result<(), Error> {
+    validate(after)?;
+    if words(before)? != words(after)? {
+        return Err(Error::Verification {
+            line: 1,
+            message: "a literal value, identifier, or protected macro literal spelling changed"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Official formatter version shared with setup and CI; the compiler stays stable.
+pub const FORMATTER_TOOLCHAIN: &str = include_str!("../../../rustfmt-toolchain");
+
+fn formatter() -> Result<&'static str, Error> {
+    static PATH: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        let output = Command::new("rustup")
+            .args([
+                "which",
+                "--toolchain",
+                FORMATTER_TOOLCHAIN.trim(),
+                "rustfmt",
+            ])
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            return Err(format!(
+                "install the official formatter with `rustup toolchain install {} --profile \
+                 minimal --component rustfmt`: {}",
+                FORMATTER_TOOLCHAIN.trim(),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    })
+    .as_deref()
+    .map_err(|message| Error::Rustfmt(message.to_string()))
 }
 
 pub(crate) fn tokenize(source: &str) -> Result<Vec<TokenTree>, Error> {
@@ -279,12 +380,14 @@ pub(crate) fn tokenize(source: &str) -> Result<Vec<TokenTree>, Error> {
 }
 
 pub(crate) fn rustfmt(text: &str, options: &Options) -> Result<String, Error> {
-    let mut child = Command::new(&options.rustfmt)
+    let mut child = Command::new(formatter()?)
+        .arg("--unstable-features")
         .arg("--edition")
         .arg(&options.edition)
         .arg("--config")
         .arg(format!(
-            "style_edition={},max_width={}",
+            "style_edition={},max_width={},unstable_features=true,format_strings=true,\
+             skip_children=true",
             options.style_edition, options.max_width
         ))
         .arg("--emit")
@@ -303,7 +406,10 @@ pub(crate) fn rustfmt(text: &str, options: &Options) -> Result<String, Error> {
             String::from_utf8_lossy(&output.stderr).trim().to_string(),
         ));
     }
-    String::from_utf8(output.stdout).map_err(|error| Error::Tokens(error.to_string()))
+    let formatted =
+        String::from_utf8(output.stdout).map_err(|error| Error::Tokens(error.to_string()))?;
+    verify_values(text, &formatted)?;
+    Ok(formatted)
 }
 
 /// Delimiters of a macro body, as text.
@@ -789,84 +895,19 @@ pub enum Mode {
 pub struct Outcome {
     pub changed: Vec<PathBuf>,
     pub failed: Vec<(PathBuf, Error)>,
-    /// Every style violation found, in source order.
-    pub style: Vec<(PathBuf, Violation)>,
 }
 
-/// Format one file's text, verifying the result is a fixed point before writing.
-///
-/// The style rule comes first: a literal that still carries a backslash
-/// continuation refuses the file, and nothing is written on that path, which is
-/// what keeps the rule a check rather than an edit. `run` reports every
-/// violation through `check_source` before it gets here.
+/// Format one file, writing only after syntax, values and convergence pass.
 pub fn format_file(path: &Path, options: &Options, write: bool) -> Result<bool, Error> {
     let source = std::fs::read_to_string(path)?;
-    if let Some(first) = check_source(&source).first() {
-        return Err(Error::Grammar {
-            line: first.line,
-            column: first.column,
-            message: "string literal still uses a backslash continuation".to_string(),
-        });
-    }
     let formatted = format_source(&source, options)?;
     if formatted == source {
         return Ok(false);
-    }
-    if options.verify {
-        let again = format_source(&formatted, options)?;
-        if again != formatted {
-            return Err(Error::Verification {
-                line: first_difference(&formatted, &again),
-                message: "re-formatting the result changes it again".to_string(),
-            });
-        }
     }
     if write {
         std::fs::write(path, &formatted)?;
     }
     Ok(true)
-}
-
-/// First line whose text differs, for a diagnostic about two revisions.
-fn first_difference(before: &str, after: &str) -> usize {
-    before
-        .lines()
-        .zip(after.lines())
-        .position(|(left, right)| left != right)
-        .map_or(1, |line| line + 1)
-}
-
-/// Every literal in a source that still carries a backslash line continuation.
-///
-/// This is the one rule no formatter can enforce by rewriting: rustfmt never
-/// touches a literal and neither does `eden-fmt`, so a continuation is silent in
-/// both `cargo fmt --check` and `eden-fmt check` until it is reported here.
-pub fn check_source(source: &str) -> Vec<Violation> {
-    let index = LineIndex::new(source);
-    lint::violations(source)
-        .into_iter()
-        .map(|violation| Violation {
-            line: index.line(violation.offset),
-            column: index.column(violation.offset) + 1,
-            opening: violation.opening,
-        })
-        .collect()
-}
-
-/// What the style rule found in one file.
-// Fields and variants state themselves; see docs/development-checks.md#doc-comments.
-#[allow(missing_docs)]
-pub struct Violation {
-    pub line: usize,
-    pub column: usize,
-    pub opening: String,
-}
-
-impl Violation {
-    /// The position, as `file:line:column` callers expect.
-    pub fn position(&self, path: &Path) -> String {
-        format!("{}:{}:{}", path.display(), self.line, self.column)
-    }
 }
 
 /// Every `.rs` file under the given paths, in a stable order.
@@ -1055,25 +1096,8 @@ fn is_skipped(name: &str) -> bool {
 
 /// Format every file, reporting failures instead of stopping at the first one.
 ///
-/// The style rule is collected for every file before formatting starts, so one
-/// run names every continuation in the tree instead of the first one per file.
 pub fn run(files: &[PathBuf], mode: &Mode, options: &Options) -> Outcome {
     let write = matches!(mode, Mode::Write);
-    let mut style: Vec<(PathBuf, Violation)> = Vec::new();
-    for path in files {
-        let Ok(source) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        for violation in check_source(&source) {
-            style.push((path.clone(), violation));
-        }
-    }
-    style.sort_by(|left, right| {
-        left.0
-            .cmp(&right.0)
-            .then(left.1.line.cmp(&right.1.line))
-            .then(left.1.column.cmp(&right.1.column))
-    });
     let results: std::sync::Mutex<Vec<(PathBuf, Result<bool, Error>)>> =
         std::sync::Mutex::new(Vec::new());
     let next = std::sync::atomic::AtomicUsize::new(0);
@@ -1084,13 +1108,7 @@ pub fn run(files: &[PathBuf], mode: &Mode, options: &Options) -> Outcome {
                 loop {
                     let index = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let Some(path) = files.get(index) else { break };
-                    // A file with a style violation is already reported as one;
-                    // formatting it would only add a second, poorer diagnostic.
-                    let result = if style.iter().any(|(other, _)| other == path) {
-                        Ok(false)
-                    } else {
-                        format_file(path, options, write)
-                    };
+                    let result = format_file(path, options, write);
                     results
                         .lock()
                         .expect("results lock")
@@ -1110,9 +1128,38 @@ pub fn run(files: &[PathBuf], mode: &Mode, options: &Options) -> Outcome {
     }
     changed.sort();
     failed.sort_by(|left, right| left.0.cmp(&right.0));
-    Outcome {
-        changed,
-        failed,
-        style,
+    Outcome { changed, failed }
+}
+
+#[cfg(test)]
+mod verification_tests {
+    use super::verify_values;
+
+    #[test]
+    fn value_changes_are_rejected_even_when_output_is_valid_rust() {
+        assert!(verify_values("fn f(){let s=\"one two\";}", "fn f(){let s=\"onetwo\";}").is_err());
+    }
+
+    #[test]
+    fn spelling_changes_are_allowed_only_in_value_contexts() {
+        assert!(verify_values(r#"fn f(){let s="a";}"#, r#"fn f(){let s="\x61";}"#).is_ok());
+        for (before, after) in [
+            (r#"fn f(){opaque!("a");}"#, r#"fn f(){opaque!("\x61");}"#),
+            (
+                r#"#[opaque("a")] fn f(){}"#,
+                r#"#[opaque("\x61")] fn f(){}"#,
+            ),
+            (
+                r#"macro_rules! f { () => {"a"} }"#,
+                r#"macro_rules! f { () => {"\x61"} }"#,
+            ),
+        ] {
+            assert!(verify_values(before, after).is_err());
+        }
+    }
+
+    #[test]
+    fn invalid_macro_literal_output_is_rejected() {
+        assert!(verify_values(r#"fn f(){opaque!("a");}"#, r#"fn f(){opaque!("\q");}"#).is_err());
     }
 }

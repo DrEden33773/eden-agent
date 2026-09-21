@@ -121,7 +121,8 @@ pub(crate) fn endpoint(
                     .filter(|s| !s.is_empty())
                     .ok_or_else(|| failure("Vertex ADC requires location configuration"))?;
                 format!(
-                    "projects/{project}/locations/{location}/publishers/google/models/{}:streamGenerateContent",
+                    "projects/{project}/locations/{location}/publishers/google/models/{}:\
+                     streamGenerateContent",
                     target.model
                 )
             }

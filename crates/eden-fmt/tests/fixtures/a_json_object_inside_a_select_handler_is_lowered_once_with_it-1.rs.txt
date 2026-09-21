@@ -1,0 +1,7 @@
+async fn f() {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(Fault::new("Cancelled", json!({"endpoint":"model-access"}))),
+        reply = request() => reply,
+    }
+}

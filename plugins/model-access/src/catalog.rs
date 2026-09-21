@@ -937,7 +937,8 @@ impl Catalog {
             });
             if entry.is_some_and(|e| e.status == "configuration_required") {
                 return Err(fault(
-                    "selected model requires cloud endpoint, project, location or region configuration",
+                    "selected model requires cloud endpoint, project, location or region \
+                     configuration",
                 ));
             }
             if entry.is_some_and(|e| e.status == "unavailable_for_account") {
@@ -1055,7 +1056,8 @@ mod tests {
                     _ => ("200 OK", "broken"),
                 };
                 let response = format!(
-                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nETag: fixture\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nETag: fixture\r\nConnection: \
+                     close\r\n\r\n{body}",
                     body.len()
                 );
                 stream.write_all(response.as_bytes()).await.unwrap();
@@ -1124,7 +1126,17 @@ mod tests {
                 }
                 let body =
                     r#"[{"id":"late","api":"openai-responses","baseUrl":"http://localhost"}]"#;
-                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: \
+                             close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
             }
         });
         let catalog = Arc::new(fixture(source, None));

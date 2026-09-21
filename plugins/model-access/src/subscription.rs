@@ -222,7 +222,8 @@ mod transport_tests {
                 }
             }
             let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{events}",
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: \
+                 {}\r\nConnection: close\r\n\r\n{events}",
                 events.len()
             );
             socket.write_all(response.as_bytes()).await.unwrap();
@@ -253,7 +254,7 @@ mod transport_tests {
     }
     #[tokio::test]
     async fn codex_distinct_endpoint_body_and_private_account_header_reach_server() {
-        let (base,server)=server("data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"EDEN_G3_OK\"}]}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n").await;
+        let (base, server) = server(include_str!("fixtures/subscription-1.txt")).await;
         let mut target = projection::test_target("openai-codex-responses");
         target.base_url = format!("{base}/backend-api");
         target.provider = "openai-codex".into();
@@ -266,7 +267,7 @@ mod transport_tests {
             .await
             .unwrap();
         assert!(
-            matches!(&reply.items[0], Item::Message{content,..} if content == &vec![Block::Text{text:"EDEN_G3_OK".into()}])
+            matches!(&reply.items[0], Item::Message { content, .. } if content == &vec![Block::Text { text:"EDEN_G3_OK".into() }])
         );
         assert_eq!(reply.usage["raw"]["input_tokens"], 2);
         let request = server.await.unwrap();
@@ -279,7 +280,7 @@ mod transport_tests {
     }
     #[tokio::test]
     async fn radius_requires_terminal_and_uses_messages_not_anthropic_endpoint() {
-        let (base,server)=server("data: {\"type\":\"text_start\",\"contentIndex\":0}\n\ndata: {\"type\":\"text_delta\",\"contentIndex\":0,\"delta\":\"hello\"}\n\n").await;
+        let (base, server) = server(include_str!("fixtures/subscription-2.txt")).await;
         let mut target = projection::test_target("pi-messages");
         target.base_url = format!("{base}/v1");
         target.provider = "radius".into();
@@ -295,7 +296,7 @@ mod transport_tests {
     #[tokio::test]
     async fn copilot_anthropic_uses_bearer_and_agent_header() {
         for provider in ["github-copilot", "anthropic", "kimi-coding"] {
-            let (base,server)=server("data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":0}}\n\ndata: {\"type\":\"message_stop\"}\n\n").await;
+            let (base, server) = server(include_str!("fixtures/subscription-3.txt")).await;
             let mut target = projection::test_target("anthropic-messages");
             target.base_url = base;
             target.provider = provider.into();
@@ -477,7 +478,17 @@ mod policy_tests {
                         })
                         .to_string()
                     };
-                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \
+                             {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
             }
         });
         let ids = copilot_account_models(

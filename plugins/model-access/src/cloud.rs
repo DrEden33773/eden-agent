@@ -64,6 +64,9 @@ pub(crate) async fn resolve(
     }
     if purpose == "catalog" {
         return Ok(Some(CredentialReply {
+            base_url: None,
+            available_model_ids: None,
+            catalog_scope: None,
             api_key: None,
             headers: BTreeMap::new(),
             source: "cloud_configured".into(),
@@ -255,6 +258,9 @@ async fn google_headers(
         })
         .collect::<Result<_, Fault>>()?;
     Ok(Some(CredentialReply {
+        base_url: None,
+        available_model_ids: None,
+        catalog_scope: None,
         api_key: None,
         headers,
         source: "google_adc".into(),
@@ -274,6 +280,9 @@ fn aws_reply(credentials: &Credentials) -> CredentialReply {
         "session_token": credentials.session_token(),
     });
     CredentialReply {
+        base_url: None,
+        available_model_ids: None,
+        catalog_scope: None,
         api_key: None,
         headers: BTreeMap::from([(AWS_PRIVATE_HEADER.into(), value.to_string())]),
         source: "aws_chain".into(),

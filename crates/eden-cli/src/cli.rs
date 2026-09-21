@@ -470,8 +470,22 @@ pub enum ModelAction {
 #[derive(Debug, Subcommand)]
 #[allow(missing_docs)]
 pub enum AuthAction {
-    Set { provider: String },
-    Logout { provider: String },
+    Login {
+        provider: String,
+        #[arg(long, value_parser = ["browser", "device"])]
+        method: Option<String>,
+    },
+    Refresh {
+        provider: String,
+    },
+    Set {
+        provider: String,
+    },
+    Logout {
+        provider: String,
+    },
+    #[command(hide = true)]
+    ReadInput,
 }
 
 /// What the probe pass reads before the authoritative parse.

@@ -132,12 +132,39 @@ pub struct CredentialReply {
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
     pub source: String,
+    /// Authentication may bind an account to a private inference endpoint.
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Subscription policy can restrict an otherwise discoverable catalog.
+    #[serde(default)]
+    pub available_model_ids: Option<Vec<String>>,
+    /// Opaque account scope separates private dynamic catalog caches across logins.
+    #[serde(default)]
+    pub catalog_scope: Option<String>,
 }
 /// Input may contain a key, so this request is private and deliberately lacks Debug.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 #[allow(missing_docs)]
 pub enum AuthRequest {
+    /// Start a provider login; method is browser or device (provider default when absent).
+    Login {
+        provider: String,
+        method: Option<String>,
+    },
+    /// Drive callback or device polling until completion; scope cancellation closes its I/O.
+    Wait {
+        operation_id: String,
+    },
+    /// Supply a browser authorization code or redirect through the private contract.
+    Submit {
+        operation_id: String,
+        input: String,
+    },
+    /// Refresh a managed credential without returning it to the caller.
+    Refresh {
+        provider: String,
+    },
     Start {
         provider: String,
     },
@@ -163,5 +190,18 @@ pub struct AuthReply {
     pub provider: String,
     pub status: String,
     pub challenge: Option<String>,
+    /// User-facing login information, never a device secret, token or PKCE verifier.
+    #[serde(default)]
+    pub interaction: Option<AuthInteraction>,
     pub source: Option<String>,
+}
+
+/// Only transient login UI should display these values; do not persist them in history.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct AuthInteraction {
+    pub url: String,
+    pub user_code: Option<String>,
+    pub manual_input: bool,
+    pub expires_at: u64,
 }

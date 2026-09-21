@@ -374,3 +374,166 @@ pub(crate) fn incomplete(response: &Value, input: &ModelInput, options: &Request
         "Responses output is incomplete",
     )
 }
+
+/// Codex may send complete items only in output_item.done, followed by an empty
+/// terminal output array. Retain those items without making tools executable.
+#[derive(Default)]
+pub(crate) struct ResponseOutput {
+    done: std::collections::BTreeMap<u64, Value>,
+    pending: std::collections::BTreeSet<u64>,
+}
+impl ResponseOutput {
+    pub(crate) fn observe(&mut self, event: &Value) -> Result<(), Fault> {
+        match event["type"].as_str() {
+            Some("response.output_item.added") => {
+                let index = event["output_index"]
+                    .as_u64()
+                    .ok_or_else(|| failure("response item missing output index"))?;
+                self.pending.insert(index);
+            }
+            Some("response.output_item.done") => {
+                let index = event["output_index"]
+                    .as_u64()
+                    .ok_or_else(|| failure("response item missing output index"))?;
+                if !event["item"].is_object() {
+                    return Err(failure("response item is not an object"));
+                }
+                if self.done.insert(index, event["item"].clone()).is_some() {
+                    return Err(failure("duplicate completed response item"));
+                }
+                self.pending.remove(&index);
+            }
+            Some(kind) if kind.ends_with(".delta") => {
+                if let Some(index) = event["output_index"].as_u64() {
+                    self.pending.insert(index);
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    pub(crate) fn complete(&self, response: &Value, profile: Profile) -> Result<ModelReply, Fault> {
+        let mut output = self.done.clone();
+        let mut pending = self.pending.clone();
+        if let Some(items) = response.get("output") {
+            let items = items
+                .as_array()
+                .ok_or_else(|| failure("response output is not an array"))?;
+            for (index, item) in items.iter().enumerate() {
+                let index = index as u64;
+                pending.remove(&index);
+                if let Some(saved) = output.get_mut(&index) {
+                    if saved["id"].is_string()
+                        && item["id"].is_string()
+                        && saved["id"] != item["id"]
+                    {
+                        return Err(failure("terminal response item identity changed"));
+                    }
+                    let fields = item
+                        .as_object()
+                        .ok_or_else(|| failure("terminal response item is not an object"))?;
+                    let saved = saved
+                        .as_object_mut()
+                        .ok_or_else(|| failure("response item is not an object"))?;
+                    saved.extend(fields.clone());
+                } else {
+                    output.insert(index, item.clone());
+                }
+            }
+        }
+        if !pending.is_empty()
+            || output
+                .keys()
+                .enumerate()
+                .any(|(index, key)| index as u64 != *key)
+        {
+            return Err(failure("response contains unfinished output items"));
+        }
+        let mut response = response.clone();
+        response["output"] = json!(output.into_values().collect::<Vec<_>>());
+        completed(&response, profile)
+    }
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+    #[test]
+    fn completed_items_require_terminal_success_and_complete_arguments() {
+        let mut output = ResponseOutput::default();
+        output
+            .observe(&json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "function_call",
+                    "call_id": "c",
+                    "name": "read",
+                    "arguments": "{",
+                },
+            }))
+            .unwrap();
+        assert!(
+            output
+                .complete(
+                    &json!({ "status": "completed", "output": [] }),
+                    Profile::Openai
+                )
+                .is_err()
+        );
+        assert!(
+            output
+                .complete(
+                    &json!({ "status": "incomplete", "output": [] }),
+                    Profile::Openai
+                )
+                .is_err()
+        );
+    }
+    #[test]
+    fn partial_delta_cannot_become_final_output_and_terminal_backfills_reasoning() {
+        let mut output = ResponseOutput::default();
+        output
+            .observe(&json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": { "type": "message" },
+            }))
+            .unwrap();
+        output
+            .observe(&json!({
+                "type": "response.output_text.delta",
+                "output_index": 0,
+                "delta": "EDEN_G3_OK",
+            }))
+            .unwrap();
+        assert!(
+            output
+                .complete(
+                    &json!({ "status": "completed", "output": [] }),
+                    Profile::Openai
+                )
+                .is_err()
+        );
+        let mut output = ResponseOutput::default();
+        output
+            .observe(&json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": { "id": "r", "type": "reasoning", "summary": [] },
+            }))
+            .unwrap();
+        let reply = output
+            .complete(
+                &json!({
+                    "status": "completed",
+                    "output": [{ "id": "r", "type": "reasoning", "encrypted_content": "signed" }],
+                }),
+                Profile::Openai,
+            )
+            .unwrap();
+        assert!(
+            matches!(&reply.items[0],Item::ProviderState{value,..} if value["encrypted_content"]=="signed" && value["summary"].is_array())
+        );
+    }
+}

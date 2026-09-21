@@ -1,7 +1,8 @@
 //! Model catalogs, private credentials and inference through ordinary native services.
 //!
 //! Catalog-selected targets support OpenAI Responses, Chat Completions and Anthropic
-//! Messages, Gemini, Vertex, Bedrock, Azure Responses and native Mistral Chat; the
+//! Messages, Gemini, Vertex, Bedrock, Azure Responses, native Mistral Chat, Codex,
+//! Copilot and Radius pi-messages; the
 //! legacy configuration retains OpenAI and DeepSeek Responses access.
 //! Catalog and credential services are independently replaceable. Each catalog-selected
 //! inference call consumes a frozen model target and obtains credentials through the private
@@ -26,11 +27,15 @@ mod bedrock;
 mod catalog;
 mod chat;
 mod cloud;
+mod codex_socket;
 mod credentials;
 mod gemini;
 mod mistral;
+mod oauth;
+mod pi_messages;
 mod projection;
 mod routes;
+mod subscription;
 mod targeted;
 mod usage;
 mod wire;

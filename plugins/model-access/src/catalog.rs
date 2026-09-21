@@ -276,6 +276,8 @@ fn supported(api: &str) -> bool {
     matches!(
         api,
         "openai-responses"
+            | "openai-codex-responses"
+            | "pi-messages"
             | "openai-completions"
             | "anthropic-messages"
             | "azure-openai-responses"
@@ -350,7 +352,15 @@ impl Catalog {
         }
         Ok(())
     }
+    #[cfg(test)]
     fn entries(&self, inner: &Inner) -> Result<Vec<CatalogEntry>, Fault> {
+        self.entries_scoped(inner, &BTreeMap::new())
+    }
+    fn entries_scoped(
+        &self,
+        inner: &Inner,
+        scopes: &BTreeMap<String, String>,
+    ) -> Result<Vec<CatalogEntry>, Fault> {
         let bundled: BTreeMap<String, Value> =
             serde_json::from_str(BUNDLED).map_err(|_| fault("invalid bundled catalog"))?;
         let mut models = BTreeMap::new();
@@ -387,6 +397,36 @@ impl Catalog {
                         (provider.clone(), t.model.clone()),
                         (t, v["name"].as_str().unwrap_or("").to_owned()),
                     );
+                }
+            }
+        }
+        for provider in ["radius", "github-copilot"] {
+            let key = format!(
+                "subscription:{provider}:{}:{}",
+                scopes.get(provider).map(String::as_str).unwrap_or("public"),
+                self.subscription_source(provider)
+            );
+            if let Some(cache) = inner.disk.sources.get(&key).and_then(|c| c.get(provider)) {
+                if provider == "github-copilot" {
+                    models.retain(|(p, id), _| {
+                        p != provider || cache.models.iter().any(|m| m["id"] == *id)
+                    });
+                } else {
+                    for v in &cache.models {
+                        let t = target(
+                            provider,
+                            v,
+                            CatalogSource {
+                                kind: "remote".into(),
+                                location: self.subscription_source(provider),
+                                updated_at: Some(cache.updated_at),
+                            },
+                        )?;
+                        models.insert(
+                            (provider.into(), t.model.clone()),
+                            (t, v["name"].as_str().unwrap_or("").into()),
+                        );
+                    }
                 }
             }
         }
@@ -480,6 +520,149 @@ impl Catalog {
                 }
             })
             .collect())
+    }
+    fn subscription_source(&self, provider: &str) -> String {
+        self.config
+            .providers
+            .get(provider)
+            .and_then(|p| p.base_url.clone())
+            .or_else(|| {
+                self.config.routing["credentials"]["oauth"][provider]["gateway"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| {
+                if provider == "radius" {
+                    "https://radius.pi.dev".into()
+                } else {
+                    "https://api.individual.githubcopilot.com".into()
+                }
+            })
+    }
+    async fn refresh_subscriptions(&self, cx: &CallContext) -> Result<bool, Fault> {
+        if self.config.offline {
+            return Ok(true);
+        }
+        let generation = self.inner.lock().await.generation;
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|_| fault("catalog client initialization failed"))?;
+        let mut success = true;
+        for provider in ["radius", "github-copilot"] {
+            let resolved = cx
+                .call::<_, CredentialReply>(
+                    CREDENTIAL_SOURCE,
+                    &CredentialRequest {
+                        provider: provider.into(),
+                        explicit: None,
+                        purpose: "catalog_refresh".into(),
+                    },
+                )
+                .await;
+            let credential = match resolved {
+                Ok(credential) => credential,
+                Err(_) => {
+                    success = false;
+                    continue;
+                }
+            };
+            if credential.api_key.is_none() && credential.headers.is_empty() {
+                continue;
+            }
+            let source = self.subscription_source(provider);
+            let base = if self
+                .config
+                .providers
+                .get(provider)
+                .and_then(|p| p.base_url.as_ref())
+                .is_some()
+            {
+                &source
+            } else {
+                credential.base_url.as_ref().unwrap_or(&source)
+            };
+            validate_source(base)?;
+            let mut url = reqwest::Url::parse(base)
+                .map_err(|_| fault("invalid subscription catalog endpoint"))?;
+            if provider == "radius" {
+                url.set_path("/v1/config");
+            } else {
+                url.set_path(&format!("{}/models", url.path().trim_end_matches('/')));
+            }
+            url.set_query(None);
+            let mut request = client.get(url).header("Accept", "application/json");
+            if provider == "github-copilot" {
+                let target = ModelTarget {
+                    provider: provider.into(),
+                    ..Default::default()
+                };
+                let input = eden_protocol::coding::ModelInput {
+                    target: None,
+                    max_output_tokens: None,
+                    items: vec![],
+                    tools: vec![],
+                };
+                for (name, value) in crate::subscription::headers(&target, &input) {
+                    request = request.header(name, value);
+                }
+            }
+            if let Some(key) = &credential.api_key {
+                request = request.bearer_auth(key);
+            }
+            for (name, value) in &credential.headers {
+                request = request.header(name, value);
+            }
+            let fetch = async {
+                let response = request
+                    .send()
+                    .await
+                    .map_err(|_| fault("subscription catalog request failed"))?;
+                if !response.status().is_success() {
+                    return Err(fault("subscription catalog request rejected"));
+                }
+                let body = response
+                    .json::<Value>()
+                    .await
+                    .map_err(|_| fault("invalid subscription catalog response"))?;
+                if provider == "radius" {
+                    crate::subscription::radius_models(&body)
+                } else {
+                    crate::subscription::copilot_models(&body)
+                }
+            };
+            let cancellation = cx.scope.cancellation();
+            let result = tokio::select! {
+                _ = cancellation.cancelled() => return Err(fault("catalog refresh cancelled")),
+                result = fetch => result,
+            };
+            let Ok(models) = result else {
+                success = false;
+                continue;
+            };
+            let mut inner = self.inner.lock().await;
+            if inner.generation != generation {
+                return Ok(false);
+            }
+            let source = format!(
+                "subscription:{provider}:{}:{source}",
+                crate::subscription::catalog_scope(&credential)
+            );
+            inner.disk.sources.insert(
+                source.clone(),
+                BTreeMap::from([(
+                    provider.into(),
+                    Cached {
+                        models,
+                        etag: None,
+                        updated_at: now(),
+                    },
+                )]),
+            );
+            self.persist(&mut inner, Persist::Cache(source)).await?;
+        }
+        Ok(success)
     }
     async fn refresh(&self, cx: Option<&CallContext>) -> Result<String, Fault> {
         if self.config.offline {
@@ -591,10 +774,32 @@ impl Catalog {
         cx: CallContext,
     ) -> Result<CatalogReply, Fault> {
         let status = if matches!(request, CatalogRequest::Refresh) {
-            self.refresh(Some(&cx)).await?
+            let status = self.refresh(Some(&cx)).await?;
+            if self.refresh_subscriptions(&cx).await? {
+                status
+            } else {
+                "refresh_failed_cached".into()
+            }
         } else {
             "available".into()
         };
+        let mut scopes = BTreeMap::new();
+        for provider in ["radius", "github-copilot"] {
+            let credential: CredentialReply = cx
+                .call(
+                    CREDENTIAL_SOURCE,
+                    &CredentialRequest {
+                        provider: provider.into(),
+                        explicit: None,
+                        purpose: "catalog".into(),
+                    },
+                )
+                .await?;
+            scopes.insert(
+                provider.into(),
+                crate::subscription::catalog_scope(&credential),
+            );
+        }
         let mut inner = self.inner.lock().await;
         if let CatalogRequest::SetSource { url } = &request {
             validate_source(url)?;
@@ -603,7 +808,7 @@ impl Catalog {
             inner.disk.selected_source = Some(url.clone());
             self.persist(&mut inner, Persist::Source).await?;
         }
-        let mut models = self.entries(&inner)?;
+        let mut models = self.entries_scoped(&inner, &scopes)?;
         if let Some(region) = crate::cloud::configured_region(&self.config.routing).await {
             for entry in &mut models {
                 if entry.target.api == "bedrock-converse-stream"
@@ -622,6 +827,7 @@ impl Catalog {
             }
         }
         let mut auth = BTreeMap::new();
+        let mut account_models: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut keyless = std::collections::BTreeSet::new();
         for entry in &mut models {
             if entry.status != "authentication_required" {
@@ -638,6 +844,9 @@ impl Catalog {
                         },
                     )
                     .await?;
+                if let Some(ids) = reply.available_model_ids {
+                    account_models.insert(entry.target.provider.clone(), ids);
+                }
                 if reply.api_key.is_none() && reply.source != "command_configured" {
                     keyless.insert(entry.target.provider.clone());
                 }
@@ -646,9 +855,20 @@ impl Catalog {
                     reply.api_key.is_some()
                         || matches!(
                             reply.source.as_str(),
-                            "command_configured" | "headers_configured" | "cloud_configured"
+                            "command_configured"
+                                | "headers_configured"
+                                | "cloud_configured"
+                                | "oauth_configured"
                         ),
                 );
+            }
+            if account_models
+                .get(&entry.target.provider)
+                .is_some_and(|ids| !ids.contains(&entry.target.model))
+                && entry.target.source.kind != "explicit"
+            {
+                entry.status = "unavailable_for_account".into();
+                continue;
             }
             if auth[&entry.target.provider] {
                 entry.status = if entry.target.api == "google-vertex"
@@ -718,6 +938,13 @@ impl Catalog {
             if entry.is_some_and(|e| e.status == "configuration_required") {
                 return Err(fault(
                     "selected model requires cloud endpoint, project, location or region configuration",
+                ));
+            }
+            if entry.is_some_and(|e| e.status == "unavailable_for_account") {
+                return Err(Fault::new(
+                    "ModelUnavailable",
+                    "model-access",
+                    "selected model is unavailable for the authenticated account",
                 ));
             }
             if entry.is_some_and(|e| e.status == "excluded") {
@@ -1092,7 +1319,8 @@ mod tests {
                 .iter()
                 .any(|e| e.target.provider == "deepseek" && e.target.api == "openai-completions")
         );
-        assert!(entries.iter().any(|e| e.status == "unsupported_protocol"));
+        assert!(entries.iter().all(|e| e.status != "unsupported_protocol"));
+        assert!(!supported("unknown-custom-wire"));
         assert!(
             target(
                 "x",
@@ -1106,5 +1334,100 @@ mod tests {
             )
             .is_err()
         );
+    }
+    #[tokio::test]
+    async fn radius_cache_is_durable_gateway_scoped_and_explicit_models_win() {
+        let path =
+            std::env::temp_dir().join(format!("eden-radius-catalog-{}.json", std::process::id()));
+        let catalog = fixture("https://pi.dev".into(), Some(path.clone()));
+        let gateway = format!(
+            "subscription:radius:public:{}",
+            catalog.subscription_source("radius")
+        );
+        let models = crate::subscription::radius_models(&serde_json::json!({
+            "baseUrl": "https://inference.test/v1",
+            "models": [{
+                "id": "radius-test",
+                "name": "Radius Test",
+                "reasoning": true,
+                "input": ["text"],
+                "cost": {},
+                "contextWindow": 8192,
+                "maxTokens": 1024,
+            }],
+        }))
+        .unwrap();
+        let mut inner = catalog.inner.lock().await;
+        inner.disk.sources.insert(
+            gateway.clone(),
+            BTreeMap::from([(
+                "radius".into(),
+                Cached {
+                    models,
+                    etag: None,
+                    updated_at: 1,
+                },
+            )]),
+        );
+        catalog
+            .persist(&mut inner, Persist::Cache(gateway))
+            .await
+            .unwrap();
+        let disk: Disk = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let reread = Inner {
+            source: "https://pi.dev".into(),
+            generation: 0,
+            disk,
+        };
+        assert!(
+            !catalog
+                .entries_scoped(
+                    &reread,
+                    &BTreeMap::from([("radius".into(), "other-account".into())])
+                )
+                .unwrap()
+                .iter()
+                .any(|entry| entry.target.provider == "radius")
+        );
+        let entries = catalog.entries(&reread).unwrap();
+        let radius = entries
+            .iter()
+            .find(|e| e.target.provider == "radius")
+            .unwrap();
+        assert_eq!(radius.target.base_url, "https://inference.test/v1");
+        assert_eq!(radius.target.api, "pi-messages");
+        let mut different = fixture("https://pi.dev".into(), None);
+        different.config.providers.insert(
+            "radius".into(),
+            ProviderOverride {
+                base_url: Some("https://other.test".into()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            !different
+                .entries(&reread)
+                .unwrap()
+                .iter()
+                .any(|e| e.target.provider == "radius")
+        );
+        let mut explicit = radius.target.clone();
+        explicit.base_url = "https://explicit.test".into();
+        different.config.providers.clear();
+        different.config.models.push(explicit);
+        assert_eq!(
+            different
+                .entries(&reread)
+                .unwrap()
+                .iter()
+                .find(|e| e.target.provider == "radius")
+                .unwrap()
+                .target
+                .base_url,
+            "https://explicit.test"
+        );
+        drop(inner);
+        let _ = std::fs::remove_file(path.with_extension("lock"));
+        let _ = std::fs::remove_file(path);
     }
 }

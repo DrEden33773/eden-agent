@@ -1,5 +1,6 @@
 //! Secret material stays inside private role calls and permission-restricted storage.
-use eden_plugin_sdk::{CallContext, Package};
+use crate::oauth;
+use eden_plugin_sdk::{CallContext, Cancellation, Package};
 use eden_protocol::{Fault, models::*};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -28,18 +29,59 @@ struct ProviderConfig {
 struct Config {
     path: Option<PathBuf>,
     providers: BTreeMap<String, ProviderConfig>,
+    oauth: BTreeMap<String, oauth::Config>,
 }
 #[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
 struct Stored {
     keys: BTreeMap<String, String>,
+    oauth: BTreeMap<String, oauth::Token>,
+    revisions: BTreeMap<String, u64>,
 }
 struct Credentials {
     config: Config,
     commands_trusted: bool,
     cloud_config: Value,
     operations: Mutex<BTreeMap<String, AuthReply>>,
+    oauth_operations: Mutex<BTreeMap<String, Arc<OAuthOperation>>>,
     command_cache: Mutex<BTreeMap<String, String>>,
+    command_scope: String,
     cwd: PathBuf,
+}
+struct OAuthOperation {
+    reply: std::sync::Mutex<AuthReply>,
+    revision: u64,
+    flow: Mutex<Option<oauth::Flow>>,
+    input: Mutex<tokio::sync::mpsc::Receiver<String>>,
+    sender: tokio::sync::mpsc::Sender<String>,
+    cancel: Cancellation,
+}
+impl OAuthOperation {
+    fn reply(&self) -> AuthReply {
+        self.reply.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+    fn finish(&self, status: &str) {
+        let mut reply = self.reply.lock().unwrap_or_else(|e| e.into_inner());
+        reply.status = status.into();
+        reply.challenge = None;
+        reply.interaction = None;
+        if status == "completed" {
+            reply.source = Some("stored_oauth".into());
+        }
+    }
+}
+// If native scope cancellation drops Wait, its owned flow closes before this guard
+// publishes a terminal status. No detached callback/poll task survives the call.
+struct LoginGuard<'a>(&'a OAuthOperation);
+impl Drop for LoginGuard<'_> {
+    fn drop(&mut self) {
+        if matches!(
+            self.0.reply().status.as_str(),
+            "awaiting_authorization" | "pending"
+        ) {
+            self.0.finish("cancelled");
+        }
+    }
 }
 fn fault(message: &str) -> Fault {
     Fault::new("CredentialFailure", "model-access", message)
@@ -66,7 +108,9 @@ pub(crate) fn register(package: Package, value: &Value) -> Result<Package, Fault
             .and_then(Value::as_bool)
             .unwrap_or(false),
         operations: Mutex::new(BTreeMap::new()),
+        oauth_operations: Mutex::new(BTreeMap::new()),
         command_cache: Mutex::new(BTreeMap::new()),
+        command_scope: oauth::random()?,
         cwd: value
             .get("cwd")
             .and_then(Value::as_str)
@@ -228,6 +272,154 @@ impl Credentials {
         drop(lock);
         Ok(result)
     }
+    async fn oauth_operation(&self, id: &str) -> Result<Arc<OAuthOperation>, Fault> {
+        self.oauth_operations
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+            .ok_or_else(|| fault("authentication operation is unknown"))
+    }
+    async fn wait_login(&self, id: &str, cx: Option<&CallContext>) -> Result<AuthReply, Fault> {
+        let op = self.oauth_operation(id).await?;
+        let mut slot = op.flow.lock().await;
+        if op.cancel.is_cancelled() {
+            slot.take();
+            op.finish("cancelled");
+            return Ok(op.reply());
+        }
+        let guard = LoginGuard(&op);
+        // Declaration order matters: the flow and HTTP futures are dropped before the guard.
+        let mut flow = slot
+            .take()
+            .ok_or_else(|| fault("authentication operation has already settled"))?;
+        op.reply.lock().unwrap_or_else(|e| e.into_inner()).status = "pending".into();
+        let mut input = op.input.lock().await;
+        let scope_cancel = cx.map(|cx| cx.scope.cancellation()).unwrap_or_default();
+        let run = async {
+            let submitted = tokio::select! {
+                result = flow.wait() => return result,
+                submitted = input.recv() => submitted,
+            };
+            flow.submit(&submitted.ok_or_else(|| fault("authentication input closed"))?)
+                .await
+        };
+        let result = tokio::select! {
+            result = run => Some(result),
+            _ = op.cancel.cancelled() => None,
+            _ = scope_cancel.cancelled() => None,
+        };
+        drop(flow);
+        match result {
+            None => op.finish("cancelled"),
+            Some(Err(error)) => {
+                op.finish("failed");
+                return Err(error);
+            }
+            Some(Ok(token)) => {
+                let provider = op.reply().provider;
+                let saved = self.store(
+                    |s| {
+                        if *s.revisions.get(&provider).unwrap_or(&0) != op.revision {
+                            return Err(fault("credentials changed during login; restart login"));
+                        }
+                        s.keys.remove(&provider);
+                        s.oauth.insert(provider.clone(), token);
+                        *s.revisions.entry(provider).or_default() += 1;
+                        Ok(())
+                    },
+                    true,
+                );
+                if let Err(error) = saved {
+                    op.finish("failed");
+                    return Err(error);
+                }
+                op.finish("completed");
+            }
+        }
+        drop(guard);
+        Ok(op.reply())
+    }
+    async fn oauth_token(
+        &self,
+        provider: &str,
+        force: bool,
+        purpose: &str,
+    ) -> Result<Option<oauth::Token>, Fault> {
+        let (token, revision) = self.store(
+            |s| {
+                Ok((
+                    s.oauth.get(provider).cloned(),
+                    *s.revisions.get(provider).unwrap_or(&0),
+                ))
+            },
+            false,
+        )?;
+        let Some(token) = token else {
+            return Ok(None);
+        };
+        if matches!(purpose, "catalog" | "status")
+            || (!force && token.expires_at > oauth::now())
+            || token.expires_at == u64::MAX
+        {
+            return Ok(Some(token));
+        }
+        let path = self
+            .config
+            .path
+            .as_ref()
+            .ok_or_else(|| fault("credential storage path is not configured"))?;
+        // A provider-specific OS lock serializes rotating refresh grants across processes;
+        // logout takes only the short store lock and invalidates the revision immediately.
+        use sha2::{Digest, Sha256};
+        let name = format!("refresh-{:x}.lock", Sha256::digest(provider.as_bytes()));
+        let lock = private_open(&path.with_extension(name))?;
+        loop {
+            match lock.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await
+                }
+                Err(_) => return Err(fault("cannot lock OAuth refresh")),
+            }
+        }
+        let (current, current_revision) = self.store(
+            |s| {
+                Ok((
+                    s.oauth.get(provider).cloned(),
+                    *s.revisions.get(provider).unwrap_or(&0),
+                ))
+            },
+            false,
+        )?;
+        let current = current.ok_or_else(|| fault("credentials were logged out during refresh"))?;
+        if !current.same_account(&token) {
+            return Err(fault(
+                "account changed while waiting for refresh; retry explicitly",
+            ));
+        }
+        if current_revision != revision || (!force && current.expires_at > oauth::now()) {
+            return Ok(Some(current));
+        }
+        let refreshed = current.refresh().await?;
+        self.store(
+            |s| {
+                if *s.revisions.get(provider).unwrap_or(&0) != current_revision
+                    || !s.oauth.contains_key(provider)
+                {
+                    return Err(fault(
+                        "credentials changed during refresh; late result discarded",
+                    ));
+                }
+                s.oauth.insert(provider.into(), refreshed.clone());
+                *s.revisions.entry(provider.into()).or_default() += 1;
+                Ok(())
+            },
+            true,
+        )?;
+        drop(lock);
+        Ok(Some(refreshed))
+    }
     async fn resolve(
         &self,
         request: CredentialRequest,
@@ -257,6 +449,10 @@ impl Credentials {
         }
         let reply = |api_key, source: &str| {
             Ok(CredentialReply {
+                base_url: None,
+                available_model_ids: None,
+                catalog_scope: (source == "command" || source == "command_configured")
+                    .then(|| self.command_scope.clone()),
                 api_key,
                 headers: headers.clone(),
                 source: source.into(),
@@ -270,6 +466,20 @@ impl Credentials {
         }
         if let Some(key) = self.store(|s| Ok(s.keys.get(&request.provider).cloned()), false)? {
             return reply(Some(key), "stored");
+        }
+        if let Some(token) = self
+            .oauth_token(&request.provider, false, &request.purpose)
+            .await?
+        {
+            let mut result = token.credential();
+            if matches!(request.purpose.as_str(), "catalog" | "status") {
+                result.api_key = None;
+                result.headers.clear();
+                result.source = "oauth_configured".into();
+            } else {
+                result.headers.extend(headers);
+            }
+            return Ok(result);
         }
         let configured = self.config.providers.get(&request.provider);
         let default_env = match request.provider.as_str() {
@@ -443,6 +653,80 @@ impl Credentials {
         cx: Option<&CallContext>,
     ) -> Result<AuthReply, Fault> {
         match request {
+            AuthRequest::Login { provider, method } => {
+                let revision =
+                    self.store(|s| Ok(*s.revisions.get(&provider).unwrap_or(&0)), false)?;
+                let config = self
+                    .config
+                    .oauth
+                    .get(&provider)
+                    .cloned()
+                    .unwrap_or_default();
+                let flow = oauth::Flow::start(&provider, method.as_deref(), &config).await?;
+                let id = format!("oauth-{}", NEXT.fetch_add(1, Ordering::Relaxed));
+                let reply = AuthReply {
+                    operation_id: Some(id.clone()),
+                    provider,
+                    status: "awaiting_authorization".into(),
+                    challenge: Some("oauth".into()),
+                    interaction: Some(flow.interaction.clone()),
+                    source: None,
+                };
+                let (sender, input) = tokio::sync::mpsc::channel(1);
+                self.oauth_operations.lock().await.insert(
+                    id,
+                    Arc::new(OAuthOperation {
+                        reply: std::sync::Mutex::new(reply.clone()),
+                        revision,
+                        flow: Mutex::new(Some(flow)),
+                        input: Mutex::new(input),
+                        sender,
+                        cancel: Cancellation::default(),
+                    }),
+                );
+                Ok(reply)
+            }
+            AuthRequest::Wait { operation_id } => self.wait_login(&operation_id, cx).await,
+            AuthRequest::Submit {
+                operation_id,
+                input,
+            } => {
+                let op = self.oauth_operation(&operation_id).await?;
+                if input.len() > 16384 || input.trim().is_empty() {
+                    return Err(fault("authorization input is empty or too large"));
+                }
+                let reply = op.reply();
+                if !matches!(reply.status.as_str(), "pending" | "awaiting_authorization")
+                    || !reply.interaction.as_ref().is_some_and(|i| i.manual_input)
+                {
+                    return Err(fault("authentication is not accepting manual input"));
+                }
+                op.sender
+                    .try_send(input)
+                    .map_err(|_| fault("authentication input already submitted"))?;
+                Ok(reply)
+            }
+            AuthRequest::Refresh { provider } => {
+                let token = self
+                    .oauth_token(&provider, true, "refresh")
+                    .await?
+                    .ok_or_else(|| fault("provider has no managed OAuth credential"))?;
+                Ok(AuthReply {
+                    operation_id: None,
+                    provider,
+                    status: "completed".into(),
+                    challenge: None,
+                    interaction: None,
+                    source: Some(
+                        if token.expires_at == u64::MAX {
+                            "stored_key_no_refresh"
+                        } else {
+                            "stored_oauth"
+                        }
+                        .into(),
+                    ),
+                })
+            }
             AuthRequest::Start { provider } => {
                 let id = format!("key-{}", NEXT.fetch_add(1, Ordering::Relaxed));
                 let reply = AuthReply {
@@ -450,6 +734,7 @@ impl Credentials {
                     provider,
                     status: "awaiting_input".into(),
                     challenge: Some("api_key".into()),
+                    interaction: None,
                     source: None,
                 };
                 self.operations.lock().await.insert(id, reply.clone());
@@ -472,6 +757,8 @@ impl Credentials {
                 self.store(
                     |s| {
                         s.keys.insert(op.provider.clone(), api_key);
+                        s.oauth.remove(&op.provider);
+                        *s.revisions.entry(op.provider.clone()).or_default() += 1;
                         Ok(())
                     },
                     true,
@@ -482,6 +769,23 @@ impl Credentials {
                 Ok(op.clone())
             }
             AuthRequest::Cancel { operation_id } => {
+                if let Some(op) = self
+                    .oauth_operations
+                    .lock()
+                    .await
+                    .get(&operation_id)
+                    .cloned()
+                {
+                    op.cancel.cancel();
+                    op.flow.lock().await.take();
+                    if matches!(
+                        op.reply().status.as_str(),
+                        "pending" | "awaiting_authorization"
+                    ) {
+                        op.finish("cancelled");
+                    }
+                    return Ok(op.reply());
+                }
                 let mut operations = self.operations.lock().await;
                 let op = operations
                     .get_mut(&operation_id)
@@ -492,14 +796,54 @@ impl Credentials {
                 }
                 Ok(op.clone())
             }
-            AuthRequest::Status { operation_id } => self
-                .operations
-                .lock()
-                .await
-                .get(&operation_id)
-                .cloned()
-                .ok_or_else(|| fault("authentication operation is unknown")),
+            AuthRequest::Status { operation_id } => {
+                if let Some(op) = self
+                    .oauth_operations
+                    .lock()
+                    .await
+                    .get(&operation_id)
+                    .cloned()
+                {
+                    return Ok(op.reply());
+                }
+                self.operations
+                    .lock()
+                    .await
+                    .get(&operation_id)
+                    .cloned()
+                    .ok_or_else(|| fault("authentication operation is unknown"))
+            }
             AuthRequest::Logout { provider } => {
+                // Invalidate publication before waiting for local I/O cleanup. Other processes
+                // see the tombstone even while a refresh endpoint still has a request in flight.
+                self.store(
+                    |s| {
+                        s.keys.remove(&provider);
+                        s.oauth.remove(&provider);
+                        *s.revisions.entry(provider.clone()).or_default() += 1;
+                        Ok(())
+                    },
+                    true,
+                )?;
+                let oauth_ops: Vec<_> = self
+                    .oauth_operations
+                    .lock()
+                    .await
+                    .values()
+                    .filter(|o| o.reply().provider == provider)
+                    .cloned()
+                    .collect();
+                for op in oauth_ops {
+                    op.cancel.cancel();
+                    op.flow.lock().await.take();
+                    if matches!(
+                        op.reply().status.as_str(),
+                        "pending" | "awaiting_authorization"
+                    ) {
+                        op.finish("cancelled");
+                    }
+                }
+
                 let mut operations = self.operations.lock().await;
                 for operation in operations
                     .values_mut()
@@ -520,7 +864,7 @@ impl Credentials {
                         CredentialRequest {
                             provider: provider.clone(),
                             explicit: None,
-                            purpose: "status".into(),
+                            purpose: "catalog".into(),
                         },
                         cx,
                     )
@@ -528,13 +872,19 @@ impl Credentials {
                 Ok(AuthReply {
                     operation_id: None,
                     provider,
-                    status: if resolved.api_key.is_some() || !resolved.headers.is_empty() {
+                    status: if resolved.api_key.is_some()
+                        || !resolved.headers.is_empty()
+                        || matches!(
+                            resolved.source.as_str(),
+                            "command_configured" | "headers_configured" | "cloud_configured"
+                        ) {
                         "external_credentials_remain"
                     } else {
                         "logged_out"
                     }
                     .into(),
                     challenge: None,
+                    interaction: None,
                     source: Some(resolved.source),
                 })
             }
@@ -544,7 +894,7 @@ impl Credentials {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn credentials() -> Credentials {
+    pub(super) fn credentials() -> Credentials {
         Credentials {
             cloud_config: serde_json::json!({}),
             config: Config {
@@ -561,7 +911,9 @@ mod tests {
             },
             commands_trusted: false,
             operations: Mutex::new(BTreeMap::new()),
+            oauth_operations: Mutex::new(BTreeMap::new()),
             command_cache: Mutex::new(BTreeMap::new()),
+            command_scope: oauth::random().unwrap(),
             cwd: PathBuf::from("."),
         }
     }
@@ -816,3 +1168,7 @@ mod tests {
         std::fs::remove_dir_all(state.config.path.unwrap().parent().unwrap()).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "oauth_credentials_tests.rs"]
+mod oauth_tests;

@@ -110,6 +110,9 @@ fn create(config: Value) -> Result<Package, Fault> {
         })
         .service(CREDENTIAL_SOURCE, |_: CredentialRequest, _| async move {
             Ok(CredentialReply {
+                base_url: None,
+                available_model_ids: None,
+                catalog_scope: None,
                 api_key: Some(std::env::var("EDEN_AUTHOR_SECRET").map_err(fault)?),
                 headers: BTreeMap::new(),
                 source: "independent-author".into(),

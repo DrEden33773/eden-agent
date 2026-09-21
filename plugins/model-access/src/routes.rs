@@ -81,7 +81,12 @@ pub(crate) fn endpoint(
     credential: &CredentialReply,
     suffix: &str,
 ) -> Result<reqwest::Url, Fault> {
-    let base = target.base_url.trim_end_matches('/');
+    let base = if target.compat["endpointExplicit"] == true {
+        &target.base_url
+    } else {
+        credential.base_url.as_ref().unwrap_or(&target.base_url)
+    }
+    .trim_end_matches('/');
     if base.contains('{') || base.contains('}') {
         return Err(failure("model endpoint requires provider configuration"));
     }
@@ -120,6 +125,11 @@ pub(crate) fn endpoint(
                     target.model
                 )
             }
+        }
+        "openai-codex-responses"
+            if !path.ends_with("/codex") && !path.ends_with("/codex/responses") =>
+        {
+            "codex/responses".into()
         }
         _ => suffix.into(),
     };
@@ -166,6 +176,9 @@ mod tests {
             api_key: Some("secret".into()),
             headers: Default::default(),
             source: "test".into(),
+            base_url: None,
+            available_model_ids: None,
+            catalog_scope: None,
         }
     }
     #[test]
@@ -215,6 +228,26 @@ mod tests {
         assert_eq!(
             endpoint(&t, &adc, "").unwrap().path(),
             "/v1/projects/p/locations/global/publishers/google/models/test:streamGenerateContent"
+        );
+    }
+    #[test]
+    fn subscription_account_endpoint_never_overrides_explicit_user_route() {
+        let mut target = test_target("openai-codex-responses");
+        target.base_url = "https://chatgpt.com/backend-api".into();
+        let mut credential = credential();
+        credential.base_url = Some("https://account.test/codex".into());
+        assert_eq!(
+            endpoint(&target, &credential, "responses")
+                .unwrap()
+                .as_str(),
+            "https://account.test/codex/responses"
+        );
+        target.compat = serde_json::json!({ "endpointExplicit": true });
+        assert_eq!(
+            endpoint(&target, &credential, "responses")
+                .unwrap()
+                .as_str(),
+            "https://chatgpt.com/backend-api/codex/responses"
         );
     }
 }

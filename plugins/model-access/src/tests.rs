@@ -1033,6 +1033,9 @@ async fn frozen_chat_route_sends_private_auth_and_waits_for_done_usage() {
     let mut target = projection::test_target("openai-completions");
     target.base_url = url.trim_end_matches("/responses").into();
     let credential = eden_protocol::models::CredentialReply {
+        base_url: None,
+        available_model_ids: None,
+        catalog_scope: None,
         api_key: Some("PRIVATE_CANARY".into()),
         source: "test".into(),
         headers: Default::default(),
@@ -1079,6 +1082,9 @@ async fn frozen_anthropic_route_has_version_and_key_and_stream_completion() {
     let mut target = projection::test_target("anthropic-messages");
     target.base_url = url.trim_end_matches("/v1/responses").into();
     let credential = eden_protocol::models::CredentialReply {
+        base_url: None,
+        available_model_ids: None,
+        catalog_scope: None,
         api_key: Some("PRIVATE_CANARY".into()),
         source: "test".into(),
         headers: Default::default(),
@@ -1112,6 +1118,9 @@ async fn chat_finish_reason_without_done_does_not_execute_partial_tool() {
     let mut target = projection::test_target("openai-completions");
     target.base_url = url.trim_end_matches("/responses").into();
     let credential = eden_protocol::models::CredentialReply {
+        base_url: None,
+        available_model_ids: None,
+        catalog_scope: None,
         api_key: Some("test".into()),
         source: "test".into(),
         headers: Default::default(),
@@ -1161,6 +1170,9 @@ async fn nonreasoning_responses_omits_reasoning_despite_requested_thinking() {
     target.thinking.requested = Some("high".into());
     target.thinking.effective = Some("off".into());
     let credentials = eden_protocol::models::CredentialReply {
+        base_url: None,
+        available_model_ids: None,
+        catalog_scope: None,
         api_key: Some("test".into()),
         source: "test".into(),
         headers: Default::default(),
@@ -1213,6 +1225,9 @@ async fn g2_http_protocols_stream_text_with_private_auth_and_frozen_routes() {
         target.base_url = url.trim_end_matches("/responses").into();
         target.compat = json!({ "deployment": "deployed" });
         let credentials = eden_protocol::models::CredentialReply {
+            base_url: None,
+            available_model_ids: None,
+            catalog_scope: None,
             api_key: Some("G2_SECRET".into()),
             headers: Default::default(),
             source: "test".into(),
@@ -1258,6 +1273,9 @@ async fn g2_truncated_streams_and_http_errors_never_return_tool_calls() {
         let mut target = projection::test_target(api);
         target.base_url = url.trim_end_matches("/responses").into();
         let credentials = eden_protocol::models::CredentialReply {
+            base_url: None,
+            available_model_ids: None,
+            catalog_scope: None,
             api_key: Some("G2_SECRET".into()),
             headers: Default::default(),
             source: "test".into(),
@@ -1314,6 +1332,9 @@ async fn g2_cancellation_closes_each_http_protocol_connection() {
         });
         let request = tokio::spawn(async move {
             let c = eden_protocol::models::CredentialReply {
+                base_url: None,
+                available_model_ids: None,
+                catalog_scope: None,
                 api_key: Some("test".into()),
                 headers: Default::default(),
                 source: "test".into(),
@@ -1340,6 +1361,9 @@ async fn cloudflare_gateway_separates_gateway_and_upstream_authentication() {
     t.provider = "cloudflare-ai-gateway".into();
     t.base_url = url.trim_end_matches("/responses").into();
     let c = eden_protocol::models::CredentialReply {
+        base_url: None,
+        available_model_ids: None,
+        catalog_scope: None,
         api_key: Some("gateway-key".into()),
         headers: std::collections::BTreeMap::from([(
             "Authorization".into(),
@@ -1371,6 +1395,9 @@ async fn opencode_google_route_uses_gemini_protocol_from_model_identity() {
     t.provider = "opencode".into();
     t.base_url = url.trim_end_matches("/responses").into();
     let c = eden_protocol::models::CredentialReply {
+        base_url: None,
+        available_model_ids: None,
+        catalog_scope: None,
         api_key: Some("gateway-key".into()),
         headers: Default::default(),
         source: "test".into(),

@@ -4,6 +4,10 @@ use std::sync::RwLock;
 /// The current generation can be absent after a failed explicit switch.
 pub(crate) struct Generation(RwLock<Option<Arc<Kernel>>>);
 impl Generation {
+    #[cfg(test)]
+    pub(crate) fn empty() -> Self {
+        Self(RwLock::new(None))
+    }
     /// Hold a freshly loaded kernel as the active generation.
     pub fn new(kernel: Kernel) -> Self {
         Self(RwLock::new(Some(Arc::new(kernel))))

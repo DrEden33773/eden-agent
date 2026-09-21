@@ -36,6 +36,7 @@ struct Stored {
 struct Credentials {
     config: Config,
     commands_trusted: bool,
+    cloud_config: Value,
     operations: Mutex<BTreeMap<String, AuthReply>>,
     command_cache: Mutex<BTreeMap<String, String>>,
     cwd: PathBuf,
@@ -59,6 +60,7 @@ pub(crate) fn register(package: Package, value: &Value) -> Result<Package, Fault
     }
     let state = Arc::new(Credentials {
         config,
+        cloud_config: value.clone(),
         commands_trusted: value
             .get("commands_trusted")
             .and_then(Value::as_bool)
@@ -283,6 +285,9 @@ impl Credentials {
             // A GitHub user token requires the subscription token exchange, not direct inference.
             "github-copilot" => "EDEN_COPILOT_INFERENCE_KEY".into(),
             "google" => "GEMINI_API_KEY".into(),
+            "google-vertex" => "GOOGLE_CLOUD_API_KEY".into(),
+            "amazon-bedrock" => "AWS_BEARER_TOKEN_BEDROCK".into(),
+            "cloudflare-ai-gateway" | "cloudflare-workers-ai" => "CLOUDFLARE_API_KEY".into(),
             "azure-openai-responses" => "AZURE_OPENAI_API_KEY".into(),
             p => format!("{}_API_KEY", p.to_uppercase().replace('-', "_")),
         };
@@ -315,6 +320,17 @@ impl Credentials {
                 let key = self.command(command, cx).await?;
                 return reply(Some(key), "command");
             }
+        }
+        if let Some(mut cloud) = crate::cloud::resolve(
+            &request.provider,
+            &request.purpose,
+            &self.cloud_config,
+            self.commands_trusted,
+        )
+        .await?
+        {
+            cloud.headers.extend(headers.clone());
+            return Ok(cloud);
         }
         if configured.is_some_and(|c| {
             !c.headers.is_empty()
@@ -530,6 +546,7 @@ mod tests {
     use super::*;
     fn credentials() -> Credentials {
         Credentials {
+            cloud_config: serde_json::json!({}),
             config: Config {
                 path: Some(
                     std::env::temp_dir()

@@ -1,7 +1,8 @@
 //! Model catalogs, private credentials and inference through ordinary native services.
 //!
 //! Catalog-selected targets support OpenAI Responses, Chat Completions and Anthropic
-//! Messages; the legacy configuration retains OpenAI and DeepSeek Responses access.
+//! Messages, Gemini, Vertex, Bedrock, Azure Responses and native Mistral Chat; the
+//! legacy configuration retains OpenAI and DeepSeek Responses access.
 //! Catalog and credential services are independently replaceable. Each catalog-selected
 //! inference call consumes a frozen model target and obtains credentials through the private
 //! credential service, keeping secrets out of model targets and persisted history.
@@ -21,10 +22,15 @@ use std::sync::{
 };
 use wire::{Sse, failure};
 mod anthropic;
+mod bedrock;
 mod catalog;
 mod chat;
+mod cloud;
 mod credentials;
+mod gemini;
+mod mistral;
 mod projection;
+mod routes;
 mod targeted;
 mod usage;
 mod wire;

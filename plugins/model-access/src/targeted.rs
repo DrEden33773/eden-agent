@@ -1,5 +1,7 @@
 //! Frozen catalog routes share transport and cancellation with the legacy provider.
-use super::{Profile, RequestOptions, anthropic, chat, projection, usage, wire};
+use super::{
+    Profile, RequestOptions, anthropic, chat, gemini, mistral, projection, routes, usage, wire,
+};
 use eden_protocol::{
     Fault,
     coding::{Item, ModelInput, ModelReply},
@@ -14,6 +16,9 @@ pub(crate) async fn request(
     input: &ModelInput,
     mut emit: impl FnMut(&str, Value) -> Result<(), Fault>,
 ) -> Result<ModelReply, Fault> {
+    if target.api == "bedrock-converse-stream" {
+        return crate::bedrock::request(target, credential, input, emit).await;
+    }
     let options = RequestOptions {
         profile: if target.provider == "deepseek" {
             Profile::Deepseek
@@ -36,8 +41,10 @@ pub(crate) async fn request(
     projected.items = projection::items(input, target)?;
     let (suffix, body) = match target.api.as_str() {
         "openai-completions" => ("chat/completions", chat::project(input, target)?),
+        "mistral-conversations" => ("chat/completions", mistral::project(input, target)?),
+        "google-generative-ai" | "google-vertex" => ("", gemini::project(input, target)?),
         "anthropic-messages" => ("v1/messages", anthropic::project(input, target)?),
-        "openai-responses" => {
+        "openai-responses" | "azure-openai-responses" => {
             for item in &mut projected.items {
                 if let Item::ProviderState { provider, value } = item {
                     *provider = options.profile.state().into();
@@ -46,32 +53,19 @@ pub(crate) async fn request(
             }
             (
                 "responses",
-                wire::project(&projected, &target.model, &options)?,
+                wire::project(
+                    &projected,
+                    target.compat["deployment"]
+                        .as_str()
+                        .filter(|_| target.api == "azure-openai-responses")
+                        .unwrap_or(&target.model),
+                    &options,
+                )?,
             )
         }
         _ => return Err(wire::failure("selected model protocol is not implemented")),
     };
-    let base = target.base_url.trim_end_matches('/');
-    let suffix = if suffix == "v1/messages" && base.ends_with("/v1") {
-        "messages"
-    } else {
-        suffix
-    };
-    let endpoint = if base.ends_with(suffix) {
-        base.to_owned()
-    } else {
-        format!("{base}/{suffix}")
-    };
-    let url =
-        reqwest::Url::parse(&endpoint).map_err(|_| wire::failure("invalid model endpoint"))?;
-    if !["http", "https"].contains(&url.scheme())
-        || !url.username().is_empty()
-        || url.password().is_some()
-    {
-        return Err(wire::failure(
-            "model endpoint must use HTTP(S) without URL credentials",
-        ));
-    }
+    let url = routes::endpoint(target, credential, suffix)?;
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .pool_max_idle_per_host(0)
@@ -84,15 +78,38 @@ pub(crate) async fn request(
     for (name, value) in &target.headers {
         request = request.header(name, value);
     }
-    if target.api == "anthropic-messages" {
+    if target.provider == "cloudflare-ai-gateway" {
+        if let Some(key) = &credential.api_key {
+            request = request.header("cf-aig-authorization", format!("Bearer {key}"));
+        }
+        if target.api == "anthropic-messages" {
+            request = request.header("anthropic-version", "2023-06-01");
+        }
+    } else if target.api == "anthropic-messages" {
         request = request.header("anthropic-version", "2023-06-01");
         if let Some(key) = &credential.api_key {
             request = request.header("x-api-key", key);
+        }
+    } else if matches!(
+        target.api.as_str(),
+        "google-generative-ai" | "google-vertex"
+    ) {
+        if let Some(key) = &credential.api_key {
+            request = request.header("x-goog-api-key", key);
+        }
+    } else if target.api == "azure-openai-responses" {
+        if let Some(key) = &credential.api_key {
+            request = request.header("api-key", key);
         }
     } else if let Some(key) = &credential.api_key {
         request = request.bearer_auth(key);
     }
     for (name, value) in &credential.headers {
+        if name.to_ascii_lowercase().starts_with("x-eden-private-") {
+            return Err(wire::failure(
+                "private cloud credential cannot be used with this protocol",
+            ));
+        }
         request = request.header(name, value);
     }
     let response = request.send().await.map_err(super::transport_failure)?;
@@ -118,9 +135,29 @@ pub(crate) async fn request(
     let mut sse = wire::Sse::default();
     let mut chat = chat::Decoder::new(target.clone());
     let mut anthropic = anthropic::Decoder::new(target.clone());
+    let mut gemini = gemini::Decoder::new(target.clone());
+    let mut mistral = mistral::Decoder::new(target.clone());
     while let Some(chunk) = stream.next().await {
         for event in sse.push(&chunk.map_err(super::transport_failure)?)? {
             match target.api.as_str() {
+                "google-generative-ai" | "google-vertex" => {
+                    let reply = gemini.consume(event)?;
+                    for (kind, payload) in gemini.take_deltas() {
+                        emit(kind, payload)?;
+                    }
+                    if let Some(reply) = reply {
+                        return Ok(reply);
+                    }
+                }
+                "mistral-conversations" => {
+                    let reply = mistral.consume(event)?;
+                    for (kind, payload) in mistral.take_deltas() {
+                        emit(kind, payload)?;
+                    }
+                    if let Some(reply) = reply {
+                        return Ok(reply);
+                    }
+                }
                 "openai-completions" => {
                     let reply = chat.consume(event)?;
                     for (kind, payload) in chat.take_deltas() {

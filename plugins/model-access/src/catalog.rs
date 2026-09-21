@@ -18,12 +18,15 @@ struct ProviderOverride {
     base_url: Option<String>,
     api: Option<String>,
     headers: Option<BTreeMap<String, String>>,
+    compat: Option<Value>,
 }
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct Config {
     #[serde(skip)]
     legacy: bool,
+    #[serde(skip)]
+    routing: Value,
     source: Option<String>,
     cache_path: Option<PathBuf>,
     offline: bool,
@@ -64,6 +67,9 @@ fn now() -> u64 {
 }
 fn private_header(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
+    if name.starts_with("x-eden-private-") {
+        return true;
+    }
     [
         "authorization",
         "cookie",
@@ -123,6 +129,7 @@ pub(crate) fn register(package: Package, value: &Value) -> Result<Package, Fault
             .unwrap_or(serde_json::json!({})),
     )
     .map_err(|_| fault("invalid catalog configuration"))?;
+    config.routing = value.clone();
     if config.cache_path.is_none() {
         config.cache_path = value
             .get("global_dir")
@@ -268,7 +275,14 @@ fn effective_thinking(target: &ModelTarget, requested: Option<&str>) -> Option<S
 fn supported(api: &str) -> bool {
     matches!(
         api,
-        "openai-responses" | "openai-completions" | "anthropic-messages"
+        "openai-responses"
+            | "openai-completions"
+            | "anthropic-messages"
+            | "azure-openai-responses"
+            | "google-generative-ai"
+            | "google-vertex"
+            | "mistral-conversations"
+            | "bedrock-converse-stream"
     )
 }
 enum Persist {
@@ -381,6 +395,10 @@ impl Catalog {
                 if let Some(base_url) = &overrides.base_url {
                     validate_source(base_url)?;
                     target.base_url = base_url.clone();
+                    if !target.compat.is_object() {
+                        target.compat = serde_json::json!({});
+                    }
+                    target.compat["endpointExplicit"] = serde_json::json!(true);
                 }
                 if let Some(api) = &overrides.api {
                     target.api = api.clone();
@@ -393,6 +411,16 @@ impl Catalog {
                     }
                     target.headers.extend(headers.clone());
                 }
+                if let Some(compat) = &overrides.compat {
+                    if !target.compat.is_object() {
+                        target.compat = serde_json::json!({});
+                    }
+                    if let Some(fields) = compat.as_object() {
+                        for (key, value) in fields {
+                            target.compat[key] = value.clone();
+                        }
+                    }
+                }
                 target.source = CatalogSource {
                     kind: "explicit".into(),
                     location: "configuration".into(),
@@ -403,6 +431,10 @@ impl Catalog {
         for t in &self.config.models {
             validate_target(t)?;
             let mut t = t.clone();
+            if !t.compat.is_object() {
+                t.compat = serde_json::json!({});
+            }
+            t.compat["endpointExplicit"] = serde_json::json!(true);
             if t.headers.keys().any(|k| private_header(k)) {
                 return Err(fault(
                     "authentication headers belong in private credentials configuration",
@@ -420,12 +452,20 @@ impl Catalog {
         }
         Ok(models
             .into_values()
-            .map(|(target, name)| {
+            .map(|(mut target, name)| {
+                crate::routes::freeze(&mut target, &self.config.routing, |key| {
+                    std::env::var(key).ok()
+                });
                 let status = if self.config.allowed_models.as_ref().is_some_and(|allowed| {
                     !allowed.contains(&format!("{}/{}", target.provider, target.model))
                 }) {
                     "excluded"
-                } else if supported(&target.api) && validate_source(&target.base_url).is_err() {
+                } else if supported(&target.api)
+                    && (validate_source(&target.base_url).is_err()
+                        || target.base_url.contains('{')
+                        || (target.api == "bedrock-converse-stream"
+                            && target.compat["region"].as_str().is_none()))
+                {
                     "configuration_required"
                 } else if supported(&target.api) {
                     "authentication_required"
@@ -564,7 +604,25 @@ impl Catalog {
             self.persist(&mut inner, Persist::Source).await?;
         }
         let mut models = self.entries(&inner)?;
+        if let Some(region) = crate::cloud::configured_region(&self.config.routing).await {
+            for entry in &mut models {
+                if entry.target.api == "bedrock-converse-stream"
+                    && entry.target.compat["region"].as_str().is_none()
+                {
+                    entry.target.compat["region"] = serde_json::json!(region);
+                    crate::routes::freeze(&mut entry.target, &self.config.routing, |key| {
+                        std::env::var(key).ok()
+                    });
+                    if entry.status == "configuration_required"
+                        && validate_source(&entry.target.base_url).is_ok()
+                    {
+                        entry.status = "authentication_required".into();
+                    }
+                }
+            }
+        }
         let mut auth = BTreeMap::new();
+        let mut keyless = std::collections::BTreeSet::new();
         for entry in &mut models {
             if entry.status != "authentication_required" {
                 continue;
@@ -580,17 +638,30 @@ impl Catalog {
                         },
                     )
                     .await?;
+                if reply.api_key.is_none() && reply.source != "command_configured" {
+                    keyless.insert(entry.target.provider.clone());
+                }
                 auth.insert(
                     entry.target.provider.clone(),
                     reply.api_key.is_some()
                         || matches!(
                             reply.source.as_str(),
-                            "command_configured" | "headers_configured"
+                            "command_configured" | "headers_configured" | "cloud_configured"
                         ),
                 );
             }
             if auth[&entry.target.provider] {
-                entry.status = "configured".into();
+                entry.status = if entry.target.api == "google-vertex"
+                    && keyless.contains(&entry.target.provider)
+                    && ["project", "location"]
+                        .iter()
+                        .any(|key| entry.target.compat[key].as_str().is_none_or(str::is_empty))
+                {
+                    "configuration_required"
+                } else {
+                    "configured"
+                }
+                .into();
             }
         }
         let selection = match &request {
@@ -644,6 +715,11 @@ impl Catalog {
             let entry = models.iter().find(|e| {
                 e.target.provider == selection.provider && e.target.model == selection.model
             });
+            if entry.is_some_and(|e| e.status == "configuration_required") {
+                return Err(fault(
+                    "selected model requires cloud endpoint, project, location or region configuration",
+                ));
+            }
             if entry.is_some_and(|e| e.status == "excluded") {
                 return Err(Fault::new(
                     "ModelUnavailable",

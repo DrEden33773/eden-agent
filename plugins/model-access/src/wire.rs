@@ -286,6 +286,7 @@ pub(crate) fn provider_fault(status: Option<u16>, body: &Value) -> Fault {
     let codes = [
         error["code"].as_str().unwrap_or(""),
         error["type"].as_str().unwrap_or(""),
+        error["status"].as_str().unwrap_or(""),
     ];
     let message = error["message"].as_str().unwrap_or("").to_ascii_lowercase();
     let terminal = codes.iter().any(|code| {
@@ -298,6 +299,8 @@ pub(crate) fn provider_fault(status: Option<u16>, body: &Value) -> Fault {
                 | "invalid_api_key"
                 | "authentication_error"
                 | "permission_denied"
+                | "PERMISSION_DENIED"
+                | "UNAUTHENTICATED"
         )
     });
     let terminal = terminal
@@ -325,6 +328,9 @@ pub(crate) fn provider_fault(status: Option<u16>, body: &Value) -> Fault {
                 | "server_error"
                 | "internal_server_error"
                 | "overloaded_error"
+                | "RESOURCE_EXHAUSTED"
+                | "UNAVAILABLE"
+                | "INTERNAL"
         )
     });
     let code = if terminal || matches!(status, Some(401..=403)) {

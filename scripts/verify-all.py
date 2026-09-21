@@ -28,6 +28,7 @@ SUITES = {
     "context": ("verify-context.py", "context-verification.json"),
     "workspace": ("verify-workspace.py", "workspace-verification.json"),
     "models": ("verify-model-access.py", "model-access-verification.json"),
+    "cloud-models": ("verify-cloud-model-access.py", "cloud-model-access-verification.json"),
 }
 
 

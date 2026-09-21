@@ -1171,3 +1171,215 @@ async fn nonreasoning_responses_omits_reasoning_despite_requested_thinking() {
     let (_, body) = received.await.unwrap();
     assert!(body.get("reasoning").is_none());
 }
+
+#[tokio::test]
+async fn g2_http_protocols_stream_text_with_private_auth_and_frozen_routes() {
+    for api in [
+        "google-generative-ai",
+        "google-vertex",
+        "azure-openai-responses",
+        "mistral-conversations",
+    ] {
+        let stream = match api {
+            "google-generative-ai" | "google-vertex" => event(json!({
+                "candidates": [{
+                    "content": { "parts": [{ "text": "你好" }] },
+                    "finishReason": "STOP",
+                }],
+                "usageMetadata": {
+                    "promptTokenCount": 4,
+                    "candidatesTokenCount": 2,
+                    "totalTokenCount": 6,
+                },
+            })),
+            "mistral-conversations" => {
+                event(json!({
+                    "choices": [{
+                        "index": 0,
+                        "delta": { "content": [{ "type": "text", "text": "你好" }] },
+                        "finish_reason": "stop",
+                    }],
+                    "usage": { "prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6 },
+                })) + "data: [DONE]\n\n"
+            }
+            _ => complete(json!([{
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "你好" }],
+            }])),
+        };
+        let (url, received) = server("200 OK", stream).await;
+        let mut target = projection::test_target(api);
+        target.base_url = url.trim_end_matches("/responses").into();
+        target.compat = json!({ "deployment": "deployed" });
+        let credentials = eden_protocol::models::CredentialReply {
+            api_key: Some("G2_SECRET".into()),
+            headers: Default::default(),
+            source: "test".into(),
+        };
+        let reply = targeted::request(&target, &credentials, &input(), |_, _| Ok(()))
+            .await
+            .unwrap();
+        assert!(
+            serde_json::to_string(&reply.items)
+                .unwrap()
+                .contains("你好")
+        );
+        let (headers, body) = received.await.unwrap();
+        let lower = headers.to_lowercase();
+        match api {
+            "google-generative-ai" | "google-vertex" => {
+                assert!(lower.contains("x-goog-api-key: g2_secret"));
+                assert!(headers.contains(":streamGenerateContent?alt=sse"));
+                assert_eq!(body["generationConfig"]["maxOutputTokens"], 2048);
+            }
+            "azure-openai-responses" => {
+                assert!(lower.contains("api-key: g2_secret"));
+                assert_eq!(body["model"], "deployed");
+            }
+            _ => assert!(lower.contains("authorization: bearer g2_secret")),
+        }
+        assert!(!serde_json::to_string(&reply).unwrap().contains("G2_SECRET"));
+    }
+}
+#[tokio::test]
+async fn g2_truncated_streams_and_http_errors_never_return_tool_calls() {
+    for api in [
+        "google-generative-ai",
+        "google-vertex",
+        "azure-openai-responses",
+        "mistral-conversations",
+    ] {
+        let (url, received) = server(
+            "429 Too Many Requests",
+            "{\"error\":{\"message\":\"G2_SECRET\"}}".into(),
+        )
+        .await;
+        let mut target = projection::test_target(api);
+        target.base_url = url.trim_end_matches("/responses").into();
+        let credentials = eden_protocol::models::CredentialReply {
+            api_key: Some("G2_SECRET".into()),
+            headers: Default::default(),
+            source: "test".into(),
+        };
+        let error = targeted::request(&target, &credentials, &input(), |_, _| Ok(()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "RetryableProviderFailure");
+        assert!(!format!("{error:?}").contains("G2_SECRET"));
+        received.await.unwrap();
+        let stream = if api.starts_with("google") {
+            event(json!({
+                "candidates": [{
+                    "content": {
+                        "parts": [{ "functionCall": { "name": "write", "args": { "path": "x" } } }],
+                    },
+                }],
+            }))
+        } else {
+            event(json!({ "type": "response.function_call_arguments.delta", "delta": "{" }))
+        };
+        let (url, received) = server("200 OK", stream).await;
+        target.base_url = url.trim_end_matches("/responses").into();
+        assert!(
+            targeted::request(&target, &credentials, &input(), |_, _| Ok(()))
+                .await
+                .is_err()
+        );
+        received.await.unwrap();
+    }
+}
+#[tokio::test]
+async fn g2_cancellation_closes_each_http_protocol_connection() {
+    for api in [
+        "google-generative-ai",
+        "google-vertex",
+        "azure-openai-responses",
+        "mistral-conversations",
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut target = projection::test_target(api);
+        target.base_url = format!("http://{}", listener.local_addr().unwrap());
+        let (ready, wait) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_request(&mut socket).await;
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
+            ready.send(()).unwrap();
+            let mut byte = [0];
+            match socket.read(&mut byte).await {
+                Ok(0) | Err(_) => (),
+                other => panic!("connection not closed: {other:?}"),
+            }
+        });
+        let request = tokio::spawn(async move {
+            let c = eden_protocol::models::CredentialReply {
+                api_key: Some("test".into()),
+                headers: Default::default(),
+                source: "test".into(),
+            };
+            targeted::request(&target, &c, &input(), |_, _| Ok(())).await
+        });
+        wait.await.unwrap();
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn cloudflare_gateway_separates_gateway_and_upstream_authentication() {
+    let stream = event(json!({
+        "choices": [{ "index": 0, "delta": { "content": "ok" }, "finish_reason": "stop" }],
+    })) + "data: [DONE]\n\n";
+    let (url, received) = server("200 OK", stream).await;
+    let mut t = projection::test_target("openai-completions");
+    t.provider = "cloudflare-ai-gateway".into();
+    t.base_url = url.trim_end_matches("/responses").into();
+    let c = eden_protocol::models::CredentialReply {
+        api_key: Some("gateway-key".into()),
+        headers: std::collections::BTreeMap::from([(
+            "Authorization".into(),
+            "Bearer upstream-key".into(),
+        )]),
+        source: "test".into(),
+    };
+    targeted::request(&t, &c, &input(), |_, _| Ok(()))
+        .await
+        .unwrap();
+    let (headers, _) = received.await.unwrap();
+    let headers = headers.to_lowercase();
+    assert!(headers.contains("cf-aig-authorization: bearer gateway-key"));
+    assert!(headers.contains("authorization: bearer upstream-key"));
+}
+#[tokio::test]
+async fn opencode_google_route_uses_gemini_protocol_from_model_identity() {
+    let (url, received) = server(
+        "200 OK",
+        event(json!({
+            "candidates": [{
+                "content": { "parts": [{ "text": "gateway" }] },
+                "finishReason": "STOP",
+            }],
+        })),
+    )
+    .await;
+    let mut t = projection::test_target("google-generative-ai");
+    t.provider = "opencode".into();
+    t.base_url = url.trim_end_matches("/responses").into();
+    let c = eden_protocol::models::CredentialReply {
+        api_key: Some("gateway-key".into()),
+        headers: Default::default(),
+        source: "test".into(),
+    };
+    targeted::request(&t, &c, &input(), |_, _| Ok(()))
+        .await
+        .unwrap();
+    let (headers, body) = received.await.unwrap();
+    assert!(headers.starts_with("POST /v1/models/test:streamGenerateContent?alt=sse"));
+    assert!(body.get("contents").is_some());
+    assert!(body.get("messages").is_none());
+}

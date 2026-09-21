@@ -51,3 +51,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## Cloud authentication dependencies
+
+The locked Google Cloud auth/gax/rpc/wkt crates declare Apache-2.0 but omit its full text from their archives. `third-party/google-cloud-rust-LICENSE` preserves the upstream license; the exact versions and source revisions are recorded in `scripts/license_bundle.py`. The text was checked at every recorded revision. The MIT texts omitted by `base64-simd 0.8.0`, `vsimd 0.8.0` and `defmt-parser 1.0.0` are likewise preserved from their published source revisions in `third-party/`. The installation license bundle includes these texts alongside AWS SDK and other package-local licenses.

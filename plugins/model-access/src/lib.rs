@@ -2,8 +2,8 @@
 //!
 //! Catalog-selected targets support OpenAI Responses, Chat Completions and Anthropic
 //! Messages; the legacy configuration retains OpenAI and DeepSeek Responses access.
-//! Catalog and credential services are independently replaceable. Each inference
-//! call consumes a frozen model target and obtains credentials through the private
+//! Catalog and credential services are independently replaceable. Each catalog-selected
+//! inference call consumes a frozen model target and obtains credentials through the private
 //! credential service, keeping secrets out of model targets and persisted history.
 //! HTTP clients, request bodies and streaming decoders live in the call future;
 //! dropping that future during scope cancellation closes its response stream.

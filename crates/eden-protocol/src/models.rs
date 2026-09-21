@@ -205,3 +205,78 @@ pub struct AuthInteraction {
     pub manual_input: bool,
     pub expires_at: u64,
 }
+
+/// Optional model lifecycle service, independently replaceable from catalog and inference.
+pub const MODEL_MANAGER: &str = "eden.model-manager.v1";
+
+/// Mutations wait for observed remote completion; cancellation never implies remote success.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+#[allow(missing_docs)]
+pub enum ManagerRequest {
+    List,
+    /// Requery remote state without replaying any mutation.
+    Reconnect,
+    Search {
+        query: String,
+    },
+    Download {
+        model: String,
+    },
+    Load {
+        model: String,
+        #[serde(default)]
+        unload_others: bool,
+    },
+    Unload {
+        model: String,
+    },
+    /// Stop a named remote load/download, including one started by a previous process.
+    Cancel {
+        model: String,
+    },
+}
+
+/// Remote state and its inference projection share one observation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct ManagedModel {
+    pub id: String,
+    pub state: String,
+    pub source: String,
+    pub failed: bool,
+    pub selectable: bool,
+    pub progress: Option<f64>,
+    pub target: ModelTarget,
+}
+
+/// Search returns repository identities, suitable for an explicit repo:quant request.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct ModelSearchResult {
+    pub id: String,
+    pub downloads: Option<u64>,
+    pub gated: bool,
+    #[serde(default)]
+    pub quants: Vec<ModelQuantization>,
+}
+
+/// A disconnected observation must never project cached models as currently selectable.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct ManagerReply {
+    pub status: String,
+    pub models: Vec<ManagedModel>,
+    pub results: Vec<ModelSearchResult>,
+    pub autoload: bool,
+    pub max_instances: Option<u64>,
+}
+
+/// Repository GGUF variants group all shards; unknown file sizes keep total bytes unknown.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct ModelQuantization {
+    pub name: String,
+    pub bytes: Option<u64>,
+    pub files: Vec<String>,
+}

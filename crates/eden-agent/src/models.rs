@@ -35,6 +35,31 @@ fn saved_selection(records: &[c::Record]) -> Result<Option<m::ModelSelection>, F
         .transpose()
 }
 impl Session {
+    /// Query the selected manager without changing session selection or replaying mutations.
+    pub async fn managed_models(&self) -> Result<m::ManagerReply, Fault> {
+        self.service(0, m::MODEL_MANAGER, &m::ManagerRequest::List)
+            .await
+    }
+    /// Manage remote models as an owned run. Cancel and shutdown await remote-stop cleanup;
+    /// cleanup errors mean the remote state is unknown and require an explicit reconnect.
+    pub fn manage_models(&self, request: m::ManagerRequest) -> Result<u64, Fault> {
+        self.start(true, move |session, run_id, cancel| async move {
+            session
+                .0
+                .kernel
+                .invoke(
+                    Request {
+                        session_id: session.id(),
+                        run_id,
+                        contract: m::MODEL_MANAGER.into(),
+                        payload: json!(request),
+                    },
+                    cancel,
+                )
+                .await
+        })
+    }
+
     /// Read model metadata without inference or authentication side effects.
     pub async fn models(&self) -> Result<m::CatalogReply, Fault> {
         self.service(0, m::MODEL_CATALOG, &m::CatalogRequest::List)

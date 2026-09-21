@@ -58,3 +58,5 @@ See [resources, trust and package composition](docs/workspace.md) for Skills, te
 See [Models and API keys](docs/models.md) for catalog refresh, private credentials, model selection and cross-protocol continuation.
 
 Account login, device authorization, private callback input and token refresh are available through the CLI and SDK; see [account authentication](docs/authentication.md) and [model routing](docs/models.md).
+
+Local model discovery, search, server-side download, load/unload and cancellation use the replaceable ModelManager role; see [llama.cpp router](docs/router.md).

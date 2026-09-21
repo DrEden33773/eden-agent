@@ -37,6 +37,7 @@ EXAMPLES = (
     "session_probe",
     "context_probe",
     "workspace_probe",
+    "router_probe",
 )
 _RECEIPT: dict[str, Any] | None = None
 

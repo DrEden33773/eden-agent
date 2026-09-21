@@ -484,6 +484,7 @@ impl Credentials {
         let configured = self.config.providers.get(&request.provider);
         let default_env = match request.provider.as_str() {
             "openai" => "OPENAI_API_KEY".into(),
+            "llama.cpp" => "LLAMA_API_KEY".into(),
             "anthropic" => "ANTHROPIC_API_KEY".into(),
             "deepseek" => "DEEPSEEK_API_KEY".into(),
             "kimi-coding" => "KIMI_API_KEY".into(),

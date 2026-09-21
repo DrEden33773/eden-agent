@@ -1,7 +1,7 @@
 //! Scriptable model selection and transient login interaction through the same SDK contracts.
-use crate::cli::{AuthAction, Cli, Family, ModelAction};
+use crate::cli::{AuthAction, Cli, Family, ModelAction, RouterAction};
 use eden_agent::{Session, SessionOptions};
-use eden_protocol::models::{AuthRequest, CatalogRequest, ModelSelection};
+use eden_protocol::models::{AuthRequest, CatalogRequest, ManagerRequest, ModelSelection};
 use serde_json::{Value, json};
 use std::{
     error::Error,
@@ -27,9 +27,12 @@ async fn cancellable_with_signal(
         biased;
         signal = signal => {
             session.cancel(run)?;
-            let _ = session.wait(run).await?;
+            let terminal = session.wait(run).await?;
             signal?;
-            Err("authentication cancelled".into())
+            if !terminal.cleanup_errors.is_empty() {
+                return Err(serde_json::to_string(&terminal)?.into());
+            }
+            Err("operation cancelled".into())
         },
         result = settled(session, run) => result,
     }
@@ -154,6 +157,32 @@ pub async fn run(cli: &Cli) -> Result<i32, Box<dyn Error>> {
     let result = async {
         let value =
             match cli.family.as_ref().ok_or("missing operation")? {
+                Family::Router { action } => {
+                    let request = match action {
+                        RouterAction::List => ManagerRequest::List,
+                        RouterAction::Reconnect => ManagerRequest::Reconnect,
+                        RouterAction::Search { query } => ManagerRequest::Search {
+                            query: query.clone(),
+                        },
+                        RouterAction::Download { model } => ManagerRequest::Download {
+                            model: model.clone(),
+                        },
+                        RouterAction::Load {
+                            model,
+                            unload_others,
+                        } => ManagerRequest::Load {
+                            model: model.clone(),
+                            unload_others: *unload_others,
+                        },
+                        RouterAction::Unload { model } => ManagerRequest::Unload {
+                            model: model.clone(),
+                        },
+                        RouterAction::Cancel { model } => ManagerRequest::Cancel {
+                            model: model.clone(),
+                        },
+                    };
+                    router(&session, request, cli.json).await?
+                }
                 Family::Models { action } => match action {
                     ModelAction::List => json!(session.models().await?),
                     ModelAction::Current => json!(session.model_selection().await?),
@@ -301,5 +330,42 @@ pub async fn run(cli: &Cli) -> Result<i32, Box<dyn Error>> {
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error.into()),
         (Ok(code), Ok(())) => Ok(code),
+    }
+}
+
+async fn router(
+    session: &Session,
+    request: ManagerRequest,
+    events: bool,
+) -> Result<Value, Box<dyn Error>> {
+    let run = session.manage_models(request)?;
+    let wait = cancellable(session, run);
+    tokio::pin!(wait);
+    let mut sequence = 0;
+    loop {
+        tokio::select! {
+            result = &mut wait => {
+                if events {
+                    for event in session
+                        .events()
+                        .into_iter()
+                        .filter(|event| event.sequence > sequence)
+                    {
+                        if event.kind == "model_management" {
+                            println!("{}", serde_json::to_string(&event)?);
+                        }
+                    }
+                }
+                return result;
+            },
+            batch = session.events_after(sequence), if events => {
+                for event in batch {
+                    sequence = event.sequence;
+                    if event.kind == "model_management" {
+                        println!("{}", serde_json::to_string(&event)?);
+                    }
+                }
+            }
+        }
     }
 }

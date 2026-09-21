@@ -62,6 +62,7 @@ fn descriptor() -> Descriptor {
         provides: vec![
             PROVIDER.into(),
             MODEL_CATALOG.into(),
+            MODEL_MANAGER.into(),
             CREDENTIAL_SOURCE.into(),
         ],
     }
@@ -72,6 +73,7 @@ fn create(config: Value) -> Result<Package, Fault> {
             .as_str()
             .ok_or_else(|| fault("target_path missing"))?,
     );
+    let manager_path = path.clone();
     let address = config["wire_address"]
         .as_str()
         .unwrap_or("127.0.0.1:1")
@@ -105,6 +107,31 @@ fn create(config: Value) -> Result<Package, Fault> {
                     source: target.source.clone(),
                     target: Some(target),
                     status: "author".into(),
+                })
+            }
+        })
+        .service(MODEL_MANAGER, move |request: ManagerRequest, _| {
+            let path = manager_path.clone();
+            async move {
+                let mut target: ModelTarget =
+                    serde_json::from_slice(&std::fs::read(&path).map_err(fault)?).map_err(fault)?;
+                if let ManagerRequest::Load { model, .. } = request {
+                    target.model = model;
+                    std::fs::write(&path, serde_json::to_vec(&target).map_err(fault)?)
+                        .map_err(fault)?;
+                }
+                Ok(ManagerReply {
+                    status: "author-managed".into(),
+                    models: vec![ManagedModel {
+                        id: target.model.clone(),
+                        state: "loaded".into(),
+                        source: "independent-author".into(),
+                        failed: false,
+                        selectable: true,
+                        progress: None,
+                        target,
+                    }],
+                    ..Default::default()
                 })
             }
         })

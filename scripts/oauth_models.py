@@ -2,6 +2,7 @@
 
 import argparse
 import base64
+import errno
 import hashlib
 import http.server
 import json
@@ -10,6 +11,7 @@ import pathlib
 import queue
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -36,6 +38,21 @@ def write(path: pathlib.Path, value: object) -> None:
 
 def no_secrets(text: str) -> None:
     assert not any(secret in text for secret in SECRETS), "secret leaked outside private contract"
+
+
+def assert_pipe_reader_closed(fd: int) -> None:
+    """Probe the stdin pipe only after its owning login process has exited."""
+    assert stat.S_ISFIFO(os.fstat(fd).st_mode), "private input is not a pipe"
+    try:
+        # Write directly: a failed buffered flush would retain bytes and fail again
+        # during close. CPython's subprocess._stdin_write documents Windows EINVAL
+        # for an exited child's closed pipe (bpo-19612 and bpo-30418).
+        os.write(fd, b"x")
+    except OSError as error:
+        if error.errno == errno.EPIPE or (os.name == "nt" and error.errno == errno.EINVAL):
+            return
+        raise
+    raise AssertionError("login left a private-input reader alive")
 
 
 class Server:
@@ -196,13 +213,7 @@ class Login:
         assert (self.process.returncode == 0) == success, (stdout, stderr)
         # Unlike communicate(), waiting above preserves stdin. An orphaned helper
         # would keep this pipe readable and make the write succeed.
-        try:
-            self.input.write("reader must already be gone\n")
-            self.input.flush()
-        except BrokenPipeError:
-            pass
-        else:
-            raise AssertionError("login left a private-input reader alive")
+        assert_pipe_reader_closed(self.input.fileno())
         return stdout
 
     def close(self) -> None:

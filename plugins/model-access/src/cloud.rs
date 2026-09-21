@@ -323,6 +323,16 @@ pub(crate) async fn configured_region(config: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn isolate_child_environment(child: &mut std::process::Command) {
+        child.env_clear();
+        // Winsock expands provider DLL paths through SystemRoot. Keep that OS
+        // prerequisite while excluding ambient AWS credentials and proxy settings.
+        #[cfg(windows)]
+        child.env(
+            "SystemRoot",
+            std::env::var_os("SystemRoot").expect("Windows fixture requires SystemRoot"),
+        );
+    }
     #[tokio::test]
     async fn catalog_explicit_configuration_never_reads_key_file() {
         let config = serde_json::json!({
@@ -364,8 +374,8 @@ mod tests {
         .unwrap();
         for environment in [false, true] {
             let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            isolate_child_environment(&mut child);
             child
-                .env_clear()
                 .env("HOME", &directory)
                 .env("USERPROFILE", &directory)
                 .env("AWS_CONFIG_FILE", directory.join(".aws/config"))
@@ -447,9 +457,9 @@ mod tests {
                 String::from_utf8(bytes).unwrap()
             });
             let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+            isolate_child_environment(child.as_std_mut());
             child
                 .kill_on_drop(true)
-                .env_clear()
                 .env("HOME", &directory)
                 .env("USERPROFILE", &directory)
                 .env("AWS_CONFIG_FILE", directory.join("config"))

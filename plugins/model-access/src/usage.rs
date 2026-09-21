@@ -2,14 +2,53 @@
 use eden_protocol::models::ModelTarget;
 use serde_json::{Value, json};
 pub(crate) fn normalize(raw: &Value, target: &ModelTarget, stop: Option<&str>) -> Value {
-    let anthropic = target.api == "anthropic-messages";
-    let input = raw[if anthropic || target.api == "openai-responses" {
+    let original = raw;
+    let mapped;
+    let raw = if matches!(
+        target.api.as_str(),
+        "google-generative-ai" | "google-vertex"
+    ) {
+        mapped = json!({
+            "prompt_tokens": raw["promptTokenCount"],
+            "completion_tokens": raw["candidatesTokenCount"]
+                .as_u64()
+                .map(|n| n.saturating_add(raw["thoughtsTokenCount"].as_u64().unwrap_or(0))),
+            "prompt_tokens_details": { "cached_tokens": raw["cachedContentTokenCount"] },
+            "completion_tokens_details": { "reasoning_tokens": raw["thoughtsTokenCount"] },
+            "total_tokens": raw["totalTokenCount"],
+        });
+        &mapped
+    } else if target.api == "bedrock-converse-stream" {
+        mapped = json!({
+            "input_tokens": raw["inputTokens"],
+            "output_tokens": raw["outputTokens"],
+            "cache_read_input_tokens": raw["cacheReadInputTokens"],
+            "cache_creation_input_tokens": raw["cacheWriteInputTokens"],
+            "total_tokens": raw["totalTokens"],
+        });
+        &mapped
+    } else {
+        raw
+    };
+    let anthropic = matches!(
+        target.api.as_str(),
+        "anthropic-messages" | "bedrock-converse-stream"
+    );
+    let input = raw[if anthropic
+        || matches!(
+            target.api.as_str(),
+            "openai-responses" | "azure-openai-responses"
+        ) {
         "input_tokens"
     } else {
         "prompt_tokens"
     }]
     .as_u64();
-    let output = raw[if anthropic || target.api == "openai-responses" {
+    let output = raw[if anthropic
+        || matches!(
+            target.api.as_str(),
+            "openai-responses" | "azure-openai-responses"
+        ) {
         "output_tokens"
     } else {
         "completion_tokens"
@@ -22,6 +61,8 @@ pub(crate) fn normalize(raw: &Value, target: &ModelTarget, stop: Option<&str>) -
             .as_u64()
             .or_else(|| raw["input_tokens_details"]["cached_tokens"].as_u64())
             .or_else(|| raw["prompt_cache_hit_tokens"].as_u64())
+            .or_else(|| raw["num_cached_tokens"].as_u64())
+            .or_else(|| raw["prompt_token_details"]["cached_tokens"].as_u64())
     };
     let cache_write = raw["cache_creation_input_tokens"].as_u64();
     let uncached = if anthropic {
@@ -74,7 +115,7 @@ pub(crate) fn normalize(raw: &Value, target: &ModelTarget, stop: Option<&str>) -
     });
     json!({
         "total_tokens": total,
-        "raw": raw,
+        "raw": original,
         "normalized": {
             "input_tokens": uncached,
             "output_tokens": output,

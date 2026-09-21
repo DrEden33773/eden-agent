@@ -26,6 +26,29 @@ class Fallback:
 
 
 FALLBACKS = {
+    **{
+        (name, version): Fallback(
+            ("third-party/google-cloud-rust-LICENSE",),
+            f"https://github.com/googleapis/google-cloud-rust/blob/{revision}/LICENSE",
+        )
+        for name, version, revision in (
+            ("google-cloud-auth", "1.16.0", "4ae1bfd6813b4687f8af5494a6795b07a12ba341"),
+            ("google-cloud-gax", "1.14.0", "4ae1bfd6813b4687f8af5494a6795b07a12ba341"),
+            ("google-cloud-rpc", "1.6.0", "544a5d8f29117f2611aeadc4b3d30843710371e2"),
+            ("google-cloud-wkt", "1.7.0", "25e0da468d47057a9ea244f039f8d79d5228d2f1"),
+        )
+    },
+    **dict.fromkeys(
+        ((name, "0.8.0") for name in ("base64-simd", "vsimd")),
+        Fallback(
+            ("third-party/simd-0.8.0-LICENSE",),
+            "https://github.com/Nugine/simd/blob/d74c030d9dc4f3cae02146d1f497ff62726ef09a/LICENSE",
+        ),
+    ),
+    ("defmt-parser", "1.0.0"): Fallback(
+        ("third-party/defmt-parser-1.0.0-LICENSE",),
+        "https://github.com/knurling-rs/defmt/blob/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-MIT",
+    ),
     ("cordis-core", "0.2.10"): Fallback(
         ("third-party/cordis-core-0.2.10-LICENSE",),
         "https://github.com/dshbox/cordis-rs/blob/ba4babd73996b0c8821128e5a561e407ae2682b7/LICENSE",

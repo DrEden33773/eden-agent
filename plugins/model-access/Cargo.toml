@@ -16,6 +16,11 @@ tokio.workspace = true
 futures-util.workspace = true
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "stream", "rustls"] }
 httpdate = "1.0.3"
+aws-config = { version = "1.12.0", default-features = false, features = ["default-https-client", "rt-tokio", "sso"] }
+aws-sdk-bedrockruntime = "1.145.0"
+aws-smithy-types = "1.6.4"
+google-cloud-auth = "1.16.0"
+base64 = "0.22.1"
 [lints]
 workspace = true
 

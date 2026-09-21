@@ -4,7 +4,7 @@
 
 ## Catalog-selected models
 
-Model selection supports OpenAI Responses, Chat Completions and Anthropic Messages. Each run freezes the selected model's routing, capabilities, limits and thinking settings; credentials are resolved through the private credential service. The catalog and credential roles can be replaced independently of inference. Other catalog protocols remain visible as unsupported.
+Model selection supports OpenAI Responses, Chat Completions, Anthropic Messages, Gemini, Vertex, Bedrock ConverseStream, Azure Responses and native Mistral Chat. Each run freezes the selected model's routing, capabilities, limits and thinking settings; credentials are resolved through the private credential service. The catalog and credential roles can be replaced independently of inference. Other catalog protocols remain visible as unsupported.
 
 See [Models and API keys](../../docs/models.md) for CLI selection, catalog refresh and source configuration, API-key management, credential precedence and trust, cross-model history projection, and independent SDK consumers.
 

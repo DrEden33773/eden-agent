@@ -1,6 +1,6 @@
 # Models and API keys
 
-The default `model-access` native package provides a model catalog, private credentials and inference. It supports OpenAI Responses, Chat Completions and Anthropic Messages. Other catalog protocols remain visible as unsupported; listing a configured model does not prove that the remote account can call it.
+The default `model-access` native package provides a model catalog, private credentials and inference. It supports OpenAI Responses, Chat Completions, Anthropic Messages and the [cloud and dedicated protocols](#cloud-and-dedicated-protocols) below. Other catalog protocols remain visible as unsupported; listing a configured model does not prove that the remote account can call it.
 
 ## CLI
 
@@ -49,7 +49,7 @@ Set `plugins.model-access` in the user `settings.json` or an explicitly trusted 
 
 Catalog precedence is explicit configuration, selected remote catalog, then bundled Pi data. Source changes isolate caches. Refresh preserves valid cached data when a provider response fails, and never changes a target already frozen for a run. Offline catalog operations do not contact the network. The selected source supplies routing as well as metadata; remote data is never executed as a credential command. Explicit refresh is an asynchronous managed operation through the SDK and a waiting command through the CLI.
 
-Credential precedence is an explicit private request value, the managed stored key, provider environment, then custom configuration. Logout removes managed storage; an environment key can remain configured. Keys and configured credential headers travel through the private credential service, outside model targets, request events and history. The store uses private filesystem permissions, a process lock and atomic replacement. Authentication operation IDs carry no key; start/input/cancel/status are shared SDK operations. Subscription OAuth and cloud credential chains are separate adapters.
+Credential precedence is an explicit private request value, the managed stored key, provider environment, then custom configuration. Logout removes managed storage; an environment key can remain configured. Keys and configured credential headers travel through the private credential service, outside model targets, request events and history. The store uses private filesystem permissions, a process lock and atomic replacement. Authentication operation IDs carry no key; start/input/cancel/status are shared SDK operations. Subscription OAuth is separate from API-key and cloud credential access.
 
 ## Native authors and Rust consumers
 
@@ -64,3 +64,50 @@ Completed provider reasoning records include their original provider/model/proto
 The committed snapshot in `plugins/model-access/data` comes from the fixed `@earendil-works/pi-ai@0.85.1` release. Its provenance and upstream license are stored alongside it. Ordinary Cargo builds consume those resources without fetching a catalog or loading a JavaScript runtime. To update the snapshot, obtain an explicit fixed upstream package or retain the exact response bytes from the selected source, validate provider identities and supported routes, preserve provenance and notices, and submit the candidate data through a normal reviewed PR. Dynamic account-specific models are not fabricated as static entries.
 
 `python scripts/verify-model-access.py` exercises installed consumers and independently compiled catalog/credential authors with controlled HTTP receivers. Real account access is verified separately from those fixtures.
+
+## Cloud and dedicated protocols
+
+Catalog-selected models also support Gemini (`google-generative-ai`), Vertex (`google-vertex`), Bedrock ConverseStream (`bedrock-converse-stream`), Azure Responses (`azure-openai-responses`) and native Mistral Chat (`mistral-conversations`). Gateways dispatch using each model's API identity, including OpenCode's Gemini models. All adapters return executable tool calls only after a successful complete response. Request cancellation closes the active transport; inference adds no SDK retries. Existing session retry policy owns retryable failures.
+
+Use `GEMINI_API_KEY`, `GOOGLE_CLOUD_API_KEY`, `MISTRAL_API_KEY`, `AZURE_OPENAI_API_KEY` or `AWS_BEARER_TOKEN_BEDROCK`, or store a key with `eden auth set PROVIDER`. Vertex API keys use the express-mode publisher route; ADC uses the configured project and location. Azure sends its key in `api-key` and the deployment name as the request model. `AZURE_OPENAI_BASE_URL` or `AZURE_OPENAI_RESOURCE_NAME` supplies its endpoint, `AZURE_OPENAI_API_VERSION` optionally selects a version, and `AZURE_OPENAI_DEPLOYMENT_NAME_MAP` maps comma-separated `model=deployment` pairs. The default is the v1 Responses API.
+
+Non-secret provider routing can be configured explicitly. `catalog.providers.PROVIDER.compat` overlays protocol options, while `catalog.models` can define complete custom targets. Routing is frozen with the session's run target, including deployment, project, location and region.
+
+```json
+{
+  "plugins": {
+    "model-access": {
+      "catalog": {
+        "providers": {
+          "azure-openai-responses": {
+            "base_url": "https://RESOURCE.openai.azure.com/openai/v1",
+            "compat": { "deployment": "DEPLOYMENT", "apiVersion": "v1" }
+          },
+          "google-vertex": {
+            "compat": { "project": "PROJECT", "location": "global" }
+          },
+          "amazon-bedrock": {
+            "compat": { "region": "us-east-1" }
+          }
+        }
+      },
+      "credentials": {
+        "providers": {
+          "amazon-bedrock": {
+            "cloud": { "enabled": true, "profile": "development", "region": "us-east-1" }
+          },
+          "google-vertex": {
+            "cloud": { "enabled": true, "quota_project": "PROJECT" }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Bedrock supports bearer keys and the AWS credential chain, including environment keys, session tokens, shared profiles, assume-role and web identity. Region resolution uses explicit configuration, `AWS_REGION`/`AWS_DEFAULT_REGION`, then the selected local profile. Google ADC discovers `GOOGLE_APPLICATION_CREDENTIALS`, local application-default credentials or cloud metadata; `cloud.service_account_file` selects a service-account file explicitly; `cloud.adc_file` selects another supported ADC JSON file. Vertex ADC requires project and location, configurable as above or through `GOOGLE_CLOUD_PROJECT`/`GCLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION`. Listing models does not fetch cloud tokens or contact metadata services; use `cloud.enabled: true` to declare metadata-based access in a cloud deployment. Authentication failures do not silently switch accounts.
+
+Cloud SDK subprocess credential sources are not enabled. For a trusted credential command, use the existing `credentials.providers.PROVIDER.command` or private header configuration. Cloudflare AI Gateway uses `CLOUDFLARE_API_KEY` as `cf-aig-authorization`, with `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_GATEWAY_ID` filling its endpoint. Configure any additional upstream authorization in private credential headers, never in catalog headers.
+
+`python scripts/verify-cloud-model-access.py` exercises installed CLI selection, tool and image results, signed Gemini state and reopened continuation through controlled Gemini, Vertex, Azure and Mistral endpoints. Bedrock tests exercise the actual AWS signing and transport stack. Remote model availability and cloud account permissions remain properties of the configured account.

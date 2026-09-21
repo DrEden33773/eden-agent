@@ -21,6 +21,43 @@ fn assert_idempotent(source: &str) -> String {
 }
 
 #[test]
+fn a_long_direct_format_string_preserves_its_literal_and_capture() {
+    let message = format!("{}{{name}}", "A diagnostic with useful context. ".repeat(6));
+    let literal = format!("{message:?}");
+    let source = format!("fn f(name: &str) {{ let message=format!({literal}); }}\n");
+    assert!(eden_fmt::engine::check_source(&source).is_empty());
+    let formatted = assert_idempotent(&source);
+    let file = syn::parse_file(&formatted).expect("formatted Rust");
+    let syn::Item::Fn(function) = &file.items[0] else {
+        panic!("expected the test function");
+    };
+    let syn::Stmt::Local(local) = &function.block.stmts[0] else {
+        panic!("expected the format binding");
+    };
+    let syn::Expr::Macro(call) = local.init.as_ref().unwrap().expr.as_ref() else {
+        panic!("expected format!");
+    };
+    assert!(call.mac.path.is_ident("format"));
+    let argument: syn::LitStr = syn::parse2(call.mac.tokens.clone()).expect("one direct literal");
+    assert_eq!(argument.value(), message);
+    assert!(formatted.lines().any(|line| line.chars().count() > 100));
+    assert!(formatted.contains("let message = format!("));
+}
+
+#[test]
+fn a_long_json_string_preserves_its_value_while_the_body_is_formatted() {
+    let message = "A description with useful context. ".repeat(6);
+    let literal = format!("{message:?}");
+    let source =
+        format!("fn f() {{ let value=json!({{\"description\":{literal},\"required\":true}}); }}\n");
+    assert!(eden_fmt::engine::check_source(&source).is_empty());
+    let formatted = assert_idempotent(&source);
+    assert!(formatted.contains(&literal));
+    assert!(formatted.lines().any(|line| line.chars().count() > 100));
+    assert!(formatted.contains("\"required\": true"));
+}
+
+#[test]
 fn objects_collapse_when_they_fit_and_expand_when_they_do_not() {
     assert_eq!(
         assert_idempotent("fn f() {\n    let v = json!({\"a\":1,\"b\":{\"c\":2}});\n}\n"),

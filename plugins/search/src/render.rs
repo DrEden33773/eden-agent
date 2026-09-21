@@ -4,10 +4,7 @@ use eden_plugin_sdk::serde_json::{self, Value, json};
 pub fn render(value: &Value) -> String {
     if let Some(candidates) = value.get("candidates") {
         return format!(
-            concat!(
-                "Exact literal search: complete, 0 matches. Fuzzy candidates follow; these are not ",
-                "exact occurrences.\n{}",
-            ),
+            "Exact literal search: complete, 0 matches. Fuzzy candidates follow; these are not exact occurrences.\n{}",
             render(candidates)
         );
     }

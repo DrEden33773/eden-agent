@@ -316,10 +316,7 @@ fn catalog() -> Vec<ToolDefinition> {
                 "pattern": { "type": "string", "minLength": 1 },
                 "path": {
                     "type": "string",
-                    "description": concat!(
-                            "Existing file or directory, relative to cwd or absolute. Default cwd. ",
-                            "Never widens a missing path.",
-                        ),
+                    "description": "Existing file or directory, relative to cwd or absolute. Default cwd. Never widens a missing path.",
                 },
                 "ranking": {
                     "type": "string",
@@ -329,10 +326,7 @@ fn catalog() -> Vec<ToolDefinition> {
                             vec!["relevance", "git", "definition", "history"]
                         },
                     "default": "relevance",
-                    "description": concat!(
-                            "Explicit optional priority; history requires configured persistence, ",
-                            "definition is a heuristic hint.",
-                        ),
+                    "description": "Explicit optional priority; history requires configured persistence, definition is a heuristic hint.",
                 },
                 "case": {
                     "type": "string",
@@ -347,10 +341,7 @@ fn catalog() -> Vec<ToolDefinition> {
                 "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 30 },
                 "cursor": {
                     "type": "string",
-                    "description": concat!(
-                            "Continue with exactly the same search arguments. Invalidated by file ",
-                            "changes, eviction or reopen.",
-                        ),
+                    "description": "Continue with exactly the same search arguments. Invalidated by file changes, eviction or reopen.",
                 },
                 "refresh": {
                     "type": "boolean",
@@ -379,10 +370,7 @@ fn catalog() -> Vec<ToolDefinition> {
                 properties["fallback"] = json!({
                     "type": "string",
                     "enum": ["fuzzy"],
-                    "description": concat!(
-                            "Opt in only for literal grep: fuzzy candidates after complete zero exact ",
-                            "matches, in the same scope. Exact and candidate results remain separate.",
-                        ),
+                    "description": "Opt in only for literal grep: fuzzy candidates after complete zero exact matches, in the same scope. Exact and candidate results remain separate.",
                 });
                 properties["max_file_bytes"] = json!({
                     "type": "integer",
@@ -395,17 +383,9 @@ fn catalog() -> Vec<ToolDefinition> {
             ToolDefinition {
                 name: name.into(),
                 description: if name == "grep" {
-                    concat!(
-                        "Search file contents with FFF. Literal and case-sensitive by default. Results ",
-                        "are grouped by file with line numbers; has_more means continue using cursor. ",
-                        "complete describes evaluated scope, while skipped and line_truncated describe ",
-                        "omissions. Fuzzy results are candidates, not proof of exact occurrence.",
-                    )
+                    "Search file contents with FFF. Literal and case-sensitive by default. Results are grouped by file with line numbers; has_more means continue using cursor. complete describes evaluated scope, while skipped and line_truncated describe omissions. Fuzzy results are candidates, not proof of exact occurrence."
                 } else {
-                    concat!(
-                        "Find files by fuzzy whole relative path (default) or explicit glob. Returns ",
-                        "compact grouped pages with explicit continuation and index state.",
-                    )
+                    "Find files by fuzzy whole relative path (default) or explicit glob. Returns compact grouped pages with explicit continuation and index state."
                 }
                 .into(),
                 parameters: json!({

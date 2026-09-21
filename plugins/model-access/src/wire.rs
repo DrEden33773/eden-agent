@@ -35,12 +35,9 @@ pub(crate) fn project(
                             "type": "input_image",
                             "image_url": format!("data:{media_type};base64,{data}"),
                         })),
-                        Block::File { .. } if options.profile == Profile::Deepseek => {
-                            Err(failure(concat!(
-                                "DeepSeek Responses does not support file input; ",
-                                "use text or images",
-                            )))
-                        }
+                        Block::File { .. } if options.profile == Profile::Deepseek => Err(failure(
+                            "DeepSeek Responses does not support file input; use text or images",
+                        )),
                         Block::File {
                             name,
                             media_type,

@@ -4,11 +4,7 @@ pub(super) fn tools() -> Vec<ToolDefinition> {
     [
         (
             "powershell",
-            concat!(
-                "Run native PowerShell without profiles at the explicit cwd. Waits for process-tree ",
-                "cleanup on completion, cancellation or optional timeout_seconds deadline. Returns ",
-                "separate bounded stream tails and persistent full-output artifacts.",
-            ),
+            "Run native PowerShell without profiles at the explicit cwd. Waits for process-tree cleanup on completion, cancellation or optional timeout_seconds deadline. Returns separate bounded stream tails and persistent full-output artifacts.",
             json!({
                 "type": "object",
                 "properties": {
@@ -31,10 +27,7 @@ pub(super) fn tools() -> Vec<ToolDefinition> {
         ),
         (
             "skill",
-            concat!(
-                "Load an available skill on demand. Relative references resolve from its skill ",
-                "directory.",
-            ),
+            "Load an available skill on demand. Relative references resolve from its skill directory.",
             json!({
                 "type": "object",
                 "properties": { "name": { "type": "string" }, "arguments": { "type": "string" } },
@@ -69,11 +62,7 @@ pub(super) fn tools() -> Vec<ToolDefinition> {
         ),
         (
             "edit",
-            concat!(
-                "Apply old_text/new_text or a batch of edits against the original file. All matches must be ",
-                "unique and nonoverlapping. Strict mode normalizes CRLF; tolerant mode additionally ",
-                "normalizes curly quotes, Unicode dashes and trailing spaces/tabs. Preserves BOM and newline style.",
-            ),
+            "Apply old_text/new_text or a batch of edits against the original file. All matches must be unique and nonoverlapping. Strict mode normalizes CRLF; tolerant mode additionally normalizes curly quotes, Unicode dashes and trailing spaces/tabs. Preserves BOM and newline style.",
             json!({
                 "type": "object",
                 "properties": {
@@ -100,11 +89,7 @@ pub(super) fn tools() -> Vec<ToolDefinition> {
         ),
         (
             "bash",
-            concat!(
-                "Run bash in the session cwd. Returns separate bounded stream tails, persistent ",
-                "full-output artifacts and the exit code after process-tree cleanup. An optional ",
-                "timeout_seconds deadline stops this command; there is no default timeout.",
-            ),
+            "Run bash in the session cwd. Returns separate bounded stream tails, persistent full-output artifacts and the exit code after process-tree cleanup. An optional timeout_seconds deadline stops this command; there is no default timeout.",
             json!({
                 "type": "object",
                 "properties": {

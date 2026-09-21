@@ -23,3 +23,31 @@ The published crates `objc2-core-foundation 0.3.2` and `objc2-core-services 0.3.
 ## License verification
 
 Run `python scripts/license_bundle.py --check --all-platforms` to validate the locked Linux, macOS and Windows dependency metadata without compiling or installing the product. Use `--check --target <triple>` for one target and `python scripts/test_license_bundle.py` for filesystem regressions. Cargo may download missing exact package sources. Validation checks package-local license names without case sensitivity, declared `license_file` paths, pinned fallbacks and required native notices; it reports all affected packages before assembling a license bundle. Unrelated Cargo cache ancestors cannot supply a dependency's license.
+
+## Pi model catalog
+
+The bundled model catalog is data from `@earendil-works/pi-ai@0.85.1`, distributed under the MIT license. The license below is from [the pinned upstream source](https://github.com/earendil-works/pi/blob/d981de1229ef899957bbe968bc8dcda02a21f477/LICENSE). It applies to the model data embedded in the model-access library; Pi runtime code is not required.
+
+```text
+MIT License
+
+Copyright (c) 2025 Mario Zechner
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

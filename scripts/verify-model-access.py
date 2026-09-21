@@ -349,6 +349,10 @@ def main() -> None:
     destination = installed(ROOT / "artifacts/model-access-install")
     host = destination / "bin" / ("eden.exe" if sys.platform == "win32" else "eden")
     frozen = host.read_bytes()
+    upstream_license = (
+        (ROOT / "plugins/model-access/data/PI-LICENSE").read_text(encoding="utf-8").strip()
+    )
+    assert upstream_license in (destination / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
     composition = json.loads((destination / "composition.json").read_text(encoding="utf-8"))
     lib = library("author_model_services")
     folder = destination / "plugins/model-services/0.1.0"

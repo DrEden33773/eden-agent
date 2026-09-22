@@ -138,6 +138,7 @@ unsafe extern "C" fn request(host: usize, bytes: Bytes, reply: Reply) -> u64 {
             Err(error) => Outcome::Failed(error),
         },
         cleanup_errors: vec![],
+        partial_result: None,
     };
     // SAFETY: Each admitted bridge owns this callback token exactly once.
     unsafe { reply.send(&terminal) };

@@ -10,24 +10,23 @@ import threading
 from typing import Any
 
 from install import library, package, target
-from verification import ROOT, author_artifact, run
+from verification import ROOT, author_artifact, installed, run
 
 
 def check(host: pathlib.Path, composition: pathlib.Path, scratch: pathlib.Path) -> dict[str, bool]:
     selected = json.loads(composition.read_text(encoding="utf-8"))
-    controlled = {
-        "packages": [
-            item
-            for item in selected["packages"]
-            if item["descriptor"]["package"] in ("standard", "coding-tools")
-        ],
-        "roles": {
-            role: name
-            for role, name in selected["roles"].items()
-            if name in ("standard", "coding-tools")
-        },
-    }
-    controlled_path = composition.parent / "entrypoints-controlled.json"
+    controlled_dir = installed(scratch / "rpc-controlled", controlled=True)
+    controlled_path = controlled_dir / "composition.json"
+    controlled = json.loads(controlled_path.read_text(encoding="utf-8"))
+    shell_package = next(
+        item for item in selected["packages"] if item["descriptor"]["package"] == "coding-tools"
+    ).copy()
+    shell_package["library"] = str(composition.parent / shell_package["library"])
+    shell_package["config"] = {}
+    controlled["packages"].append(shell_package)
+    controlled["roles"].update(
+        {role: "coding-tools" for role in shell_package["descriptor"]["provides"]}
+    )
     controlled_path.write_text(json.dumps(controlled), encoding="utf-8")
     run(
         ["cargo", "test", "--locked", "-p", "eden-cli", "--test", "rpc", "--", "--ignored"],
@@ -37,7 +36,12 @@ def check(host: pathlib.Path, composition: pathlib.Path, scratch: pathlib.Path) 
     )
     extension_path = composition.parent / library("author_entrypoint_extension")
     shutil.copy2(author_artifact("entrypoint-extension"), extension_path)
-    roles = ["example.entry-catalog.v1", "example.entry-command.v1", "example.entry-input.v1"]
+    roles = [
+        "example.entry-catalog.v1",
+        "example.entry-command.v1",
+        "example.entry-input.v1",
+        "eden.auth.v1",
+    ]
     selected["packages"].append(
         package("entrypoint-extension", roles, str(extension_path), target())
     )
@@ -164,6 +168,63 @@ def check(host: pathlib.Path, composition: pathlib.Path, scratch: pathlib.Path) 
                     "status": "completed",
                     "value": True,
                 }, message
+                break
+        send("auth", "auth.request", {"action": "start", "provider": "fixture"})
+        private_seen = False
+        auth_settled = False
+        while not (private_seen and auth_settled):
+            message = incoming.get(timeout=15)
+            assert message
+            if message["type"] == "private_result" and message.get("id") == "auth":
+                assert "PRIVATE_AUTH_CANARY" in json.dumps(message)
+                private_seen = True
+            else:
+                assert "PRIVATE_AUTH_CANARY" not in json.dumps(message), message
+            if (
+                message["type"] == "event"
+                and message.get("id") == "auth"
+                and message["event"]["kind"] == "settled"
+            ):
+                auth_settled = True
+        send(
+            "shell",
+            "shell",
+            {
+                "command": "printf CANCELLED_MARKER; sleep 60",
+                "shell": "bash",
+                "exclude_from_context": False,
+            },
+        )
+        shell_run = None
+        while True:
+            message = incoming.get(timeout=15)
+            assert message
+            if message["type"] == "accepted" and message.get("id") == "shell":
+                shell_run = message["run_id"]
+            if message["type"] == "event" and message["event"]["kind"] == "user_shell_output":
+                assert shell_run is not None
+                send("cancel-shell", "shell.cancel", {"run_id": shell_run})
+            if (
+                message["type"] == "event"
+                and message["event"]["kind"] == "settled"
+                and message["event"]["run_id"] == shell_run
+            ):
+                terminal = message["event"]["payload"]
+                assert terminal["outcome"]["status"] == "cancelled", terminal
+                assert "CANCELLED_MARKER" in terminal["partial_result"]["text"], terminal
+                artifact = terminal["partial_result"]["artifacts"][0]["path"]
+                assert pathlib.Path(artifact).read_bytes() == b"CANCELLED_MARKER"
+                break
+        send("history", "history", {})
+        while True:
+            message = incoming.get(timeout=15)
+            assert message
+            if message["type"] == "result" and message.get("id") == "history":
+                assert "PRIVATE_AUTH_CANARY" not in json.dumps(message)
+                shell_record = next(
+                    record for record in message["result"] if record["kind"] == "user_shell"
+                )
+                assert "CANCELLED_MARKER" in shell_record["payload"]["result"]["text"]
                 break
         process.stdin.close()
         assert process.wait(timeout=15) == 0

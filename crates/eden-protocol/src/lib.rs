@@ -66,6 +66,10 @@ pub enum Outcome {
 pub struct Terminal {
     pub outcome: Outcome,
     pub cleanup_errors: Vec<Fault>,
+    /// Observational output retained after an interrupted operation's cleanup, such as shell
+    /// output and artifact paths. It never changes a cancelled/failed outcome into success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial_result: Option<Value>,
 }
 impl Terminal {
     /// A terminal that failed before any cleanup was registered, so it carries
@@ -74,6 +78,7 @@ impl Terminal {
         Self {
             outcome: Outcome::Failed(error),
             cleanup_errors: vec![],
+            partial_result: None,
         }
     }
     /// Reduce the terminal to a result. A cleanup error outranks the outcome,

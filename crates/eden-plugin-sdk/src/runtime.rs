@@ -139,6 +139,11 @@ pub unsafe extern "C" fn start(instance: usize, bytes: Bytes, reply: Reply) -> u
         // SAFETY: Host keeps the receiver live until this one completion; spans are copied by it.
         unsafe {
             reply.send(&Terminal {
+                partial_result: if matches!(outcome, Outcome::Completed(_)) {
+                    None
+                } else {
+                    scope.partial_result()
+                },
                 outcome,
                 cleanup_errors,
             });

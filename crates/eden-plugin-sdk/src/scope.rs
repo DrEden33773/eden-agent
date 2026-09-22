@@ -38,6 +38,8 @@ impl Cancellation {
 }
 struct State {
     open: bool,
+    finished: bool,
+    partial_result: Option<serde_json::Value>,
     children: Vec<tokio::task::JoinHandle<Result<(), Fault>>>,
     cleanups: Vec<BoxFuture<Result<(), Fault>>>,
 }
@@ -52,6 +54,8 @@ impl Default for Scope {
         Self {
             state: Arc::new(Mutex::new(State {
                 open: true,
+                finished: false,
+                partial_result: None,
                 children: vec![],
                 cleanups: vec![],
             })),
@@ -102,6 +106,23 @@ impl Scope {
         state.cleanups.push(Box::pin(future));
         Ok(())
     }
+    /// Retain the final captured observation even if cancellation already dropped the root
+    /// receiver. Managed children and cleanups may publish until the completion barrier closes.
+    pub fn retain_result(&self, value: serde_json::Value) -> Result<(), Fault> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.finished {
+            return Err(Fault::new("Unavailable", "scope", "operation settled"));
+        }
+        state.partial_result = Some(value);
+        Ok(())
+    }
+    pub(crate) fn partial_result(&self) -> Option<serde_json::Value> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .partial_result
+            .clone()
+    }
     pub(crate) async fn finish(&self) -> Vec<Fault> {
         use futures_util::FutureExt;
         let (children, cleanups) = {
@@ -147,6 +168,10 @@ impl Scope {
                 Err(_) => errors.push(Fault::new("CleanupFailure", "cleanup", "cleanup panicked")),
             }
         }
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .finished = true;
         errors
     }
 }

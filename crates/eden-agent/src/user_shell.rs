@@ -75,20 +75,30 @@ impl Session {
             {
                 terminal.cleanup_errors.push(error);
             }
-            let result = match &terminal.outcome {
-                Outcome::Completed(value) => value.clone(),
-                Outcome::Failed(error) => {
-                    json!({ "text": "", "error": error, "exit_code": null, "truncated": false })
-                }
-                Outcome::Cancelled => {
-                    json!({
-                        "text": "",
-                        "error": Fault::new("Cancelled", "user-shell", "command cancelled"),
-                        "exit_code": null,
-                        "truncated": false,
-                    })
-                }
-            };
+            let result =
+                terminal
+                    .partial_result
+                    .clone()
+                    .unwrap_or_else(|| match &terminal.outcome {
+                        Outcome::Completed(value) => value.clone(),
+                        Outcome::Failed(error) => {
+                            json!({
+                                "text": "",
+                                "error": error,
+                                "exit_code": null,
+                                "truncated": false,
+                            })
+                        }
+                        Outcome::Cancelled => {
+                            json!({
+                                "text": "",
+                                "error":
+                                    Fault::new("Cancelled", "user-shell", "command cancelled"),
+                                "exit_code": null,
+                                "truncated": false,
+                            })
+                        }
+                    });
             if session.0.coding {
                 if let Err(error) = session
                     .commit(

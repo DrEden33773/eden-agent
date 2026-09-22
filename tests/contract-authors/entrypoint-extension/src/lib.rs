@@ -16,6 +16,7 @@ fn descriptor() -> Descriptor {
             "example.entry-catalog.v1".into(),
             "example.entry-command.v1".into(),
             "example.entry-input.v1".into(),
+            eden_plugin_sdk::protocol::models::AUTH.into(),
         ],
     }
 }
@@ -55,6 +56,22 @@ fn create(_: Value) -> Result<Package, Fault> {
                     json!({ "revision": request.resource_revision }),
                 )?;
                 Ok(request)
+            },
+        )
+        .service(
+            eden_plugin_sdk::protocol::models::AUTH,
+            |_: Value, _| async move {
+                Ok(json!({
+                    "operation_id": "fixture-login",
+                    "provider": "fixture",
+                    "status": "awaiting_authorization",
+                    "source": null,
+                    "interaction": {
+                        "url": "https://fixture/PRIVATE_AUTH_CANARY",
+                        "user_code": "PRIVATE_AUTH_CANARY",
+                    },
+                    "unexpected_secret": "PRIVATE_AUTH_CANARY",
+                }))
             },
         ))
 }

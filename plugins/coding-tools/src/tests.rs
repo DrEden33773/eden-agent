@@ -489,6 +489,7 @@ fn skill_resource_uri_uses_frozen_source_and_enforces_tool_selection() {
             Terminal {
                 outcome: Outcome::Completed(serde_json::to_value(response).unwrap()),
                 cleanup_errors: vec![],
+                partial_result: None,
             }
         } else {
             Terminal::failed(fault("UnexpectedService", request.contract))
@@ -869,6 +870,7 @@ mod user_shell {
             Some(hook) => Terminal {
                 outcome: Outcome::Completed(serde_json::to_value(hook).unwrap()),
                 cleanup_errors: vec![],
+                partial_result: None,
             },
             None => Terminal::failed(Fault::new("MissingDependency", "router", BEFORE_USER_SHELL)),
         };
@@ -1002,6 +1004,18 @@ mod user_shell {
             .unwrap();
         assert!(matches!(terminal.outcome, Outcome::Cancelled));
         assert!(terminal.cleanup_errors.is_empty());
+        let retained: ToolResult = serde_json::from_value(
+            terminal
+                .partial_result
+                .clone()
+                .expect("cancelled capture is retained"),
+        )
+        .unwrap();
+        assert!(retained.text.contains("ready"));
+        assert_eq!(
+            std::fs::read(&retained.artifacts[0].path).unwrap(),
+            b"ready"
+        );
         let mut byte = [0];
         match tokio::time::timeout(Duration::from_secs(2), socket.read(&mut byte))
             .await

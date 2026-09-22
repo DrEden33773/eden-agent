@@ -98,3 +98,43 @@ async fn dialog_reply_and_cancellation_share_real_host_bridge_and_close_observat
     let last = session.events().last().unwrap().sequence;
     assert!(session.read_events(last).await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn shutdown_cancels_a_pending_control_call_before_waiting_for_it() {
+    let (entered, started) = tokio::sync::oneshot::channel();
+    let entered = std::sync::Arc::new(std::sync::Mutex::new(Some(entered)));
+    let control = Package::new("control-test").service(
+        eden_protocol::coding::CODING_CONTROL,
+        move |_: Value, _| {
+            let entered = entered.clone();
+            async move {
+                entered.lock().unwrap().take().unwrap().send(()).unwrap();
+                std::future::pending::<Result<Value, Fault>>().await
+            }
+        },
+    );
+    let cwd = std::env::current_dir().unwrap();
+    let session = Embedded::new(composition(), cwd.clone())
+        .package(package(), "test-v1")
+        .unwrap()
+        .package(control, "control-v1")
+        .unwrap()
+        .open(
+            SessionOptions { cwd, history: None },
+            WorkspaceOptions::default(),
+        )
+        .await
+        .unwrap();
+    let client = session.clone();
+    let pending = tokio::spawn(async move {
+        client
+            .control(eden_protocol::coding::CodingControlRequest::Inspect)
+            .await
+    });
+    started.await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_millis(200), session.shutdown())
+        .await
+        .expect("shutdown left admitted control un-cancelled")
+        .unwrap();
+    assert_eq!(pending.await.unwrap().unwrap_err().code, "Cancelled");
+}

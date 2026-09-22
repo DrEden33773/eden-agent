@@ -123,6 +123,7 @@ mod tests {
             &Terminal {
                 outcome: Outcome::Cancelled,
                 cleanup_errors: vec![],
+                partial_result: None,
             },
             &[],
         );
@@ -136,7 +137,8 @@ mod tests {
                 8,
                 &Terminal {
                     outcome: Outcome::Cancelled,
-                    cleanup_errors: vec![]
+                    cleanup_errors: vec![],
+                    partial_result: None,
                 },
                 &[]
             )
@@ -181,6 +183,7 @@ mod tests {
             &Terminal {
                 outcome: Outcome::Completed(Value::Null),
                 cleanup_errors: vec![],
+                partial_result: None,
             },
             &[],
         );
@@ -203,6 +206,7 @@ mod tests {
             &Terminal {
                 outcome: Outcome::Completed(Value::Null),
                 cleanup_errors: vec![],
+                partial_result: None,
             },
             &[committed],
         );

@@ -924,6 +924,7 @@ pub(crate) fn as_terminal(result: Result<Value, Fault>) -> Terminal {
             Err(error) => Outcome::Failed(error),
         },
         cleanup_errors: vec![],
+        partial_result: None,
     }
 }
 

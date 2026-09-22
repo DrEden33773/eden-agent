@@ -89,6 +89,7 @@ pub(super) async fn user(
     let (sender, receiver) = tokio::sync::oneshot::channel();
     let scope = cx.scope.clone();
     // Retain process and pipe ownership after the service root is cancelled.
+    let capture = scope.clone();
     scope.spawn(async move {
         let execution = async {
             if cancellation.is_cancelled() {
@@ -108,6 +109,7 @@ pub(super) async fn user(
             .as_ref()
             .filter(|e| e.code == "CleanupFailure")
             .cloned();
+        capture.retain_result(serde_json::json!(result))?;
         let _ = sender.send(result);
         match cleanup {
             Some(error) => Err(error),

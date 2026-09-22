@@ -261,6 +261,7 @@ mod tests {
             reply.send(&Terminal {
                 outcome: Outcome::Completed(result),
                 cleanup_errors: vec![],
+                partial_result: None,
             })
         };
         id
@@ -348,6 +349,7 @@ mod tests {
             reply.send(&Terminal {
                 outcome: Outcome::Completed(json!(result)),
                 cleanup_errors: vec![],
+                partial_result: None,
             })
         };
     }

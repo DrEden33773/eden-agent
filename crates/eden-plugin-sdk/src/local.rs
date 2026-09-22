@@ -121,12 +121,23 @@ impl LocalInstance {
             ));
         }
         Terminal {
+            partial_result: if matches!(outcome, Outcome::Completed(_)) {
+                None
+            } else {
+                scope.partial_result()
+            },
             outcome,
             cleanup_errors,
         }
     }
     /// Cancel and drain all operations, then run the optional instance finalizer once.
-    pub async fn stop(&self) -> Result<(), Fault> {
+    pub async fn stop(self: &Arc<Self>) -> Result<(), Fault> {
+        let instance = self.clone();
+        tokio::spawn(async move { instance.stop_owned().await })
+            .await
+            .map_err(|e| Fault::new("CleanupFailure", "local-package", e.to_string()))?
+    }
+    async fn stop_owned(&self) -> Result<(), Fault> {
         let _stop = self.stop.lock().await;
         self.close();
         if let Some(result) = self
@@ -245,5 +256,58 @@ mod tests {
         release.send(()).unwrap();
         stop.await.unwrap().unwrap();
         instance.stop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn abandoned_stop_waiter_keeps_one_finalizer_and_its_cleanup() {
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let entered = Arc::new(Mutex::new(Some(entered)));
+        let (release, barrier) = tokio::sync::oneshot::channel();
+        let barrier = Arc::new(Mutex::new(Some(barrier)));
+        let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let cleaned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let finalizer_count = count.clone();
+        let cleanup = cleaned.clone();
+        let package =
+            Package::new("stop-test").service(eden_protocol::INSTANCE_STOP, move |_: (), cx| {
+                let entered = entered.clone();
+                let barrier = barrier.clone();
+                let count = finalizer_count.clone();
+                let cleaned = cleanup.clone();
+                async move {
+                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let barrier = barrier.lock().unwrap().take().unwrap();
+                    cx.scope.cleanup(async move {
+                        cleaned.store(true, std::sync::atomic::Ordering::SeqCst);
+                        Ok(())
+                    })?;
+                    entered.lock().unwrap().take().unwrap().send(()).unwrap();
+                    barrier.await.unwrap();
+                    Ok(())
+                }
+            });
+        // SAFETY: Static callbacks retain no borrowed data and reject routing.
+        let instance = unsafe {
+            LocalInstance::new(
+                package,
+                HostApi {
+                    context: 0,
+                    request: reject,
+                    cancel,
+                    event,
+                },
+            )
+        };
+        let stopping = instance.clone();
+        let waiter = tokio::spawn(async move { stopping.stop().await });
+        started.await.unwrap();
+        waiter.abort();
+        let _ = waiter.await;
+        assert!(
+            release.send(()).is_ok(),
+            "dropping stop abandoned the finalizer"
+        );
+        instance.stop().await.unwrap();
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(cleaned.load(std::sync::atomic::Ordering::SeqCst));
     }
 }

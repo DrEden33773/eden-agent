@@ -43,6 +43,7 @@ struct Inner {
     offline_records: Mutex<Vec<c::Record>>,
     events: Arc<Events>,
     interactions: Arc<interaction::Interactions>,
+    input_cancel: Cancellation,
     state: Mutex<State>,
     settled: tokio::sync::Notify,
     shutdown: tokio::sync::Mutex<()>,
@@ -235,6 +236,7 @@ impl Session {
             offline_records: Mutex::new(previous.clone()),
             events,
             interactions,
+            input_cancel: Cancellation::default(),
             state: Mutex::new(State {
                 closed: false,
                 next,
@@ -603,6 +605,7 @@ impl Session {
         let active = {
             let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
             state.closed = true;
+            self.0.input_cancel.cancel();
             for cancel in state.shells.values().chain(state.commands.values()) {
                 cancel.cancel();
             }
@@ -659,6 +662,25 @@ impl Session {
         role: &str,
         input: &I,
     ) -> Result<O, Fault> {
+        self.service_with_cancel(run_id, role, input, Cancellation::default())
+            .await
+    }
+    async fn service_input<I: serde::Serialize, O: serde::de::DeserializeOwned>(
+        &self,
+        run_id: u64,
+        role: &str,
+        input: &I,
+    ) -> Result<O, Fault> {
+        self.service_with_cancel(run_id, role, input, self.0.input_cancel.clone())
+            .await
+    }
+    async fn service_with_cancel<I: serde::Serialize, O: serde::de::DeserializeOwned>(
+        &self,
+        run_id: u64,
+        role: &str,
+        input: &I,
+        cancel: Cancellation,
+    ) -> Result<O, Fault> {
         let payload = serde_json::to_value(input)
             .map_err(|e| Fault::new("InvalidInput", "session", e.to_string()))?;
         let value = self
@@ -671,7 +693,7 @@ impl Session {
                     contract: role.into(),
                     payload,
                 },
-                Cancellation::default(),
+                cancel,
             )
             .await
             .into_result()?;
@@ -744,7 +766,7 @@ impl Session {
         tokio::spawn(async move {
             let _owner = owner;
             let mut entries: Vec<c::QueueEntry> = session
-                .service(
+                .service_input(
                     run_id,
                     c::QUEUE,
                     &c::QueueRequest::Enqueue { kind, content },

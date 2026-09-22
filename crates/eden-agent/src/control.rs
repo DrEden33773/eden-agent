@@ -51,7 +51,7 @@ impl Session {
         tokio::spawn(async move {
             let _owner = owner;
             session
-                .service(run_id, c::QUEUE, &c::QueueRequest::Withdraw { ids })
+                .service_input(run_id, c::QUEUE, &c::QueueRequest::Withdraw { ids })
                 .await
         })
         .await
@@ -68,7 +68,9 @@ impl Session {
         let owner = InputOwner(session.clone());
         tokio::spawn(async move {
             let _owner = owner;
-            session.service(run_id, c::CODING_CONTROL, &request).await
+            session
+                .service_input(run_id, c::CODING_CONTROL, &request)
+                .await
         })
         .await
         .map_err(|e| Fault::new("Unavailable", "control", e.to_string()))?

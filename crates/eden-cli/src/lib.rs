@@ -3,6 +3,8 @@
 
 /// Declarative command surface of the `eden` executable.
 pub mod cli;
+/// Independent export, publication and installation maintenance.
+pub mod delivery;
 /// Explicit environment-file parsing for CLI startup.
 pub mod environment;
 /// Model and API-key operations through the shared session services.
@@ -32,6 +34,12 @@ pub fn workspace_options(cli: &cli::Cli) -> eden_agent::WorkspaceOptions {
     }
     if cli.no_trust_project {
         options.project_trust = Some(false);
+    }
+    if cli.offline_startup {
+        options.overrides["offline_startup"] = serde_json::json!(true);
+    }
+    if cli.no_update_check {
+        options.overrides["update_check"] = serde_json::json!(false);
     }
     options
 }
@@ -195,28 +203,30 @@ pub async fn wait_for_run_after(
     shell: &shell::Shell,
     sequence: &mut u64,
 ) -> Result<eden_agent::Terminal, Box<dyn std::error::Error>> {
-    for event in session
-        .events()
-        .iter()
-        .filter(|event| event.sequence > *sequence && event.kind == "resource_diagnostic")
-    {
-        shell.diagnostic(&resource_diagnostic(&event.payload));
-    }
-    if !json {
-        let terminal = session.wait(run).await?;
-        *sequence = session
-            .events()
-            .last()
-            .map_or(*sequence, |event| event.sequence);
-        return Ok(terminal);
-    }
     loop {
         let events = session.events_after(*sequence).await;
         let mut settled = false;
         for event in events {
             *sequence = event.sequence;
             settled |= event.kind == "settled" && event.run_id == run;
-            output::record(&event)?;
+            if event.kind == "resource_diagnostic" {
+                shell.diagnostic(&resource_diagnostic(&event.payload));
+            }
+            if json {
+                output::record(&event)?;
+            } else if event.kind == "update_check" {
+                if let Some(candidate) = event.payload["update"]
+                    .get("candidate")
+                    .filter(|value| !value.is_null())
+                {
+                    shell.warn(format!(
+                        "Update available: {}. Use an explicit update command to prepare it.",
+                        candidate["version"].as_str().unwrap_or("unknown")
+                    ));
+                } else if event.payload["status"] == "failed" {
+                    shell.warn(format!("Update check failed: {}", event.payload["error"]));
+                }
+            }
         }
         if settled {
             return Ok(session.wait(run).await?);

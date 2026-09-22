@@ -1,10 +1,12 @@
 //! Public data records shared by the host and native plugin SDK.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+pub mod delivery;
 pub mod interaction;
 pub mod models;
 pub mod resources;
 pub mod shell;
+pub mod updates;
 
 /// Exact host/SDK pairing for this development release.
 pub const CONTRACT: &str = "eden-native-0.5.0";

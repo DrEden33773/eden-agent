@@ -3,8 +3,10 @@ pub use eden_kernel::history;
 use eden_kernel::{Events, Kernel};
 mod attempts;
 mod control;
+pub mod delivery;
 pub mod embedded;
 mod interaction;
+mod startup;
 mod user_shell;
 pub use control::SessionState;
 mod composition;
@@ -36,6 +38,8 @@ struct State {
     shutdown_result: Option<Result<(), Fault>>,
 }
 struct Inner {
+    maintenance: startup::Maintenance,
+    previews: Mutex<BTreeMap<String, eden_protocol::delivery::Artifact>>,
     id: u64,
     kernel: generation::Generation,
     workspace_options: WorkspaceOptions,
@@ -229,6 +233,8 @@ impl Session {
             return Err(error);
         }
         let session = Self(Arc::new(Inner {
+            maintenance: Default::default(),
+            previews: Mutex::new(BTreeMap::new()),
             id,
             kernel: generation::Generation::new(kernel),
             workspace_options,
@@ -337,6 +343,7 @@ impl Session {
                 return Err(error);
             }
         }
+        session.start_maintenance();
         Ok(session)
     }
     /// The identity saved history records share, and which copies replace.
@@ -614,6 +621,7 @@ impl Session {
                 *id
             })
         };
+        self.0.maintenance.stop().await;
         if let Some(run_id) = active {
             self.wait(run_id).await?;
         }

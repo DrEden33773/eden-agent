@@ -264,6 +264,8 @@ mod tests {
     async fn managed_auth_result_stays_private_while_settled_event_is_redacted() {
         let events = Events::new(1);
         let session = Session(Arc::new(Inner {
+            maintenance: Default::default(),
+            previews: Mutex::new(BTreeMap::new()),
             id: 1,
             kernel: generation::Generation::empty(),
             workspace_options: WorkspaceOptions::default(),

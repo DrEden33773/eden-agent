@@ -1,0 +1,15 @@
+[package]
+name = "eden-github-share"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+[lib]
+crate-type = ["cdylib", "rlib"]
+[dependencies]
+eden-plugin-sdk.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
+[lints]
+workspace = true

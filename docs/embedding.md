@@ -43,3 +43,5 @@ Native and caller-runtime extensions use `eden_protocol::interaction::HOST` with
 A non-TTY print stdin is UTF-8 text, preserved exactly and separated from the first command-line prompt by two newlines. Attachments join only the first submission. Additional positional prompts run in order and stop after the first failure or cancellation; text and JSON modes use the same exit outcome. RPC and authentication commands own their own stdin. A pipe EOF finishes print input but closes and cleans up an RPC connection.
 
 The full-screen TUI and its terminal renderer remain separate frontend work. HTML export, sharing and update services are not part of this entrypoint contract; no permanently failing placeholder methods are advertised for them.
+
+See [export, explicit sharing and startup maintenance](delivery.md) for reading snapshots and delivery services, and [updates](updates.md) for complete-installation transactions.

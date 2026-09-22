@@ -9,6 +9,7 @@ repository.workspace = true
 clap.workspace = true
 dotenvy = "0.15.7"
 eden-kernel.workspace = true
+eden-plugin-sdk.workspace = true
 base64 = "0.23.1"
 eden-protocol.workspace = true
 eden-agent.workspace = true
@@ -21,3 +22,7 @@ workspace = true
 [[bin]]
 name = "eden"
 path = "src/main.rs"
+
+[[bin]]
+name = "eden-launch"
+path = "src/launch.rs"

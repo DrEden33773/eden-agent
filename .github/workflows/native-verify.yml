@@ -26,7 +26,8 @@ jobs:
       matrix:
         os: [ubuntu-24.04, windows-2022, macos-14]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # Windows cold builds plus installed acceptance reached 20 minutes before post-job cleanup.
+    timeout-minutes: ${{ matrix.os == 'windows-2022' && 30 || 20 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4

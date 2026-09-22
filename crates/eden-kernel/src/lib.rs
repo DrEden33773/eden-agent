@@ -71,6 +71,16 @@ pub fn preflight(composition: &Composition) -> Result<(), Fault> {
             p::coding::STORE,
             p::coding::QUEUE,
         ]
+    } else if !composition.roles.contains_key(p::AGENT_LOOP)
+        && !composition.roles.is_empty()
+        && composition.roles.keys().all(|role| {
+            matches!(
+                role.as_str(),
+                p::delivery::EXPORTER | p::delivery::SHARE_TARGET | p::updates::UPDATE_SOURCE
+            )
+        })
+    {
+        &[]
     } else {
         &[p::AGENT_LOOP, p::CONTEXT, p::PROVIDER, p::TOOL]
     };

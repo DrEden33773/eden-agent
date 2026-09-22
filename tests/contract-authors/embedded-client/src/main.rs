@@ -211,6 +211,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         let events = cancelled.read_events(cursor).await?;
         cursor = events.last().ok_or("unexpected stream end")?.sequence;
+        if let Some(event) = events.iter().find(|e| e.kind == "settled") {
+            return Err(format!("tool never waited: {}", event.payload).into());
+        }
         if events.iter().any(|e| e.kind == "host_tool_waiting") {
             break;
         }

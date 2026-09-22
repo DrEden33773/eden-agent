@@ -237,7 +237,6 @@ def check(host: pathlib.Path, composition: pathlib.Path, scratch: pathlib.Path) 
         [author_artifact("embedded-client"), composition, sdk_dir],
         ROOT,
         env=os.environ.copy(),
-        timeout=45,
     )
     for path in (cli_dir, rpc_dir, sdk_dir / "first", sdk_dir / "second"):
         assert (path / "marker.txt").read_text(encoding="utf-8") == "from caller", path

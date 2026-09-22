@@ -96,7 +96,8 @@ def main() -> None:
         write(config, stripped)
         preview = scratch / "preview.html"
         reply = invoke(["export", history, preview])
-        frozen = preview.read_text(encoding="utf-8")
+        # Text mode normalizes Windows CRLF; publication promises the exact preview bytes.
+        frozen = preview.read_bytes().decode("utf-8")
         assert "CONFIG_CANARY" not in frozen and "&lt;script&gt;" in frozen and "中文" in frozen
         backup = scratch / "backup.jsonl"
         copied = run([host, "history", "export", history, backup], scratch, env=environment)
@@ -134,10 +135,8 @@ def main() -> None:
             history.write_text("conversation changed after preview", encoding="utf-8")
             published = invoke(["share", preview, "--sha256", reply["sha256"], "--confirm"])
             assert published["visibility"] == "secret" and "Anyone with" in published["notice"]
-            assert (
-                requests[0]["public"] is False
-                and requests[0]["files"]["conversation.html"]["content"] == frozen
-            )
+            assert requests[0]["public"] is False
+            assert requests[0]["files"]["conversation.html"]["content"] == frozen
             lost = invoke(["share", preview, "--sha256", reply["sha256"], "--confirm"], False)
             assert "PublicationUnknown" in lost.stderr and len(requests) == 2
             preview.write_text(frozen + "edited", encoding="utf-8")

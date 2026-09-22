@@ -184,6 +184,9 @@ class Router:
                                 if readable and self.connection.recv(1) == b"":
                                     owner.stream_closed.set()
                                     break
+                        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                            # Peer cancellation may report WSAECONNABORTED rather than EOF on Windows.
+                            owner.stream_closed.set()
                         finally:
                             with owner.condition:
                                 owner.streams -= 1

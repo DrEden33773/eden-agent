@@ -11,6 +11,14 @@ on:
         description: Associated checks selected from the complete change comparison
         required: true
         type: string
+      cache-only:
+        description: Populate missing main build caches without executing acceptance
+        type: boolean
+        default: false
+      save-cache:
+        description: The trusted main caller may write caches
+        type: boolean
+        default: false
 # These variables are part of the derived build cache identity.
 env:
   CARGO_INCREMENTAL: '0'
@@ -20,7 +28,7 @@ permissions:
   contents: read
 jobs:
   native:
-    name: Native (${{ matrix.os }})
+    name: ${{ inputs.cache-only && 'Cache maintenance' || 'Native' }} (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -99,6 +107,18 @@ jobs:
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         id: cargo-target
         with:
+          lookup-only: ${{ inputs.cache-only }}
+          path: |
+            target
+            !target/**/incremental
+            !target/verification/seeds
+            !target/verification/examples
+          key: ${{ steps.build-cache-keys.outputs.key }}
+          restore-keys: ${{ steps.build-cache-keys.outputs.restore-keys }}
+      - name: Restore compatible objects for cache maintenance
+        if: ${{ inputs.cache-only && steps.cargo-target.outputs.cache-hit != 'true' }}
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
           path: |
             target
             !target/**/incremental
@@ -127,9 +147,11 @@ jobs:
           receipt["legacy_build_cache_reused"] = bool(planned["legacy_candidate"] and receipt["TARGET_MATCHED_KEY"] == planned["legacy_candidate"])
           (root / "cache.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
       - name: Node development dependencies
+        if: ${{ !inputs.cache-only }}
         id: node-deps
         run: node scripts/ci-run.mjs pnpm-install pnpm install --frozen-lockfile
       - name: Python development dependencies
+        if: ${{ !inputs.cache-only }}
         id: python-deps
         run: node scripts/ci-run.mjs uv-sync uv sync --locked --python 3.12
       - name: Select native Git Bash on Windows
@@ -145,16 +167,20 @@ jobs:
           with open(os.environ["GITHUB_PATH"], "a", encoding="utf-8") as output:
               output.write(str(bash.parent) + "\n")
       - name: Native command failure propagation
+        if: ${{ !inputs.cache-only }}
         run: node scripts/ci-run.mjs ci-runner node --test scripts/ci-run.test.mjs
       - name: Verification infrastructure and license regressions
+        if: ${{ !inputs.cache-only }}
         run: node scripts/ci-run.mjs verification-tests python -m unittest discover -s scripts -p "test_*.py" -v
       - name: Dependency license preflight
+        if: ${{ !inputs.cache-only }}
         run: node scripts/ci-run.mjs licenses python scripts/license_bundle.py --check --all-platforms
       - name: Clippy including independent authors
-        if: ${{ !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        if: ${{ !inputs.cache-only && !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: node scripts/ci-run.mjs clippy pnpm clippy:check
       - name: Git hook behavior
-        if: ${{ !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        id: hooks
+        if: ${{ !inputs.cache-only && fromJSON(inputs.selected).hooks == true && !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: node scripts/ci-run.mjs hooks pnpm hooks:test
       # Platform sensitivity, not the crate list, decides what each runner
       # executes. These targets own the branches that really differ per OS:
@@ -170,7 +196,7 @@ jobs:
       # scripts/test_ci_cache.py checks that this command and that declaration
       # still agree.
       - name: Platform-sensitive suites
-        if: ${{ !cancelled() && runner.os != 'Linux' && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        if: ${{ !inputs.cache-only && !cancelled() && runner.os != 'Linux' && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: node scripts/ci-run.mjs platform-suites cargo test --locked --no-fail-fast -p eden-process -p eden-coding-tools -p eden-search -p eden-local-history -p eden-workspace -p eden-model-access -p eden-fmt
       # Linux keeps the exact workspace command it always ran: it is the runner
       # that still executes what the other two no longer do, and a newly added
@@ -178,49 +204,29 @@ jobs:
       # so Linux's own selection is part of its cache identity as well, and the
       # entry it restores is the workspace graph it builds.
       - name: Workspace suites
-        if: ${{ !cancelled() && runner.os == 'Linux' && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        if: ${{ !inputs.cache-only && !cancelled() && runner.os == 'Linux' && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: node scripts/ci-run.mjs workspace-suites cargo test --workspace --locked --no-fail-fast
       - name: Independent author tests
-        if: ${{ !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        if: ${{ !inputs.cache-only && !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: node scripts/ci-run.mjs authors pnpm rust:test:authors
       - name: Installed suites, independent authors and distribution
-        if: ${{ !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        if: ${{ !inputs.cache-only && !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: node scripts/ci-run.mjs installed python scripts/verify-all.py --output artifacts/verification
-      - name: Checkout the fixed Pi reference
-        id: pi-checkout
-        if: ${{ fromJSON(inputs.selected).pi_reference == true }}
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          repository: earendil-works/pi
-          ref: d981de1229ef899957bbe968bc8dcda02a21f477
-          path: artifacts/pi-reference
-          persist-credentials: false
-      - name: Install fixed reference dependencies
-        id: pi-deps
-        if: ${{ fromJSON(inputs.selected).pi_reference == true }}
-        working-directory: artifacts/pi-reference
-        run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Prepare fixed reference catalog data
-        id: pi-prepare
-        if: ${{ fromJSON(inputs.selected).pi_reference == true }}
+      - name: Build missing main cache graphs without running tests
+        id: warm
+        if: ${{ inputs.cache-only && steps.cargo-target.outputs.cache-hit != 'true' }}
         env:
-          PI_REFERENCE_ROOT: ${{ github.workspace }}/artifacts/pi-reference
-        run: node scripts/prepare-pi-reference.mjs
-      - name: Execute fixed core reference corpus
-        id: pi-corpus
-        if: ${{ fromJSON(inputs.selected).pi_reference == true }}
-        working-directory: artifacts/pi-reference
-        env:
-          PI_REFERENCE_ROOT: ${{ github.workspace }}/artifacts/pi-reference
-          PI_REFERENCE_OUTPUT: ${{ github.workspace }}/artifacts/pi-reference-verification.json
-        run: node ../../scripts/verify-pi-reference.mjs
+          CI_CACHE_OS: ${{ matrix.os }}
+        run: node scripts/ci-run.mjs cache-build python scripts/ci-warm.py
       - name: Package installed layout
+        if: ${{ !inputs.cache-only && success() }}
         shell: bash
         run: node scripts/ci-run.mjs package tar -czf artifacts/eden-${{ runner.os }}-${{ runner.arch }}.tar.gz -C artifacts/distribution .
       - name: Verify and execute the native packaged archive
+        if: ${{ !inputs.cache-only && success() }}
         run: node scripts/ci-run.mjs archive python scripts/verify-archive.py artifacts/eden-${{ runner.os }}-${{ runner.arch }}.tar.gz
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.toolchain-cache.outputs.cache-hit != 'true' }}
+        if: ${{ inputs.save-cache && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && !cancelled() && steps.toolchain.outcome == 'success' && steps.toolchain-cache.outputs.cache-hit != 'true' }}
         with:
           path: |
             ~/.rustup/toolchains/${{ steps.toolchain-config.outputs.channel }}-*
@@ -229,14 +235,14 @@ jobs:
             ~/.rustup/update-hashes/${{ steps.toolchain-config.outputs.formatter }}-*
           key: ${{ steps.toolchain-cache.outputs.cache-primary-key }}
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        if: ${{ !cancelled() && steps.cargo-registry.outcome == 'success' && steps.cargo-registry.outputs.cache-hit != 'true' }}
+        if: ${{ inputs.save-cache && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && !cancelled() && steps.cargo-registry.outcome == 'success' && steps.cargo-registry.outputs.cache-hit != 'true' }}
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
           key: ${{ steps.cargo-registry.outputs.cache-primary-key }}
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        if: ${{ !cancelled() && steps.cargo-target.outcome == 'success' && steps.cargo-target.outputs.cache-hit != 'true' }}
+        if: ${{ inputs.save-cache && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && success() && (!inputs.cache-only || steps.warm.outcome == 'success') && steps.cargo-target.outcome == 'success' && steps.cargo-target.outputs.cache-hit != 'true' }}
         with:
           path: |
             target
@@ -244,12 +250,12 @@ jobs:
             !target/verification/seeds
             !target/verification/examples
           key: ${{ steps.cargo-target.outputs.cache-primary-key }}
-      - name: Require selected Pi reference steps
-        if: always()
+      - name: Require selected hook tests
+        if: ${{ always() && !inputs.cache-only }}
         env:
           CI_SELECTED: ${{ inputs.selected }}
           CI_STEPS: ${{ toJson(steps) }}
-        run: node scripts/ci-scope.mjs pi-gate
+        run: node scripts/ci-scope.mjs hooks-gate
       - name: Record final step outcomes
         if: always()
         shell: python
@@ -273,7 +279,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: native-receipts-${{ runner.os }}-${{ runner.arch }}
+          name: ${{ inputs.cache-only && 'cache' || 'native' }}-receipts-${{ runner.os }}-${{ runner.arch }}
           path: |
             artifacts/ci/*.json
             artifacts/verification/timings.json
@@ -284,17 +290,15 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: native-diagnostics-${{ runner.os }}-${{ runner.arch }}
+          name: ${{ inputs.cache-only && 'cache' || 'native' }}-diagnostics-${{ runner.os }}-${{ runner.arch }}
           path: |
             artifacts/ci/*.log
             artifacts/verification
-            artifacts/pi-reference-raw.json
-            artifacts/pi-reference-shell-output.bin
             !artifacts/verification/timings.json
             !artifacts/verification/*/result.json
           if-no-files-found: warn
       - name: Upload native archive
-        if: always()
+        if: ${{ always() && !inputs.cache-only }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: native-archive-${{ runner.os }}-${{ runner.arch }}

@@ -257,6 +257,25 @@ def validate_receipt(receipt: dict[str, Any], fingerprint: str) -> None:
             raise RuntimeError(f"Prepared verification artifacts changed: {directory}")
 
 
+def rpc_executable(output: str) -> pathlib.Path:
+    """Resolve the current RPC harness from Cargo artifacts, never a target glob."""
+    paths = {
+        pathlib.Path(item["executable"])
+        for line in output.splitlines()
+        if (item := json.loads(line)).get("reason") == "compiler-artifact"
+        and item.get("target", {}).get("name") == "rpc"
+        and "test" in item.get("target", {}).get("kind", [])
+        and item.get("profile", {}).get("test") is True
+        and item.get("executable")
+    }
+    if len(paths) != 1:
+        raise RuntimeError(f"Expected one RPC test executable from Cargo, got {paths}")
+    executable = paths.pop()
+    if not executable.is_file():
+        raise RuntimeError(f"RPC test executable is missing: {executable}")
+    return executable
+
+
 def prepare(output: pathlib.Path | None = None) -> dict[str, Any]:
     global _RECEIPT
     if _RECEIPT is not None:
@@ -287,8 +306,24 @@ def prepare(output: pathlib.Path | None = None) -> dict[str, Any]:
     bundle(ROOT, licenses, target())
     phases["licenses"] = time.monotonic() - phase
     phase = time.monotonic()
-    print("Preparing: host and all test/example targets", flush=True)
-    run(["cargo", "build", "--workspace", "--all-targets", "--locked"], ROOT, timeout=None)
+    print("Preparing: installed libraries, binaries, examples and RPC harness", flush=True)
+    built = run(
+        [
+            "cargo",
+            "build",
+            "--workspace",
+            "--lib",
+            "--bins",
+            "--examples",
+            "--test",
+            "rpc",
+            "--locked",
+            "--message-format=json",
+        ],
+        ROOT,
+        timeout=None,
+    )
+    rpc = rpc_executable(built.stdout)
     phases["host_build"] = time.monotonic() - phase
     phase = time.monotonic()
     for controlled in (False, True):
@@ -309,6 +344,7 @@ def prepare(output: pathlib.Path | None = None) -> dict[str, Any]:
         shutil.copy2(
             build_target() / "debug/examples" / (name + suffix), examples / (name + suffix)
         )
+    shutil.copy2(rpc, examples / ("rpc-tests" + suffix))
     # The search package resolves its worker beside the running executable, so a
     # probe that searches needs that worker in its own directory too.
     shutil.copy2(

@@ -15,6 +15,39 @@ from install import Composition, Package
 
 
 class VerificationTests(unittest.TestCase):
+    def test_rpc_harness_is_selected_from_current_cargo_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            executable = pathlib.Path(temp) / "rpc-tests"
+            executable.write_bytes(b"test")
+            artifact = {
+                "reason": "compiler-artifact",
+                "target": {"name": "rpc", "kind": ["test"]},
+                "profile": {"test": True},
+                "executable": str(executable),
+            }
+            output = (
+                json.dumps({"reason": "build-finished", "success": True})
+                + "\n"
+                + json.dumps(artifact)
+            )
+            self.assertEqual(verification.rpc_executable(output), executable)
+            for changed in (
+                {"executable": None},
+                {"profile": {"test": False}},
+                {"target": {"name": "other", "kind": ["test"]}},
+            ):
+                with self.assertRaisesRegex(RuntimeError, "Expected one RPC"):
+                    verification.rpc_executable(json.dumps({**artifact, **changed}))
+            with self.assertRaisesRegex(RuntimeError, "Expected one RPC"):
+                verification.rpc_executable(
+                    output
+                    + "\n"
+                    + json.dumps({**artifact, "executable": str(executable) + "-other"})
+                )
+            executable.unlink()
+            with self.assertRaisesRegex(RuntimeError, "missing"):
+                verification.rpc_executable(output)
+
     def test_export_updates_changed_inputs_and_removes_deleted_files_without_retouching_unchanged(
         self,
     ):

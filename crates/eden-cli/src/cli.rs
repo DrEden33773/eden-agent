@@ -165,8 +165,8 @@ pub enum Family {
         /// Selection object: head, runs, messages, tools, thinking, attachments, full_outputs
         #[arg(long, default_value = "{}")]
         selection: String,
-        /// Produce reading JSONL instead of HTML
-        #[arg(long)]
+        /// Accepted for compatibility; reading JSONL is already the default
+        #[arg(long, hide = true)]
         jsonl: bool,
     },
     /// Publish the exact reviewed file to a secret gist

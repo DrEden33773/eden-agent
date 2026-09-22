@@ -39,12 +39,22 @@ fn create(config: Value) -> Result<Package, Fault> {
                     return Err(Fault::new("ExportFailure", "author", "export failed"));
                 }
                 Ok(Artifact {
-                    filename: "conversation.html".into(),
-                    media_type: "text/html".into(),
+                    filename: "conversation.jsonl".into(),
+                    media_type: "application/x-ndjson".into(),
                     content: if bytes > 0 {
                         "x".repeat(bytes)
                     } else {
-                        format!("External renderer: {} records", request.records.len())
+                        let mut content =
+                            String::from("{\"format\":\"eden-reading-v1\",\"restorable\":false}\n");
+                        content.push_str(
+                            &json!({
+                                "message":
+                                    format!("External renderer: {} records", request.records.len()),
+                            })
+                            .to_string(),
+                        );
+                        content.push('\n');
+                        content
                     },
                     warnings: vec![],
                 })

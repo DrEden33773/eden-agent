@@ -266,7 +266,7 @@ fn dispatch(
                     .params
                     .get("format")
                     .cloned()
-                    .unwrap_or(json!("html")),
+                    .unwrap_or(json!("jsonl")),
             )?;
             query(async move {
                 let (id, artifact) = s.prepare_export(selection, format).await?;

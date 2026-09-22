@@ -34,13 +34,24 @@ impl Default for Selection {
     }
 }
 /// Reading JSONL is deliberately not the public-history transaction format.
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[allow(missing_docs)]
 pub enum Format {
     #[default]
-    Html,
     Jsonl,
+}
+impl<'de> Deserialize<'de> for Format {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        match value.as_str() {
+            "jsonl" => Ok(Self::Jsonl),
+            "html" => Err(serde::de::Error::custom(
+                "HTML export has been removed; use jsonl",
+            )),
+            _ => Err(serde::de::Error::unknown_variant(&value, &["jsonl"])),
+        }
+    }
 }
 /// A committed snapshot plus an explicit selection, never live event deltas.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -76,4 +87,27 @@ pub struct PublishReply {
     pub url: String,
     pub visibility: String,
     pub notice: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Format;
+
+    #[test]
+    fn reading_format_defaults_to_jsonl_and_rejects_html() {
+        assert_eq!(
+            serde_json::to_string(&Format::default()).unwrap(),
+            "\"jsonl\""
+        );
+        assert!(matches!(
+            serde_json::from_str::<Format>("\"jsonl\""),
+            Ok(Format::Jsonl)
+        ));
+        assert!(
+            serde_json::from_str::<Format>("\"html\"")
+                .unwrap_err()
+                .to_string()
+                .contains("HTML export has been removed")
+        );
+    }
 }

@@ -196,20 +196,30 @@ pub fn read_preview(path: &Path, digest: &str) -> Result<Artifact, Fault> {
     }
     let content = String::from_utf8(bytes)
         .map_err(|e| Fault::new("InvalidInput", "delivery", e.to_string()))?;
-    let jsonl = path.extension().is_some_and(|x| x == "jsonl");
+    if path.extension().is_some_and(|ext| ext == "html") {
+        return Err(Fault::new(
+            "InvalidInput",
+            "delivery",
+            "HTML export has been removed; use a .jsonl preview",
+        ));
+    }
+    let header = content
+        .lines()
+        .next()
+        .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok());
+    if header
+        .as_ref()
+        .is_none_or(|value| value["format"] != "eden-reading-v1" || value["restorable"] != false)
+    {
+        return Err(Fault::new(
+            "InvalidInput",
+            "delivery",
+            "share requires an eden-reading-v1 preview, not a history backup",
+        ));
+    }
     Ok(Artifact {
-        filename: if jsonl {
-            "conversation.jsonl"
-        } else {
-            "conversation.html"
-        }
-        .into(),
-        media_type: if jsonl {
-            "application/x-ndjson"
-        } else {
-            "text/html"
-        }
-        .into(),
+        filename: "conversation.jsonl".into(),
+        media_type: "application/x-ndjson".into(),
         content,
         warnings: vec![],
     })

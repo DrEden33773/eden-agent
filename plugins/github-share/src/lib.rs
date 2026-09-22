@@ -2,7 +2,7 @@
 use eden_plugin_sdk::{
     Cancellation, Package,
     protocol::{Descriptor, Fault, delivery::*},
-    serde_json::{Value, json},
+    serde_json::{self, Value, json},
 };
 use std::sync::Arc;
 struct Publisher {
@@ -94,11 +94,24 @@ impl Publisher {
         if cancel.is_cancelled() {
             return Err(fault("Cancelled", "publication cancelled before dispatch"));
         }
-        if !matches!(
-            request.artifact.filename.as_str(),
-            "conversation.html" | "conversation.jsonl"
-        ) {
+        if request.artifact.filename != "conversation.jsonl"
+            || request.artifact.media_type != "application/x-ndjson"
+        {
             return Err(fault("InvalidInput", "unsupported artifact filename"));
+        }
+        let header = request
+            .artifact
+            .content
+            .lines()
+            .next()
+            .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok());
+        if header.as_ref().is_none_or(|value| {
+            value["format"] != "eden-reading-v1" || value["restorable"] != false
+        }) {
+            return Err(fault(
+                "InvalidInput",
+                "publication requires a reading JSONL preview",
+            ));
         }
         let token = std::env::var(&self.token_env)
             .ok()
@@ -170,8 +183,8 @@ impl Publisher {
             Ok(PublishReply {
                 url: url.into(),
                 visibility: "secret".into(),
-                notice: "Anyone with the URL can access this secret gist. Download the HTML and \
-                         open it locally; no hosted viewer is required."
+                notice: "Anyone with the URL can access this secret gist. Download the JSONL and \
+                         inspect it locally; no hosted viewer is required."
                     .into(),
             })
         };
@@ -189,6 +202,31 @@ impl Publisher {
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn full_history_cannot_be_published_as_a_reading_copy() {
+        let p = Publisher {
+            client: reqwest::Client::new(),
+            endpoint: "http://127.0.0.1:1".into(),
+            token_env: "EDEN_TEST_UNUSED_TOKEN".into(),
+        };
+        let error = p
+            .publish(
+                PublishRequest {
+                    confirmed: true,
+                    artifact: Artifact {
+                        media_type: "application/x-ndjson".into(),
+                        filename: "conversation.jsonl".into(),
+                        content: "{\"schema_version\":2,\"transaction\":[] }\n".into(),
+                        warnings: vec![],
+                    },
+                },
+                Cancellation::default(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "InvalidInput");
+    }
+
+    #[tokio::test]
     async fn no_confirmation_never_needs_credentials_or_connects() {
         let p = Publisher {
             client: reqwest::Client::new(),
@@ -200,8 +238,8 @@ mod tests {
                 PublishRequest {
                     confirmed: false,
                     artifact: Artifact {
-                        media_type: "text/html".into(),
-                        filename: "conversation.html".into(),
+                        media_type: "application/x-ndjson".into(),
+                        filename: "conversation.jsonl".into(),
                         content: "private".into(),
                         warnings: vec![],
                     },

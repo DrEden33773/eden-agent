@@ -16,12 +16,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         options,
     )
     .await?;
-    let result = session.export(Selection::default(), Format::Html).await;
+    let result = session
+        .export(Selection::default(), Format::default())
+        .await;
     let stopped = session.shutdown().await;
     let artifact = result?;
     stopped?;
-    assert!(artifact.content.contains("Conversation"));
     assert!(!artifact.content.contains("composition_lock"));
+    assert_eq!(artifact.filename, "conversation.jsonl");
+    assert!(
+        artifact
+            .content
+            .starts_with("{\"format\":\"eden-reading-v1\",\"restorable\":false}\n")
+    );
     println!("{}", serde_json::json!({ "memory_snapshot": true }));
     Ok(())
 }

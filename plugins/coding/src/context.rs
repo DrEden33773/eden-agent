@@ -88,6 +88,41 @@ fn project_path(path: &[Record], records: &[Record]) -> Result<Vec<Item>, Fault>
                     });
                 }
             }
+            "user_shell" if record.payload["exclude_from_context"] != true => {
+                let result: ToolResult = serde_json::from_value(record.payload["result"].clone())
+                    .map_err(|error| {
+                    Fault::new("PersistenceFailure", "user-shell", error.to_string())
+                })?;
+                let execution = &result.details["execution"];
+                let command = execution["command"]
+                    .as_str()
+                    .or_else(|| record.payload["command"].as_str())
+                    .unwrap_or_default();
+                let shell = execution["shell"]
+                    .as_str()
+                    .or_else(|| record.payload["shell"].as_str())
+                    .unwrap_or_default();
+                let status = result.error.as_ref().map_or_else(
+                    || {
+                        result.exit_code.map_or_else(
+                            || "exit code unavailable".into(),
+                            |code| format!("exit code {code}"),
+                        )
+                    },
+                    |error| format!("{}: {}", error.code, error.message),
+                );
+                let mut content = vec![Block::Text {
+                    text: format!(
+                        "User shell execution ({shell}):\n{command}\nStatus: {status}\n{}",
+                        result.text
+                    ),
+                }];
+                content.extend(result.content);
+                items.push(Item::Message {
+                    role: "user".into(),
+                    content,
+                });
+            }
             "branch_summary" => {
                 items.push(text_item(format!(
                     "Explicit context carried from another branch:\n{}",
@@ -240,7 +275,9 @@ fn retained_cut(path: &[Record], keep_recent_tokens: u64) -> Result<usize, Fault
                 | "provider_state"
                 | "queue_delivered"
                 | "branch_summary"
-        ) {
+                | "user_shell"
+        ) || (record.kind == "user_shell" && record.payload["exclude_from_context"] == true)
+        {
             continue;
         }
         tokens +=
@@ -257,6 +294,7 @@ fn retained_cut(path: &[Record], keep_recent_tokens: u64) -> Result<usize, Fault
         let record = &path[cut];
         let safe = record.kind == "queue_delivered"
             || record.kind == "branch_summary"
+            || (record.kind == "user_shell" && record.payload["exclude_from_context"] != true)
             || (record.kind == "message"
                 && matches!(decode(record)?, Item::Message { role, .. } if role == "user"));
         let round = record.kind == "provider_state"
@@ -537,7 +575,7 @@ pub(crate) async fn context(
     let extension_items = interpreted(&path, &cx).await?;
     let mut projected = project_path(&path, &input.records)?;
     projected.extend(input.items.clone());
-    let threshold = settings.compaction_enabled
+    let threshold = settings.auto_compaction()
         && input.limits.context_window > 0
         && calibrated_estimate(
             &path,
@@ -581,11 +619,13 @@ pub(crate) async fn context(
         }
         if cut > 0 {
             let split = cut < path.len()
+                && path[cut].kind != "user_shell"
                 && !(path[cut].kind == "message"
                     && matches!(decode(&path[cut]), Ok(Item::Message { role, .. }) if role == "user"))
                 && path[..cut].iter().any(|record| {
-                    record.kind == "message"
-                        && matches!(decode(record), Ok(Item::Message { role, .. }) if role == "user")
+                    (record.kind == "user_shell" && record.payload["exclude_from_context"] != true)
+                        || (record.kind == "message"
+                        && matches!(decode(record), Ok(Item::Message { role, .. }) if role == "user"))
                 });
             let allowance = settings.summary_allowance(split, input.limits.max_output_tokens);
             let mut summary_items = vec![Item::Message {
@@ -726,6 +766,40 @@ mod tests {
         }
     }
     #[test]
+    fn user_shell_projects_effective_command_and_honors_context_exclusion() {
+        let result = ToolResult {
+            text: "shell output".into(),
+            content: vec![],
+            artifacts: vec![],
+            exit_code: Some(0),
+            truncated: false,
+            error: None,
+            details: json!({ "execution": { "shell": "bash", "command": "effective" } }),
+        };
+        let mut record = record(
+            1,
+            "user_shell",
+            json!({
+                "shell": "bash",
+                "command": "original",
+                "exclude_from_context": false,
+                "result": result,
+            }),
+        );
+        let projected =
+            serde_json::to_string(&project_records(&[record.clone()]).unwrap()).unwrap();
+        assert!(projected.contains("effective"));
+        assert!(projected.contains("shell output"));
+        assert!(!projected.contains("original"));
+        let old = super::tests::record(1, "message", json!(text_item("older".into())));
+        let mut recent = record.clone();
+        recent.sequence = 2;
+        recent.parent_id = Some(1);
+        assert_eq!(retained_cut(&[old, recent], 1).unwrap(), 1);
+        record.payload["exclude_from_context"] = json!(true);
+        assert!(project_records(&[record]).unwrap().is_empty());
+    }
+    #[test]
     fn skill_catalog_uses_an_available_loader_and_custom_system_keeps_cwd() {
         let snapshot = r::Snapshot {
             system: Some("Custom system".into()),
@@ -750,6 +824,7 @@ mod tests {
         assert!(absent.contains("Working directory: /project"));
         assert!(!absent.contains("Available skill"));
         input.tools = Some(vec![ToolDefinition {
+            execution: Default::default(),
             name: "read".into(),
             description: String::new(),
             parameters: Value::Null,

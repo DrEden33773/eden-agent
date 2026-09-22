@@ -784,14 +784,14 @@ impl Session {
         })
     }
     async fn context_resources(&self) -> Result<Option<eden_protocol::resources::Snapshot>, Fault> {
-        if self.role(eden_protocol::resources::SOURCE).is_err() {
+        if !self.has_role(eden_protocol::resources::SOURCE) {
             return Ok(None);
         }
         self.resources().await.map(Some)
     }
     async fn context_tools(&self) -> Result<Option<Vec<c::ToolDefinition>>, Fault> {
         use eden_protocol::resources as r;
-        if self.role(r::TOOL_CATALOG).is_err() {
+        if !self.has_role(r::TOOL_CATALOG) {
             return Ok(None);
         }
         let catalog: r::Catalog = self
@@ -820,25 +820,7 @@ impl Session {
     /// Run one contributed command as a run of its own, so its result settles
     /// like any other and reaches history with the same ordering.
     pub fn command(&self, name: String, arguments: Value) -> Result<u64, Fault> {
-        self.start(true, move |session, run_id, cancel| async move {
-            session
-                .0
-                .kernel
-                .invoke(
-                    Request {
-                        session_id: session.id(),
-                        run_id,
-                        contract: eden_protocol::resources::COMMAND.into(),
-                        payload: json!(eden_protocol::resources::CommandRequest {
-                            cwd: session.cwd().into(),
-                            name,
-                            arguments
-                        }),
-                    },
-                    cancel,
-                )
-                .await
-        })
+        self.start_command(name, arguments)
     }
     /// Take the resource source's current snapshot, which is what the session
     /// would load for a new request.
@@ -867,23 +849,22 @@ impl Session {
             )
         })
     }
-    /// Choose how the queue delivers steering and follow-up submissions.
+    /// Choose delivery modes even during a model run. The queue transaction orders this
+    /// change with Take; already delivered inputs stay unchanged.
     pub fn configure_queue(&self, steering: String, follow_up: String) -> Result<u64, Fault> {
-        self.start(true, move |session, run_id, _| async move {
-            as_terminal(
-                session
-                    .service::<_, Vec<c::QueueEntry>>(
-                        run_id,
-                        c::QUEUE,
-                        &c::QueueRequest::Configure {
-                            steering,
-                            follow_up,
-                        },
-                    )
-                    .await
-                    .map(|_| json!("Queue delivery settings saved.")),
-            )
-        })
+        self.start_control_operation(
+            c::QUEUE,
+            json!(c::QueueRequest::Configure {
+                steering,
+                follow_up
+            }),
+            json!({ "queue_configuration": true }),
+            |value| {
+                serde_json::from_value::<Vec<c::QueueEntry>>(value)
+                    .map(|_| json!("Queue delivery settings saved."))
+                    .map_err(|error| Fault::new("InvalidInput", "session", error.to_string()))
+            },
+        )
     }
     /// Add a versioned extension state record through the only history writer.
     pub fn record_state(&self, state: c::ExtensionState) -> Result<u64, Fault> {
@@ -942,6 +923,7 @@ pub(crate) fn as_terminal(result: Result<Value, Fault>) -> Terminal {
             Err(error) => Outcome::Failed(error),
         },
         cleanup_errors: vec![],
+        partial_result: None,
     }
 }
 

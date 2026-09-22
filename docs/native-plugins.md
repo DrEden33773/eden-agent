@@ -1,6 +1,6 @@
 # Native plugin contract
 
-The current development release pairs host and SDK exactly as `eden-native-0.4.0`, ABI version 1, on the same target triple. Authors use Rust 1.98.1. The host and each library own their Rust dependencies and runtimes. Libraries are trusted native code running with the host's permissions.
+The current development release pairs host and SDK exactly as `eden-native-0.5.0`, ABI version 1, on the same target triple. Authors use Rust 1.98.1. The host and each library own their Rust dependencies and runtimes. Libraries are trusted native code running with the host's permissions.
 
 ## Installation and selection
 
@@ -33,3 +33,5 @@ The default installation provides coding runs with OpenAI Responses, read/write/
 An instance may additionally provide `eden.instance-stop.v1`. After public admission closes and ordinary operations drain, the host calls this finalizer once, awaits its cleanup, then destroys the instance. Finalizers must finish their own work without calling withdrawn services. Their failures are reported by shutdown, including repeated shutdown observations. Libraries without the service retain their prior destruction behavior. This is an additive string service; the C ABI table layout is unchanged.
 
 Manifest `requires` lists selected dependency contract strings. The host validates those strings before loading code, including contracts it has never seen before. The independent service authors and `scripts/verify-workspace.py` demonstrate native author B calling author A through `CallContext::call`, command and hook contributions, ResourceSource replacement, explicit composition recovery and old-handle rejection. See [workspace facilities](workspace.md) for configuration and package sources.
+
+A managed child may retain its final observational result with `Scope::retain_result`, including after root cancellation starts cleanup. The runtime places that value in `Terminal.partial_result` only for an interrupted outcome; it never converts cancellation to success. The completion barrier freezes this value along with cleanup results. Authentication projection removes retained values from public events.

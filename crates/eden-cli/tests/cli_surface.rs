@@ -338,12 +338,10 @@ fn a_misspelled_action_fails_before_any_side_effect() {
 }
 
 #[test]
-fn a_misspelled_family_suggests_the_family_it_meant() {
+fn multiple_prompts_can_resemble_a_misspelled_family() {
     let output = run(&["resorces", "list"]);
-    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
-    let diagnostic = stderr(&output);
-    assert!(diagnostic.contains("tip"), "{diagnostic}");
-    assert!(diagnostic.contains("resources"), "{diagnostic}");
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(stderr(&output).contains("composition"));
 }
 
 #[test]

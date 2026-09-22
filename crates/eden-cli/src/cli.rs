@@ -42,7 +42,8 @@ pub struct Parsed {
     version,
     about = "A Rust coding agent built from replaceable native plugins",
     subcommand_negates_reqs = true,
-    override_usage = "eden [OPTIONS] [PROMPT]\n       eden [OPTIONS] <COMMAND> [ARGS]...",
+    subcommand_precedence_over_arg = true,
+    override_usage = "eden [OPTIONS] [PROMPT]...\n       eden [OPTIONS] <COMMAND> [ARGS]...",
     next_display_order = 800,
     styles = style::styles(),
     after_help = r"Run 'eden help <command>' or 'eden <command> --help' for more information on a command."
@@ -138,9 +139,9 @@ pub struct Cli {
     /// Attach a PDF to the prompt
     #[arg(long, value_name = "PATH")]
     pub file: Vec<PathBuf>,
-    /// Prompt to submit
+    /// Prompts to submit in order; piped stdin and attachments join only the first
     #[arg(value_name = "PROMPT")]
-    pub prompt: Option<String>,
+    pub prompt: Vec<String>,
     #[command(subcommand)]
     /// The command family to run; without one the positional prompt runs.
     pub family: Option<Family>,
@@ -149,6 +150,8 @@ pub struct Cli {
 /// The command families `eden` accepts.
 #[derive(Debug, Subcommand)]
 pub enum Family {
+    /// Serve version 1 JSONL requests over stdin/stdout until disconnect or shutdown
+    Rpc,
     /// Inspect and manage a llama.cpp router
     Router {
         #[command(subcommand)]

@@ -39,10 +39,17 @@ FALLBACKS = {
         )
     },
     **dict.fromkeys(
-        ((name, "0.8.0") for name in ("base64-simd", "vsimd")),
+        ((name, "0.8.0") for name in ("base64-simd", "uuid-simd", "vsimd")),
         Fallback(
             ("third-party/simd-0.8.0-LICENSE",),
             "https://github.com/Nugine/simd/blob/d74c030d9dc4f3cae02146d1f497ff62726ef09a/LICENSE",
+        ),
+    ),
+    **dict.fromkeys(
+        ((name, "0.56.0") for name in ("jsonschema-regex", "jsonschema-value")),
+        Fallback(
+            ("third-party/jsonschema-0.56.0-LICENSE",),
+            "https://github.com/Stranger6667/jsonschema/blob/1e244c994dd81a1feb7801556a813c6bf2d45dad/LICENSE",
         ),
     ),
     ("defmt-parser", "1.0.0"): Fallback(

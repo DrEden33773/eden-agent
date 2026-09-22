@@ -1,11 +1,13 @@
 //! Public data records shared by the host and native plugin SDK.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+pub mod interaction;
 pub mod models;
 pub mod resources;
+pub mod shell;
 
 /// Exact host/SDK pairing for this development release.
-pub const CONTRACT: &str = "eden-native-0.4.0";
+pub const CONTRACT: &str = "eden-native-0.5.0";
 /// Agent loop role.
 pub const AGENT_LOOP: &str = "eden.agent-loop.v1";
 /// Context projection role.
@@ -64,6 +66,10 @@ pub enum Outcome {
 pub struct Terminal {
     pub outcome: Outcome,
     pub cleanup_errors: Vec<Fault>,
+    /// Observational output retained after an interrupted operation's cleanup, such as shell
+    /// output and artifact paths. It never changes a cancelled/failed outcome into success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial_result: Option<Value>,
 }
 impl Terminal {
     /// A terminal that failed before any cleanup was registered, so it carries
@@ -72,6 +78,7 @@ impl Terminal {
         Self {
             outcome: Outcome::Failed(error),
             cleanup_errors: vec![],
+            partial_result: None,
         }
     }
     /// Reduce the terminal to a result. A cleanup error outranks the outcome,

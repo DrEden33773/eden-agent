@@ -25,6 +25,7 @@ fn descriptor() -> Descriptor {
         provides: vec![
             eden_plugin_sdk::protocol::resources::TOOL_CATALOG.into(),
             TOOL.into(),
+            eden_plugin_sdk::protocol::shell::USER_SHELL.into(),
         ],
     }
 }
@@ -71,6 +72,9 @@ fn create(config: Value) -> Result<Package, Fault> {
             ));
         }
     };
+    let user_bash = shell.clone();
+    let user_powershell = powershell.clone();
+    let user_artifact_dir = artifact_dir.clone();
     let default_bash = config.get("bash").is_none();
     let default_powershell = config.get("powershell").is_none();
     Ok(Package::new("coding-tools")
@@ -187,7 +191,19 @@ fn create(config: Value) -> Result<Package, Fault> {
                 }
                 Ok(result)
             }
-        }))
+        })
+        .service(
+            eden_plugin_sdk::protocol::shell::USER_SHELL,
+            move |request, cx| {
+                shell::user(
+                    request,
+                    cx,
+                    (user_bash.clone(), default_bash),
+                    (user_powershell.clone(), default_powershell),
+                    user_artifact_dir.clone(),
+                )
+            },
+        ))
 }
 eden_plugin_sdk::export_plugin!(descriptor, create);
 

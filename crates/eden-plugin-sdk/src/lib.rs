@@ -5,6 +5,7 @@
 pub mod abi;
 
 pub mod author;
+pub mod local;
 #[doc(hidden)]
 pub mod runtime;
 pub mod scope;

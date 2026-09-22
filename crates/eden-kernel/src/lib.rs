@@ -107,60 +107,187 @@ pub fn preflight(composition: &Composition) -> Result<(), Fault> {
 /// In-memory ordered event ledger, shared by native routes and session callers.
 pub struct Events {
     session_id: u64,
-    entries: Mutex<Vec<Event>>,
+    ledger: Mutex<EventLedger>,
+    closed: AtomicBool,
     changed: tokio::sync::Notify,
 }
+struct EventLedger {
+    entries: std::collections::VecDeque<Event>,
+    next: u64,
+    bytes: usize,
+    attempts: BTreeMap<u64, Vec<Event>>,
+}
 impl Events {
-    /// Create the empty ledger for one session.
+    /// Retain up to 8192 events and approximately 8 MiB of serialized payloads.
+    /// Older cursors report lag explicitly; public history remains the durable source.
     pub fn new(session_id: u64) -> Arc<Self> {
         Arc::new(Self {
             session_id,
-            entries: Mutex::new(vec![]),
+            ledger: Mutex::new(EventLedger {
+                entries: Default::default(),
+                next: 1,
+                bytes: 0,
+                attempts: BTreeMap::new(),
+            }),
+            closed: AtomicBool::new(false),
             changed: tokio::sync::Notify::new(),
         })
     }
-    /// Append one event and wake every reader waiting on it. The sequence
-    /// number is the ledger's own, so a producer never chooses one.
+    /// Append an observation using a session-local monotonically increasing sequence.
     pub fn push(&self, run_id: u64, kind: &str, payload: serde_json::Value) {
-        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        let sequence = entries.len() as u64 + 1;
-        entries.push(Event {
-            sequence,
+        let mut ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
+        let event = Event {
+            sequence: ledger.next,
             session_id: self.session_id,
             run_id,
             kind: kind.into(),
             payload,
-        });
+        };
+        ledger.next += 1;
+        // Persistence needs interrupted text even after an observer falls behind. Coalescing
+        // text deltas keeps one text value per attempt rather than retaining every delta event.
+        if matches!(
+            kind,
+            "model_request"
+                | "model_attempt_started"
+                | "model_attempt_finished"
+                | "model_text_delta"
+        ) {
+            let attempts = ledger.attempts.entry(run_id).or_default();
+            if kind == "model_text_delta" {
+                let previous = attempts.iter_mut().rev().find(|e| {
+                    e.kind == kind && e.payload["attempt_id"] == event.payload["attempt_id"]
+                });
+                if let Some(previous) = previous {
+                    if let (Some(text), Some(delta)) = (
+                        previous.payload["delta"].as_str(),
+                        event.payload["delta"].as_str(),
+                    ) {
+                        previous.payload["delta"] =
+                            serde_json::Value::String(format!("{text}{delta}"));
+                    }
+                } else {
+                    attempts.push(event.clone());
+                }
+            } else {
+                attempts.push(event.clone());
+            }
+        }
+        ledger.bytes += event_size(&event);
+        ledger.entries.push_back(event);
+        while ledger.entries.len() > 8192 || ledger.bytes > 8 * 1024 * 1024 {
+            if let Some(old) = ledger.entries.pop_front() {
+                ledger.bytes = ledger.bytes.saturating_sub(event_size(&old));
+            } else {
+                break;
+            }
+        }
         self.changed.notify_waiters();
     }
-    /// Every event in order, as a copy the caller owns.
-    pub fn snapshot(&self) -> Vec<Event> {
-        self.entries
+    /// Drain compacted attempt observations after execution settles, independently of cursors.
+    pub fn take_attempts(&self, run_id: u64) -> Vec<Event> {
+        self.ledger
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone()
+            .attempts
+            .remove(&run_id)
+            .unwrap_or_default()
     }
-    /// Wait for the events after `sequence`, returning as soon as any exist.
-    /// The registration happens before the snapshot, so an event committed
-    /// between the two is observed rather than lost.
-    pub async fn after(&self, sequence: u64) -> Vec<Event> {
+    /// The retained observation window; it is not the durable session history.
+    pub fn snapshot(&self) -> Vec<Event> {
+        self.ledger
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entries
+            .iter()
+            .cloned()
+            .collect()
+    }
+    /// End observation after all producers settle and wake idle readers.
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.changed.notify_waiters();
+    }
+    /// Return retained events after the cursor, or `Lagged` if any have expired.
+    /// Empty means the owner closed the ledger and this cursor has drained it.
+    pub async fn read_after(&self, sequence: u64) -> Result<Vec<Event>, Fault> {
         loop {
             let changed = self.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            let events: Vec<_> = self
-                .snapshot()
-                .into_iter()
-                .filter(|e| e.sequence > sequence)
-                .collect();
-            if !events.is_empty() {
-                return events;
+            {
+                let ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
+                let oldest = ledger.entries.front().map_or(ledger.next, |e| e.sequence);
+                if sequence.saturating_add(1) < oldest {
+                    return Err(Fault::new(
+                        "Lagged",
+                        "events",
+                        format!("cursor {sequence} expired; first retained sequence is {oldest}"),
+                    ));
+                }
+                let events: Vec<_> = ledger
+                    .entries
+                    .iter()
+                    .filter(|e| e.sequence > sequence)
+                    .cloned()
+                    .collect();
+                if !events.is_empty() || self.closed.load(Ordering::Acquire) {
+                    return Ok(events);
+                }
             }
             changed.await;
         }
     }
+    /// Compatibility observer: lag is an explicit `events_lagged` observation. New clients
+    /// should use `read_after` to distinguish lag from an ordinary domain event.
+    pub async fn after(&self, sequence: u64) -> Vec<Event> {
+        match self.read_after(sequence).await {
+            Ok(events) => events,
+            Err(error) => {
+                let ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
+                vec![Event {
+                    sequence: ledger
+                        .entries
+                        .front()
+                        .map_or(ledger.next, |e| e.sequence)
+                        .saturating_sub(1),
+                    session_id: self.session_id,
+                    run_id: 0,
+                    kind: "events_lagged".into(),
+                    payload: serde_json::json!(error),
+                }]
+            }
+        }
+    }
 }
-struct Services(BTreeMap<String, Arc<NativeInstance>>);
+fn event_size(event: &Event) -> usize {
+    event.kind.len() + event.payload.to_string().len() + 40
+}
+enum Instance {
+    Native(Arc<NativeInstance>),
+    Local(Arc<eden_plugin_sdk::local::LocalInstance>),
+}
+impl Instance {
+    fn close(&self) {
+        match self {
+            Self::Native(i) => i.close(),
+            Self::Local(i) => i.close(),
+        }
+    }
+    async fn stop(&self) -> Result<(), Fault> {
+        match self {
+            Self::Native(i) => i.stop().await,
+            Self::Local(i) => i.stop().await,
+        }
+    }
+    async fn call(&self, request: Request, cancel: Cancellation) -> Terminal {
+        match self {
+            Self::Native(i) => i.call(request, cancel).await,
+            Self::Local(i) => i.call(request, cancel).await,
+        }
+    }
+}
+struct Services(BTreeMap<String, Arc<Instance>>);
 impl Service for Services {
     const NAME: &'static str = "eden.composition-services.v1";
 }
@@ -306,10 +433,10 @@ pub struct Kernel {
     router: Arc<Router>,
     token: usize,
     fiber: FiberHandle,
-    instances: Vec<Arc<NativeInstance>>,
+    instances: Vec<Arc<Instance>>,
     composition: Composition,
 }
-async fn rollback_initialization(mut error: Fault, instances: &[Arc<NativeInstance>]) -> Fault {
+async fn rollback_initialization(mut error: Fault, instances: &[Arc<Instance>]) -> Fault {
     for instance in instances {
         instance.close();
     }
@@ -345,10 +472,22 @@ impl Kernel {
         session_id: u64,
         events: Arc<Events>,
     ) -> Result<Self, Fault> {
+        Self::load_embedded(composition, base, session_id, events, BTreeMap::new()).await
+    }
+    /// Mount explicit caller-owned packages alongside native libraries, with the same role routing.
+    /// A local package must exactly match its manifest descriptor; its library field is an identity
+    /// marker and is never opened. No Rust value crosses a dynamic-library boundary.
+    pub async fn load_embedded(
+        composition: Composition,
+        base: &Path,
+        session_id: u64,
+        events: Arc<Events>,
+        local: BTreeMap<String, eden_plugin_sdk::Package>,
+    ) -> Result<Self, Fault> {
         let base = base.to_owned();
         let (sender, receiver) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            let result = Self::load_owned(composition, &base, session_id, events).await;
+            let result = Self::load_owned(composition, &base, session_id, events, local).await;
             // Delivery's Drop rolls back if the caller leaves at any point before taking ownership.
             let _ = sender.send(Delivery(Some(result)));
         });
@@ -365,13 +504,28 @@ impl Kernel {
         base: &Path,
         session_id: u64,
         events: Arc<Events>,
+        mut local: BTreeMap<String, eden_plugin_sdk::Package>,
     ) -> Result<Self, Fault> {
         preflight(&composition)?;
+        for (name, package) in &local {
+            if !composition.packages.iter().any(|manifest| {
+                manifest.descriptor.package == *name && &manifest.descriptor == package.descriptor()
+            }) {
+                return Err(Fault::new(
+                    "IncompatibleContract",
+                    "embedded",
+                    "local package descriptor differs from manifest",
+                ));
+            }
+        }
         // Resolve all paths before executing the first native library.
         let paths: Vec<_> = composition
             .packages
             .iter()
             .map(|p| {
+                if local.contains_key(&p.descriptor.package) {
+                    return Ok(std::path::PathBuf::new());
+                }
                 std::fs::canonicalize(base.join(&p.library)).map_err(|e| {
                     Fault::new(
                         "MissingDependency",
@@ -407,10 +561,16 @@ impl Kernel {
             cancel,
             event,
         };
-        let mut packages: BTreeMap<String, Arc<NativeInstance>> = BTreeMap::new();
+        let mut packages: BTreeMap<String, Arc<Instance>> = BTreeMap::new();
         for (manifest, path) in composition.packages.iter().zip(paths) {
             let manifest = manifest.clone();
             let name = manifest.descriptor.package.clone();
+            if let Some(package) = local.remove(&name) {
+                // SAFETY: Router registry callbacks remain live until every instance stops.
+                let instance = unsafe { eden_plugin_sdk::local::LocalInstance::new(package, host) };
+                packages.insert(name, Arc::new(Instance::Local(instance)));
+                continue;
+            }
             let result =
                 tokio::task::spawn_blocking(move || NativeInstance::load(&path, &manifest, host))
                     .await
@@ -418,7 +578,7 @@ impl Kernel {
                     .and_then(|r| r);
             match result {
                 Ok(instance) => {
-                    packages.insert(name, instance);
+                    packages.insert(name, Arc::new(Instance::Native(instance)));
                 }
                 Err(error) => {
                     router.open.store(false, Ordering::Release);
@@ -478,6 +638,10 @@ impl Kernel {
     pub async fn invoke(&self, request: Request, cancel: Cancellation) -> Terminal {
         self.router.invoke(request, cancel).await
     }
+    /// Whether this generation has a selected role, including caller-runtime contributions.
+    pub fn has_role(&self, contract: &str) -> bool {
+        self.composition.roles.contains_key(contract)
+    }
     /// The instance selected for one role contract, for a caller that has to
     /// know whether a role is bound to a particular package.
     pub fn role(&self, contract: &str) -> Result<Arc<NativeInstance>, Fault> {
@@ -487,8 +651,11 @@ impl Kernel {
             .map_err(|e| Fault::new("Unavailable", "services", e.to_string()))?
             .0
             .get(contract)
-            .cloned()
-            .ok_or_else(|| Fault::new("MissingDependency", "services", contract))
+            .and_then(|instance| match instance.as_ref() {
+                Instance::Native(native) => Some(native.clone()),
+                Instance::Local(_) => None,
+            })
+            .ok_or_else(|| Fault::new("MissingDependency", "native-services", contract))
     }
     /// Close admission, cancel every in-flight request, and run each instance's
     /// finalizer before releasing its library. Await this before dropping the

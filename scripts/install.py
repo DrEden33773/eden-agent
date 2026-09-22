@@ -37,7 +37,7 @@ class Composition(TypedDict):
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-CONTRACT = "eden-native-0.4.0"
+CONTRACT = "eden-native-0.5.0"
 ROLES = ["eden.agent-loop.v1", "eden.context.v1", "eden.provider.v1", "eden.tool.v1"]
 
 
@@ -105,12 +105,13 @@ def install(
             (
                 "coding",
                 [
+                    "eden.coding-control.v1",
                     "eden.coding-loop.v2",
                     "eden.coding-context.v2",
                     "eden.submission-queue.v2",
                 ],
             ),
-            ("coding-tools", ["eden.tool-catalog.v1", "eden.coding-tool.v1"]),
+            ("coding-tools", ["eden.tool-catalog.v1", "eden.coding-tool.v1", "eden.user-shell.v1"]),
             (
                 "model-access",
                 [

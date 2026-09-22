@@ -1,6 +1,12 @@
 //! Shared persistent and memory session API for the CLI and Rust consumers.
+pub use eden_kernel::history;
 use eden_kernel::{Events, Kernel};
 mod attempts;
+mod control;
+pub mod embedded;
+mod interaction;
+mod user_shell;
+pub use control::SessionState;
 mod composition;
 mod generation;
 mod models;
@@ -22,6 +28,8 @@ struct State {
     closed: bool,
     next: u64,
     active: Option<(u64, Cancellation)>,
+    shells: BTreeMap<u64, Cancellation>,
+    commands: BTreeMap<u64, Cancellation>,
     management: bool,
     pending_inputs: usize,
     terminals: BTreeMap<u64, Terminal>,
@@ -34,6 +42,8 @@ struct Inner {
     history_path: Option<std::path::PathBuf>,
     offline_records: Mutex<Vec<c::Record>>,
     events: Arc<Events>,
+    interactions: Arc<interaction::Interactions>,
+    input_cancel: Cancellation,
     state: Mutex<State>,
     settled: tokio::sync::Notify,
     shutdown: tokio::sync::Mutex<()>,
@@ -92,7 +102,7 @@ impl Session {
     ) -> Result<Self, Fault> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            let result = Self::open_owned(composition, options, workspace, rebind).await;
+            let result = Self::open_owned(composition, options, workspace, rebind, None).await;
             let _ = sender.send(SessionDelivery(Some(result)));
         });
         let mut delivery = receiver
@@ -108,6 +118,7 @@ impl Session {
         options: SessionOptions,
         workspace_options: WorkspaceOptions,
         rebind: bool,
+        embedded: Option<embedded::Embedded>,
     ) -> Result<Self, Fault> {
         let cwd = std::fs::canonicalize(&options.cwd)
             .map_err(|e| Fault::new("InvalidInput", "cwd", e.to_string()))?;
@@ -149,13 +160,38 @@ impl Session {
             .unwrap_or_else(new_session_id);
         let next = previous.iter().map(|r| r.run_id).max().unwrap_or(0) + 1;
         let events = Events::new(id);
-        let selected = workspace_setup::prepare(
-            &composition,
-            &cwd,
-            &workspace_options,
-            &events,
-            options.history.as_deref(),
-        )?;
+        let (selected, local) = if let Some(embedded) = embedded {
+            let selected = workspace_setup::prepare_resolved(
+                embedded.composition,
+                &embedded.base,
+                &cwd,
+                &workspace_options,
+                &events,
+                options.history.as_deref(),
+                &embedded.packages.keys().cloned().collect(),
+            )?;
+            (selected, embedded.packages)
+        } else {
+            (
+                workspace_setup::prepare(
+                    &composition,
+                    &cwd,
+                    &workspace_options,
+                    &events,
+                    options.history.as_deref(),
+                )?,
+                BTreeMap::new(),
+            )
+        };
+        let interactions = Arc::new(interaction::Interactions::default());
+        let mut embedded = embedded::Embedded {
+            composition: selected,
+            base: std::path::PathBuf::from("."),
+            packages: local,
+        };
+        embedded = embedded.package(interactions.package(), "eden-host-interaction-v1")?;
+        let selected = embedded.composition;
+        let local = embedded.packages;
         let desired = composition::binding(&selected, &cwd)?;
         if !rebind
             && previous
@@ -170,14 +206,15 @@ impl Session {
                 "saved package binding differs; use an explicit session switch",
             ));
         }
-        let kernel = Kernel::load_resolved(
+        let kernel = Kernel::load_embedded(
             selected,
             composition.parent().unwrap_or(Path::new(".")),
             id,
             events.clone(),
+            local,
         )
         .await?;
-        let coding = kernel.role(c::LOOP).is_ok();
+        let coding = kernel.has_role(c::LOOP);
         if options.history.is_some() && !coding {
             let mut error = Fault::new(
                 "Unsupported",
@@ -198,10 +235,14 @@ impl Session {
             history_path: options.history.clone(),
             offline_records: Mutex::new(previous.clone()),
             events,
+            interactions,
+            input_cancel: Cancellation::default(),
             state: Mutex::new(State {
                 closed: false,
                 next,
                 active: None,
+                shells: BTreeMap::new(),
+                commands: BTreeMap::new(),
                 management: false,
                 pending_inputs: 0,
                 terminals: BTreeMap::new(),
@@ -378,7 +419,12 @@ impl Session {
         Fut: std::future::Future<Output = Terminal> + Send + 'static,
     {
         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.closed || state.active.is_some() || state.pending_inputs > 0 {
+        if state.closed
+            || state.active.is_some()
+            || state.pending_inputs > 0
+            || !state.shells.is_empty()
+            || !state.commands.is_empty()
+        {
             return Err(Fault::new(
                 "Unavailable",
                 "session",
@@ -401,6 +447,7 @@ impl Session {
         let session = self.clone();
         tokio::spawn(async move {
             let mut terminal = operation(session.clone(), run_id, cancel).await;
+            let attempt_events = session.0.events.take_attempts(run_id);
             if session.0.coding && session.0.kernel.available() {
                 // Persistence runs in fresh admission after the cancelled invocation
                 // has drained; partial provider output can never execute here.
@@ -410,7 +457,7 @@ impl Session {
                 {
                     Ok(history) => {
                         for attempt in attempts::records(
-                            &session.events(),
+                            &attempt_events,
                             run_id,
                             &public_result(&terminal),
                             &history.records,
@@ -466,6 +513,14 @@ impl Session {
                 .push(run_id, "cancel_requested", serde_json::Value::Null);
             return Ok(());
         }
+        if let Some(cancel) = state
+            .commands
+            .get(&run_id)
+            .or_else(|| state.shells.get(&run_id))
+        {
+            cancel.cancel();
+            return Ok(());
+        }
         if state.terminals.contains_key(&run_id) {
             return Ok(());
         }
@@ -496,7 +551,10 @@ impl Session {
                 if let Some(result) = state.terminals.get(&run_id) {
                     return Ok(result.clone());
                 }
-                if state.active.as_ref().is_none_or(|(id, _)| *id != run_id) {
+                if state.active.as_ref().is_none_or(|(id, _)| *id != run_id)
+                    && !state.shells.contains_key(&run_id)
+                    && !state.commands.contains_key(&run_id)
+                {
                     return Err(Fault::new("InvalidInput", "session", "unknown run"));
                 }
             }
@@ -510,6 +568,17 @@ impl Session {
     /// Wait for the events after `sequence`, for a reader that keeps a cursor.
     pub async fn events_after(&self, sequence: u64) -> Vec<Event> {
         self.0.events.after(sequence).await
+    }
+    /// Whether the active generation selects a native or in-process implementation of this role.
+    pub fn has_role(&self, contract: &str) -> bool {
+        self.0
+            .kernel
+            .get()
+            .is_ok_and(|kernel| kernel.has_role(contract))
+    }
+    /// Observe a bounded window, reporting an expired cursor as `Lagged` rather than losing events.
+    pub async fn read_events(&self, sequence: u64) -> Result<Vec<Event>, Fault> {
+        self.0.events.read_after(sequence).await
     }
     /// Useful for low-level native integration; the returned proxy retains its generation gate.
     pub fn role(&self, contract: &str) -> Result<Arc<eden_kernel::NativeInstance>, Fault> {
@@ -536,6 +605,10 @@ impl Session {
         let active = {
             let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
             state.closed = true;
+            self.0.input_cancel.cancel();
+            for cancel in state.shells.values().chain(state.commands.values()) {
+                cancel.cancel();
+            }
             state.active.as_ref().map(|(id, cancel)| {
                 cancel.cancel();
                 *id
@@ -548,15 +621,12 @@ impl Session {
             let changed = self.0.settled.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            if self
-                .0
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .pending_inputs
-                == 0
             {
-                break;
+                let state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+                if state.pending_inputs == 0 && state.shells.is_empty() && state.commands.is_empty()
+                {
+                    break;
+                }
             }
             changed.await;
         }
@@ -583,6 +653,7 @@ impl Session {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .shutdown_result = Some(result.clone());
+        self.0.events.close();
         result
     }
     async fn service<I: serde::Serialize, O: serde::de::DeserializeOwned>(
@@ -590,6 +661,25 @@ impl Session {
         run_id: u64,
         role: &str,
         input: &I,
+    ) -> Result<O, Fault> {
+        self.service_with_cancel(run_id, role, input, Cancellation::default())
+            .await
+    }
+    async fn service_input<I: serde::Serialize, O: serde::de::DeserializeOwned>(
+        &self,
+        run_id: u64,
+        role: &str,
+        input: &I,
+    ) -> Result<O, Fault> {
+        self.service_with_cancel(run_id, role, input, self.0.input_cancel.clone())
+            .await
+    }
+    async fn service_with_cancel<I: serde::Serialize, O: serde::de::DeserializeOwned>(
+        &self,
+        run_id: u64,
+        role: &str,
+        input: &I,
+        cancel: Cancellation,
     ) -> Result<O, Fault> {
         let payload = serde_json::to_value(input)
             .map_err(|e| Fault::new("InvalidInput", "session", e.to_string()))?;
@@ -603,7 +693,7 @@ impl Session {
                     contract: role.into(),
                     payload,
                 },
-                Cancellation::default(),
+                cancel,
             )
             .await
             .into_result()?;
@@ -676,7 +766,7 @@ impl Session {
         tokio::spawn(async move {
             let _owner = owner;
             let mut entries: Vec<c::QueueEntry> = session
-                .service(
+                .service_input(
                     run_id,
                     c::QUEUE,
                     &c::QueueRequest::Enqueue { kind, content },

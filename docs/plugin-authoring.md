@@ -1,6 +1,6 @@
 # Author a native plugin
 
-Use the SDK source from the same eden-agent release and Rust 1.98.1. Host and plugin must match `eden-native-0.4.0`, ABI version 1 and the target triple. There is no cross-release ABI compatibility promise.
+Use the SDK source from the same eden-agent release and Rust 1.98.1. Host and plugin must match `eden-native-0.5.0`, ABI version 1 and the target triple. There is no cross-release ABI compatibility promise.
 
 ## Independent build
 
@@ -36,8 +36,8 @@ Copy the compiled `.dll`, `.so` or `.dylib` into a new version directory in the 
     "version": "0.1.0",
     "provides": ["eden.agent-loop.v1"]
   },
-  "host": "eden-native-0.4.0",
-  "sdk": "eden-native-0.4.0",
+  "host": "eden-native-0.5.0",
+  "sdk": "eden-native-0.5.0",
   "target": "x86_64-unknown-linux-gnu",
   "library": "plugins/loop-a/0.1.0/libauthor_loop_a.so",
   "config": null

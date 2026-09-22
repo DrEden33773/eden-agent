@@ -7,6 +7,7 @@ use serde_json::json;
 
 fn public_auth_terminal(private: &Terminal) -> Terminal {
     let mut public = private.clone();
+    public.partial_result = None;
     if let Outcome::Completed(value) = &mut public.outcome {
         // Whitelist status metadata so future private reply fields stay private by default.
         *value = ["operation_id", "provider", "status", "source"]
@@ -189,7 +190,7 @@ impl Session {
         .await
     }
     pub(crate) async fn freeze_model(&self, run_id: u64) -> Result<Option<m::ModelTarget>, Fault> {
-        if self.role(m::MODEL_CATALOG).is_err() {
+        if !self.has_role(m::MODEL_CATALOG) {
             return Ok(None);
         }
         let selection = self.model_selection().await?;
@@ -269,10 +270,14 @@ mod tests {
             history_path: None,
             offline_records: Mutex::new(vec![]),
             events,
+            interactions: Arc::new(interaction::Interactions::default()),
+            input_cancel: Cancellation::default(),
             state: Mutex::new(State {
                 closed: false,
                 next: 1,
                 active: None,
+                shells: BTreeMap::new(),
+                commands: BTreeMap::new(),
                 management: false,
                 pending_inputs: 0,
                 terminals: BTreeMap::new(),
@@ -292,6 +297,7 @@ mod tests {
                 },
             })),
             cleanup_errors: vec![],
+            partial_result: None,
         };
         let (release, ready) = tokio::sync::oneshot::channel();
         let run = session
@@ -343,8 +349,10 @@ mod tests {
                 "future_private_field": "private-material",
             })),
             cleanup_errors: vec![Fault::new("Cleanup", "fixture", "cleanup failed")],
+            partial_result: Some(json!({ "secret": "private-partial" })),
         };
         let public = public_auth_terminal(&private);
+        assert!(public.partial_result.is_none());
         assert_eq!(
             public.outcome,
             Outcome::Completed(json!({
@@ -366,6 +374,7 @@ mod tests {
             let terminal = Terminal {
                 outcome,
                 cleanup_errors: vec![],
+                partial_result: None,
             };
             assert_eq!(public_auth_terminal(&terminal), terminal);
         }

@@ -5,6 +5,7 @@ use eden_cli::cli::{AttachmentKind, Family, Parsed};
 use eden_cli::shell::Shell;
 use eden_protocol::coding::{Block, LOOP};
 use std::ffi::OsString;
+use std::io::{IsTerminal, Read};
 
 fn main() {
     let args: Vec<OsString> = std::env::args_os().collect();
@@ -45,6 +46,7 @@ fn start(parsed: Parsed, shell: &Shell) -> Result<i32, Box<dyn std::error::Error
 }
 async fn run(parsed: Parsed, shell: &Shell) -> Result<i32, Box<dyn std::error::Error>> {
     match &parsed.cli.family {
+        Some(Family::Rpc) => eden_cli::rpc::run(&parsed.cli).await,
         Some(Family::Models { .. } | Family::Auth { .. } | Family::Router { .. }) => {
             eden_cli::model_commands::run(&parsed.cli).await
         }
@@ -69,15 +71,32 @@ async fn prompt(parsed: &Parsed, shell: &Shell) -> Result<i32, Box<dyn std::erro
         }
         return Ok(0);
     }
+    let mut prompts = cli.prompt.clone();
+    if !cli.continue_session {
+        let stdin = std::io::stdin();
+        if !stdin.is_terminal() {
+            let mut text = String::new();
+            stdin.lock().read_to_string(&mut text).map_err(|error| {
+                std::io::Error::new(error.kind(), format!("cannot read stdin as UTF-8: {error}"))
+            })?;
+            if !text.is_empty() {
+                if let Some(first) = prompts.first_mut() {
+                    *first = format!("{text}\n\n{first}");
+                } else {
+                    prompts.push(text);
+                }
+            }
+        }
+        if prompts.is_empty() {
+            return Err("provide a prompt or piped stdin; see --help".into());
+        }
+    }
     let options = eden_cli::session_options(cli, cli.session.clone(), !cli.continue_session)?;
     let cwd = options.cwd;
     let mut history = options.history;
     let resume = cli.continue_session;
-    let prompt = if resume {
-        String::new()
-    } else {
-        cli.prompt.clone().ok_or("provide a prompt; see --help")?
-    };
+    let mut prompts = prompts.into_iter();
+    let prompt = prompts.next().unwrap_or_default();
     let cwd = std::fs::canonicalize(cwd)?;
     let mut content = vec![Block::Text { text: prompt }];
     for (kind, path) in eden_cli::cli::attachments(parsed) {
@@ -160,40 +179,46 @@ async fn prompt(parsed: &Parsed, shell: &Shell) -> Result<i32, Box<dyn std::erro
             })?;
             session.wait(run).await?.into_result()?;
         }
-        let run = if resume {
-            session.resume()?
-        } else {
-            session.submit_blocks(content)?
-        };
-        let cancel_session = session.clone();
-        let signal = tokio::spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                let _ = cancel_session.cancel(run);
-            }
-        });
-        // Aborting this listener only unregisters the CLI listener; run cleanup is awaited below.
-        struct Signal(tokio::task::JoinHandle<()>);
-        impl Drop for Signal {
-            fn drop(&mut self) {
-                self.0.abort();
-            }
-        }
-        let _signal = Signal(signal);
-        let terminal = eden_cli::wait_for_run(&session, run, cli.json, shell).await?;
-        if !terminal.cleanup_errors.is_empty() {
-            return Err(format!("cleanup failed: {:?}", terminal.cleanup_errors).into());
-        }
-        match terminal.outcome {
-            Outcome::Completed(value) => {
-                if !cli.json {
-                    use std::io::Write;
-                    writeln!(std::io::stdout().lock(), "{}", value.as_str().unwrap_or(""))?;
+        let mut sequence = 0;
+        for content in
+            std::iter::once(content).chain(prompts.map(|text| vec![Block::Text { text }]))
+        {
+            let run = if resume {
+                session.resume()?
+            } else {
+                session.submit_blocks(content)?
+            };
+            let cancel_session = session.clone();
+            let signal = tokio::spawn(async move {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    let _ = cancel_session.cancel(run);
                 }
-                Ok(0)
+            });
+            // Aborting this listener only unregisters the CLI listener; run cleanup is awaited below.
+            struct Signal(tokio::task::JoinHandle<()>);
+            impl Drop for Signal {
+                fn drop(&mut self) {
+                    self.0.abort();
+                }
             }
-            Outcome::Cancelled => Ok(130),
-            Outcome::Failed(error) => Err(Box::new(error) as Box<dyn std::error::Error>),
+            let _signal = Signal(signal);
+            let terminal =
+                eden_cli::wait_for_run_after(&session, run, cli.json, shell, &mut sequence).await?;
+            if !terminal.cleanup_errors.is_empty() {
+                return Err(format!("cleanup failed: {:?}", terminal.cleanup_errors).into());
+            }
+            match terminal.outcome {
+                Outcome::Completed(value) => {
+                    if !cli.json {
+                        use std::io::Write;
+                        writeln!(std::io::stdout().lock(), "{}", value.as_str().unwrap_or(""))?;
+                    }
+                }
+                Outcome::Cancelled => return Ok(130),
+                Outcome::Failed(error) => return Err(Box::new(error) as Box<dyn std::error::Error>),
+            }
         }
+        Ok(0)
     }
     .await;
     let shutdown = session.shutdown().await;

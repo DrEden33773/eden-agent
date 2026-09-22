@@ -20,6 +20,28 @@ pub const INTERPRETER: &str = "eden.record-interpreter.v1";
 pub const MIGRATOR: &str = "eden.state-migrator.v1";
 /// Pending-submission queue.
 pub const QUEUE: &str = "eden.submission-queue.v2";
+/// Session-local coding policy and interruption of the current retry backoff.
+pub const CODING_CONTROL: &str = "eden.coding-control.v1";
+/// Changes affect subsequent decisions in this package instance and are not
+/// persisted. Stopping retry returns the original provider failure; it does
+/// not cancel the run scope, tools or other operations.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+#[allow(missing_docs)]
+pub enum CodingControlRequest {
+    Inspect,
+    SetAutoCompaction { enabled: bool },
+    SetAutoRetry { enabled: bool },
+    StopRetry,
+}
+/// A snapshot of policy and active backoff waits, not a completion barrier.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[allow(missing_docs)]
+pub struct CodingControlState {
+    pub auto_compaction: bool,
+    pub auto_retry: bool,
+    pub retry_waiting: bool,
+}
 /// One piece of run content, carrying its data inline so a stored record never
 /// depends on the original file still existing.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -133,6 +155,19 @@ pub struct ToolDefinition {
     pub description: String,
     /// The JSON Schema the model's arguments have to satisfy.
     pub parameters: Value,
+    /// Scheduling permission used after hooks resolve the final tool name.
+    #[serde(default)]
+    pub execution: ToolExecution,
+}
+/// Sequential tools are barriers. Only consecutive tools explicitly opting in
+/// to parallel execution may overlap, with results committed in call order.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[allow(missing_docs)]
+pub enum ToolExecution {
+    #[default]
+    Sequential,
+    Parallel,
 }
 /// The model request. `max_output_tokens` narrows this one request without
 /// changing the ordinary allowance, which is what a summary uses.
@@ -329,11 +364,28 @@ pub fn decode_records(bytes: &[u8]) -> Result<Vec<Record>, Fault> {
 // Field and variant names state the payload; see docs/development-checks.md#doc-comments.
 #[allow(missing_docs)]
 pub enum QueueRequest {
-    Enqueue { kind: String, content: Vec<Block> },
-    Take { kind: String },
+    Enqueue {
+        kind: String,
+        content: Vec<Block>,
+    },
+    Take {
+        kind: String,
+    },
     Inspect,
-    Configure { steering: String, follow_up: String },
-    Consume { ids: Vec<u64> },
+    Configure {
+        steering: String,
+        follow_up: String,
+    },
+    Consume {
+        ids: Vec<u64>,
+    },
+    /// Withdraw waiting or returned entries on the active branch. `None`
+    /// selects all; an empty list selects none. The reply contains only the
+    /// entries actually withdrawn. Delivered and consumed entries are skipped:
+    /// cancel and await the run to return deliveries before withdrawing them.
+    Withdraw {
+        ids: Option<Vec<u64>>,
+    },
     Restore,
 }
 

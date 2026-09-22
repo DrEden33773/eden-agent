@@ -1,6 +1,12 @@
 //! Shell output retention and per-command deadlines share the process-domain barrier.
-use super::{Fault, OUTPUT_LIMIT, ToolResult, Value, fault, file_error};
-use eden_plugin_sdk::protocol::coding::Artifact;
+use super::{Fault, OUTPUT_LIMIT, ToolResult, Value, fault, file_error, serde_json};
+use eden_plugin_sdk::{
+    CallContext,
+    protocol::{
+        coding::Artifact,
+        shell::{BEFORE_USER_SHELL, ShellHookReply, ShellOutput, ShellRequest},
+    },
+};
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
@@ -11,6 +17,145 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 const PREVIEW_LIMIT: usize = (OUTPUT_LIMIT - 128) / 2;
 static NEXT_OUTPUT: AtomicU64 = AtomicU64::new(0);
+
+pub(super) async fn user(
+    mut request: ShellRequest,
+    cx: CallContext,
+    bash: (String, bool),
+    powershell: (String, bool),
+    artifact_dir: PathBuf,
+) -> Result<ToolResult, Fault> {
+    validate_user_request(&request).await?;
+    let hook: Option<ShellHookReply> = match cx.call(BEFORE_USER_SHELL, &request).await {
+        Ok(reply) => Some(reply),
+        Err(error)
+            if error.code == "MissingDependency"
+                && error.source == "router"
+                && error.message == BEFORE_USER_SHELL =>
+        {
+            None
+        }
+        Err(error) => return Err(error),
+    };
+    match hook {
+        Some(ShellHookReply::Execute { request: changed }) => {
+            if changed.cwd != request.cwd {
+                return Err(fault(
+                    "InvalidInput",
+                    "user shell hook cannot change session cwd",
+                ));
+            }
+            request = changed;
+            validate_user_request(&request).await?;
+        }
+        Some(ShellHookReply::Return { mut result }) => {
+            annotate(&mut result, &request, true);
+            return Ok(result);
+        }
+        None => {}
+    }
+    let (configured, default_shell) = if request.shell == "powershell" {
+        powershell
+    } else {
+        bash
+    };
+    let cwd = Path::new(&request.cwd);
+    let configured =
+        if configured.starts_with('~') || Path::new(&configured).components().count() > 1 {
+            eden_workspace::paths::resolve_path(cwd, Path::new(&configured))?
+        } else {
+            PathBuf::from(configured)
+        };
+    let configured = configured
+        .to_str()
+        .ok_or_else(|| fault("ShellUnavailable", "shell executable path is not Unicode"))?;
+    let kind = if request.shell == "powershell" {
+        eden_process::ShellKind::PowerShell
+    } else {
+        eden_process::ShellKind::Bash
+    };
+    let resolved = eden_process::resolve_shell(configured, kind, cwd, default_shell)?;
+    let executable = resolved
+        .executable
+        .to_str()
+        .ok_or_else(|| {
+            fault(
+                "ShellUnavailable",
+                "resolved shell executable path is not Unicode",
+            )
+        })?
+        .to_owned();
+    let cancellation = cx.scope.cancellation();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let scope = cx.scope.clone();
+    // Retain process and pipe ownership after the service root is cancelled.
+    let capture = scope.clone();
+    scope.spawn(async move {
+        let execution = async {
+            if cancellation.is_cancelled() {
+                return Err(fault("Cancelled", "user shell cancelled before execution"));
+            }
+            let files = OutputFiles::create(&artifact_dir)?;
+            let args = shell_arguments(&request.command, request.shell == "powershell");
+            let (child, tree) =
+                eden_process::spawn(&executable, &args, Path::new(&request.cwd)).await?;
+            collect(child, tree, files, None, cancellation, Some(cx)).await
+        }
+        .await;
+        let mut result = execution.unwrap_or_else(super::failed);
+        annotate(&mut result, &request, false);
+        let cleanup = result
+            .error
+            .as_ref()
+            .filter(|e| e.code == "CleanupFailure")
+            .cloned();
+        capture.retain_result(serde_json::json!(result))?;
+        let _ = sender.send(result);
+        match cleanup {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    })?;
+    receiver
+        .await
+        .map_err(|_| fault("ToolFailure", "user shell completion lost"))
+}
+
+async fn validate_user_request(request: &ShellRequest) -> Result<(), Fault> {
+    if !matches!(request.shell.as_str(), "bash" | "powershell") {
+        return Err(fault("InvalidInput", "shell must be bash or powershell"));
+    }
+    let cwd = Path::new(&request.cwd);
+    if !cwd.is_absolute() || !tokio::fs::metadata(cwd).await.is_ok_and(|m| m.is_dir()) {
+        return Err(fault(
+            "InvalidInput",
+            "cwd must be an existing absolute directory",
+        ));
+    }
+    Ok(())
+}
+
+fn annotate(result: &mut ToolResult, request: &ShellRequest, overridden: bool) {
+    if !result.details.is_object() {
+        result.details = serde_json::json!({ "original_details": result.details });
+    }
+    result.details["execution"] = serde_json::json!(request);
+    result.details["hook_override"] = serde_json::json!(overridden);
+}
+
+fn shell_arguments(command: &str, powershell: bool) -> Vec<&str> {
+    if powershell {
+        vec![
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            command,
+        ]
+    } else {
+        vec!["--noprofile", "--norc", "-c", command]
+    }
+}
 
 pub(super) fn timeout(arguments: &Value) -> Result<Option<Duration>, Fault> {
     arguments
@@ -98,6 +243,7 @@ impl Captured {
 async fn capture(
     mut pipe: impl AsyncRead + Unpin,
     mut output: tokio::fs::File,
+    events: Option<(CallContext, &'static str)>,
 ) -> Result<Captured, Fault> {
     let mut captured = Captured {
         tail: VecDeque::with_capacity(PREVIEW_LIMIT),
@@ -119,6 +265,17 @@ async fn capture(
         // Tokio files may defer the OS write; observe disk errors while the child
         // is still live, rather than waiting for a pipe EOF it may never send.
         output.flush().await.map_err(file_error)?;
+        if let Some((cx, stream)) = &events {
+            // Closing observation admission must not interrupt output retention
+            // while the process owner drains and settles a cancelled command.
+            let _ = cx.emit(
+                "user_shell_output",
+                serde_json::json!(ShellOutput {
+                    stream: (*stream).into(),
+                    bytes: chunk[..count].to_vec(),
+                }),
+            );
+        }
         captured.bytes += count as u64;
         let remove = (captured.tail.len() + count).saturating_sub(PREVIEW_LIMIT);
         captured.tail.drain(..remove);
@@ -136,19 +293,9 @@ pub(super) async fn run(
     cancellation: eden_plugin_sdk::Cancellation,
 ) -> Result<ToolResult, Fault> {
     let files = OutputFiles::create(artifact_dir)?;
-    let args: &[&str] = if powershell {
-        &[
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            command,
-        ]
-    } else {
-        &["--noprofile", "--norc", "-c", command]
-    };
-    let (child, tree) = eden_process::spawn(executable, args, cwd).await?;
-    collect(child, tree, files, timeout, cancellation).await
+    let args = shell_arguments(command, powershell);
+    let (child, tree) = eden_process::spawn(executable, &args, cwd).await?;
+    collect(child, tree, files, timeout, cancellation, None).await
 }
 
 async fn collect(
@@ -157,6 +304,7 @@ async fn collect(
     files: OutputFiles,
     timeout: Option<Duration>,
     cancellation: eden_plugin_sdk::Cancellation,
+    events: Option<CallContext>,
 ) -> Result<ToolResult, Fault> {
     // spawn always pipes both streams. Keep the fallback inside the owner so
     // even an unexpected missing pipe cannot bypass the settlement barrier.
@@ -165,7 +313,14 @@ async fn collect(
     let capture = async {
         let stdout = stdout.ok_or_else(|| fault("ToolFailure", "stdout pipe missing"))?;
         let stderr = stderr.ok_or_else(|| fault("ToolFailure", "stderr pipe missing"))?;
-        tokio::try_join!(capture(stdout, files.stdout), capture(stderr, files.stderr))
+        tokio::try_join!(
+            capture(
+                stdout,
+                files.stdout,
+                events.clone().map(|cx| (cx, "stdout"))
+            ),
+            capture(stderr, files.stderr, events.map(|cx| (cx, "stderr")))
+        )
     };
     tokio::pin!(capture);
     let deadline = async {
@@ -420,7 +575,14 @@ mod tests {
             eden_process::spawn("bash", &["--noprofile", "--norc", "-c", &command], &f.0)
                 .await
                 .unwrap();
-        let task = tokio::spawn(collect(child, tree, files, None, Cancellation::default()));
+        let task = tokio::spawn(collect(
+            child,
+            tree,
+            files,
+            None,
+            Cancellation::default(),
+            None,
+        ));
         let (mut socket, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
             .await
             .unwrap()

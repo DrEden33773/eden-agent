@@ -183,6 +183,7 @@ async fn streams_unicode_and_complete_multiple_calls_and_projects_all_input() {
             },
         ],
         tools: vec![ToolDefinition {
+            execution: Default::default(),
             name: "read".into(),
             description: "read a file".into(),
             parameters: json!({
@@ -596,6 +597,7 @@ async fn deepseek_reasoning_and_tool_result_roundtrip_preserves_images_and_full_
             }],
         }],
         tools: vec![ToolDefinition {
+            execution: Default::default(),
             name: "read".into(),
             description: "read source".into(),
             parameters: json!({ "type": "object", "properties": { "path": { "type": "string" } } }),

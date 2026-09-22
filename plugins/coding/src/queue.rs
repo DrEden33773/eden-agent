@@ -7,7 +7,11 @@ pub(crate) fn statuses(records: &[Record]) -> BTreeMap<u64, (&str, &Record)> {
     for record in records {
         if matches!(
             record.kind.as_str(),
-            "queue_accepted" | "queue_delivered" | "queue_consumed" | "queue_returned"
+            "queue_accepted"
+                | "queue_delivered"
+                | "queue_consumed"
+                | "queue_returned"
+                | "queue_withdrawn"
         ) && let Some(id) = record.payload.get("id").and_then(Value::as_u64)
         {
             states.insert(id, (record.kind.as_str(), record));
@@ -132,6 +136,33 @@ pub(crate) async fn queue(
                     .await?;
                 for entry in &selected {
                     cx.emit("queue_delivered", json!(entry))?;
+                }
+            }
+            Ok(selected)
+        }
+        QueueRequest::Withdraw { ids } => {
+            let selected: Vec<_> = entries
+                .into_iter()
+                .filter(|entry| ids.as_ref().is_none_or(|ids| ids.contains(&entry.id)))
+                .collect();
+            if !selected.is_empty() {
+                let _: StoreReply = cx
+                    .call(
+                        STORE,
+                        &StoreRequest::AppendBatch {
+                            run_id: cx.run_id(),
+                            entries: selected
+                                .iter()
+                                .map(|entry| RecordDraft {
+                                    kind: "queue_withdrawn".into(),
+                                    payload: json!(entry),
+                                })
+                                .collect(),
+                        },
+                    )
+                    .await?;
+                for entry in &selected {
+                    cx.emit("queue_withdrawn", json!(entry))?;
                 }
             }
             Ok(selected)

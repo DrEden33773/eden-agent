@@ -9,6 +9,20 @@ fn failure(message: impl Into<String>) -> Fault {
 pub(crate) fn binding(composition: &eden_protocol::Composition, cwd: &str) -> Result<Value, Fault> {
     let mut packages = BTreeMap::new();
     for package in &composition.packages {
+        if package.descriptor.package == "eden-host-interaction" {
+            continue;
+        }
+        if package.library.starts_with("embedded:") {
+            packages.insert(
+                package.descriptor.package.clone(),
+                json!({
+                    "descriptor": package.descriptor,
+                    "embedded_identity": package.library,
+                    "requires": package.requires,
+                }),
+            );
+            continue;
+        }
         let mut file = std::fs::File::open(&package.library).map_err(|e| failure(e.to_string()))?;
         let mut hash = Sha256::new();
         let mut bytes = [0; 65536];
@@ -29,13 +43,19 @@ pub(crate) fn binding(composition: &eden_protocol::Composition, cwd: &str) -> Re
             }),
         );
     }
+    let roles: BTreeMap<_, _> = composition
+        .roles
+        .iter()
+        .filter(|(role, _)| role.as_str() != eden_protocol::interaction::HOST)
+        .collect();
     let mut binding = json!({
         "cwd": cwd,
-        "roles": composition.roles,
+        "roles": roles,
         "packages": packages,
         "library_locations": composition
             .packages
             .iter()
+            .filter(|p| p.descriptor.package != "eden-host-interaction")
             .map(|p| &p.library)
             .chain(composition.resource_packages.iter().map(|p| &p.root))
             .collect::<Vec<_>>(),
@@ -125,9 +145,16 @@ impl Session {
         );
         // Once the old generation stops, finish initialization/cleanup even if
         // the requester cancels; no abandoned initializer can escape ownership.
-        let kernel =
-            Kernel::load_resolved(selected, Path::new("."), self.id(), self.0.events.clone())
-                .await?;
+        let embedded = embedded::Embedded::new(selected, PathBuf::from("."))
+            .package(self.0.interactions.package(), "eden-host-interaction-v1")?;
+        let kernel = Kernel::load_embedded(
+            embedded.composition,
+            Path::new("."),
+            self.id(),
+            self.0.events.clone(),
+            embedded.packages,
+        )
+        .await?;
         let setup = async {
             if self.0.coding {
                 let request = match &self.0.history_path {

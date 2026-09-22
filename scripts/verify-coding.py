@@ -206,6 +206,20 @@ def main() -> None:
             scratch / "global/settings.json",
             {"discover_skills": False, "discover_templates": False},
         )
+        from entrypoints import check as check_entrypoints
+
+        entry_server = Server(
+            lambda body, index: call(
+                f"entry-{index}", "write", path="marker.txt", content="from caller"
+            )
+            if index % 2 == 0
+            else answer("from caller")
+        )
+        try:
+            entry_composition = configure(destination, composition, entry_server, "entrypoints")
+            results["entrypoints"] = check_entrypoints(host, entry_composition, scratch)
+        finally:
+            entry_server.close()
         author = build_author(destination, scratch)
         caller = scratch / "unrelated caller 工作目录"
         caller.mkdir()

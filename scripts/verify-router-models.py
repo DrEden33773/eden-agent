@@ -355,7 +355,9 @@ def main() -> None:
                 if error_contains is not None:
                     assert error_contains in done.stderr, done.stderr
                 router.no_watchers()
-                return [json.loads(line) for line in done.stdout.splitlines() if line.strip()]
+                if "--json" in args:
+                    return [json.loads(line) for line in done.stdout.splitlines() if line.strip()]
+                return [json.loads(done.stdout)] if done.stdout.strip() else []
 
             listing = invoke(["router", "list"])[-1]
             assert {m["id"] for m in listing["models"] if m["selectable"]} == {"shared", "sleeping"}

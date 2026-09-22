@@ -7,6 +7,8 @@ pub mod cli;
 pub mod environment;
 /// Model and API-key operations through the shared session services.
 pub mod model_commands;
+/// Structured stdout presentation and machine record framing.
+pub mod output;
 /// Shared-session management commands.
 pub mod session_commands;
 /// Single outlet for human-readable messages.
@@ -189,7 +191,6 @@ pub async fn wait_for_run(
     if !json {
         return Ok(session.wait(run).await?);
     }
-    use std::io::Write;
     let mut sequence = 0;
     loop {
         let events = session.events_after(sequence).await;
@@ -197,10 +198,7 @@ pub async fn wait_for_run(
         for event in events {
             sequence = event.sequence;
             settled |= event.kind == "settled" && event.run_id == run;
-            let mut stdout = std::io::stdout().lock();
-            serde_json::to_writer(&mut stdout, &event)?;
-            writeln!(stdout)?;
-            stdout.flush()?;
+            output::record(&event)?;
         }
         if settled {
             return Ok(session.wait(run).await?);

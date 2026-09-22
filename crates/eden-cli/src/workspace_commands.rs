@@ -20,15 +20,14 @@ pub async fn run(cli: &Cli, shell: &Shell) -> Result<i32> {
             TrustAction::Allow { .. } | TrustAction::Deny { .. } => {
                 let trusted = matches!(action, TrustAction::Allow { .. });
                 eden_agent::save_trust(&options.global_dir, &path, trusted)?;
-                println!(
-                    "{}",
-                    json!({ "path": std::fs::canonicalize(path)?, "trusted": trusted })
-                );
+                crate::output::result(
+                    cli,
+                    &json!({ "path": std::fs::canonicalize(path)?, "trusted": trusted }),
+                )?;
             }
-            TrustAction::Inspect { .. } => println!(
-                "{}",
-                serde_json::to_string(&eden_agent::Workspace::discover(&path, &options)?)?
-            ),
+            TrustAction::Inspect { .. } => {
+                crate::output::result(cli, &eden_agent::Workspace::discover(&path, &options)?)?
+            }
         }
         return Ok(0);
     }
@@ -52,19 +51,25 @@ pub async fn run(cli: &Cli, shell: &Shell) -> Result<i32> {
     let result = async {
         match family {
             Family::Resources { .. } => {
-                println!("{}", serde_json::to_string(&session.resources().await?)?);
+                crate::output::result(cli, &session.resources().await?)?;
                 Ok(0)
             }
             Family::Commands => {
-                println!("{}", serde_json::to_string(&session.commands().await?)?);
+                crate::output::result(cli, &session.commands().await?)?;
                 Ok(0)
             }
             Family::Package { action } => {
                 let (name, arguments) = package_action(action)?;
-                invoke(&session, name, arguments).await
+                invoke(cli, &session, name, arguments).await
             }
             Family::Command { name, arguments } => {
-                invoke(&session, name.clone(), serde_json::from_str(arguments)?).await
+                invoke(
+                    cli,
+                    &session,
+                    name.clone(),
+                    serde_json::from_str(arguments)?,
+                )
+                .await
             }
             _ => Err("workspace command required".into()),
         }
@@ -126,7 +131,7 @@ fn package_action(action: &PackageAction) -> Result<(String, Value)> {
 }
 
 /// One contributed command or package action, with cancellation wiring.
-async fn invoke(session: &Session, name: String, arguments: Value) -> Result<i32> {
+async fn invoke(cli: &Cli, session: &Session, name: String, arguments: Value) -> Result<i32> {
     let run = session.command(name, arguments)?;
     let cancelling = session.clone();
     let signal = tokio::spawn(async move {
@@ -137,6 +142,6 @@ async fn invoke(session: &Session, name: String, arguments: Value) -> Result<i32
     let result = session.wait(run).await;
     signal.abort();
     let value = result?.into_result()?;
-    println!("{}", serde_json::to_string(&value)?);
+    crate::output::result(cli, &value)?;
     Ok(0)
 }

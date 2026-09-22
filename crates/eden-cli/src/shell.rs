@@ -86,7 +86,7 @@ impl Shell {
 }
 
 /// Whether a stream that is or is not a terminal is written with color.
-fn colored(choice: ColorChoice, terminal: bool) -> bool {
+pub(crate) fn colored(choice: ColorChoice, terminal: bool) -> bool {
     match choice {
         ColorChoice::Always => true,
         ColorChoice::Never => false,

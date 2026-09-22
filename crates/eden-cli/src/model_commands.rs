@@ -327,7 +327,7 @@ pub async fn run(cli: &Cli) -> Result<i32, Box<dyn Error>> {
                 },
                 _ => return Err("not a model operation".into()),
             };
-        println!("{}", serde_json::to_string(&value)?);
+        crate::output::result(cli, &value)?;
         Ok(0)
     }
     .await;
@@ -358,7 +358,7 @@ async fn router(
                         .filter(|event| event.sequence > sequence)
                     {
                         if event.kind == "model_management" {
-                            println!("{}", serde_json::to_string(&event)?);
+                            crate::output::record(&event)?;
                         }
                     }
                 }
@@ -368,7 +368,7 @@ async fn router(
                 for event in batch {
                     sequence = event.sequence;
                     if event.kind == "model_management" {
-                        println!("{}", serde_json::to_string(&event)?);
+                        crate::output::record(&event)?;
                     }
                 }
             }

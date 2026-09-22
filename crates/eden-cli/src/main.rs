@@ -65,7 +65,7 @@ async fn prompt(parsed: &Parsed, shell: &Shell) -> Result<i32, Box<dyn std::erro
     let cli = &parsed.cli;
     if let Some(path) = &cli.history {
         for record in eden_kernel::history::read(path)? {
-            println!("{}", serde_json::to_string(&record)?);
+            eden_cli::output::record(&record)?;
         }
         return Ok(0);
     }

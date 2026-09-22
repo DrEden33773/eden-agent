@@ -24,7 +24,7 @@ pub async fn run(cli: &Cli, shell: &Shell) -> Result<i32> {
         _ => return Err("session command required".into()),
     };
     match action {
-        SessionAction::Info { path } => return info(path, shell),
+        SessionAction::Info { path } => return info(cli, path, shell),
         SessionAction::Tree { path } => return tree(path, shell),
         _ => {}
     }
@@ -53,7 +53,7 @@ fn copy_action(action: &SessionAction) -> Option<(CopyKind, &CopyArgs, Option<u6
 fn inspect(path: &Path, shell: &Shell) -> Result<i32> {
     let scan = eden_kernel::history::inspect(path)?;
     for record in &scan.records {
-        writeln!(std::io::stdout(), "{}", serde_json::to_string(record)?)?;
+        crate::output::record(record)?;
     }
     if let Some(diagnostic) = scan.diagnostic {
         shell.error(diagnostic);
@@ -84,7 +84,7 @@ fn export(path: &Path, destination: &Path) -> Result<i32> {
     Ok(0)
 }
 
-fn info(path: &Path, shell: &Shell) -> Result<i32> {
+fn info(cli: &Cli, path: &Path, shell: &Shell) -> Result<i32> {
     let scan = eden_kernel::history::inspect(path)?;
     let state = eden_protocol::history::branch_state(&scan.records)?;
     let metadata = scan
@@ -93,10 +93,9 @@ fn info(path: &Path, shell: &Shell) -> Result<i32> {
         .rev()
         .find(|r| r.kind == "session_metadata")
         .map(|r| &r.payload);
-    writeln!(
-        std::io::stdout(),
-        "{}",
-        json!({
+    crate::output::result(
+        cli,
+        &json!({
             "session_id": scan.records.first().map(|r| r.session_id),
             "records": scan.records.len(),
             "head": state.0,
@@ -104,7 +103,7 @@ fn info(path: &Path, shell: &Shell) -> Result<i32> {
             "binding": scan.records.first().map(|r| &r.payload),
             "metadata": metadata,
             "diagnostic": scan.diagnostic,
-        })
+        }),
     )?;
     if let Some(diagnostic) = scan.diagnostic {
         shell.error(diagnostic);
@@ -116,16 +115,12 @@ fn info(path: &Path, shell: &Shell) -> Result<i32> {
 fn tree(path: &Path, shell: &Shell) -> Result<i32> {
     let scan = eden_kernel::history::inspect(path)?;
     for record in &scan.records {
-        writeln!(
-            std::io::stdout(),
-            "{}",
-            json!({
-                "id": record.sequence,
-                "parent": record.parent_id,
-                "branch": record.branch,
-                "kind": record.kind,
-            })
-        )?;
+        crate::output::record(&json!({
+            "id": record.sequence,
+            "parent": record.parent_id,
+            "branch": record.branch,
+            "kind": record.kind,
+        }))?;
     }
     if let Some(diagnostic) = scan.diagnostic {
         shell.error(diagnostic);
@@ -153,13 +148,9 @@ async fn copy_session(
         },
     )
     .await?;
-    writeln!(std::io::stdout(), "{}", serde_json::to_string(&plan)?)?;
+    crate::output::result(cli, &plan)?;
     if copy.apply {
-        writeln!(
-            std::io::stdout(),
-            "{}",
-            json!({ "created": Session::apply_copy(plan).await? })
-        )?;
+        crate::output::result(cli, &json!({ "created": Session::apply_copy(plan).await? }))?;
     }
     Ok(0)
 }
@@ -176,37 +167,23 @@ async fn control(cli: &Cli, shell: &Shell, action: &SessionAction) -> Result<i32
     };
     let result = async {
         if matches!(action, SessionAction::Switch { .. }) {
-            writeln!(
-                std::io::stdout(),
-                "{{\"available\":true,\"binding_updated\":true}}"
-            )?;
+            crate::output::result(cli, &json!({ "available": true, "binding_updated": true }))?;
             return Ok(0);
         }
         if matches!(action, SessionAction::Resources { .. }) {
-            writeln!(
-                std::io::stdout(),
-                "{}",
-                serde_json::to_string(&session.resources().await?)?
-            )?;
+            crate::output::result(cli, &session.resources().await?)?;
             return Ok(0);
         }
         if matches!(action, SessionAction::Queue { .. }) {
-            writeln!(
-                std::io::stdout(),
-                "{}",
-                serde_json::to_string(&session.queued().await?)?
-            )?;
+            crate::output::result(cli, &session.queued().await?)?;
             return Ok(0);
         }
         if let SessionAction::Enqueue { text, kind, .. } = action {
-            writeln!(
-                std::io::stdout(),
-                "{}",
-                serde_json::to_string(
-                    &session
-                        .enqueue(kind, vec![Block::Text { text: text.clone() }])
-                        .await?
-                )?
+            crate::output::result(
+                cli,
+                &session
+                    .enqueue(kind, vec![Block::Text { text: text.clone() }])
+                    .await?,
             )?;
             return Ok(0);
         }
@@ -242,7 +219,7 @@ async fn control(cli: &Cli, shell: &Shell, action: &SessionAction) -> Result<i32
         signal.abort();
         let terminal = terminal?;
         if !json_output {
-            writeln!(std::io::stdout(), "{}", serde_json::to_string(&terminal)?)?;
+            crate::output::result(cli, &terminal)?;
         }
         if !terminal.cleanup_errors.is_empty() {
             return Err("operation cleanup failed; see terminal".into());

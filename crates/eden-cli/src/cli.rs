@@ -99,7 +99,7 @@ pub struct Cli {
     /// Print the records of a history file instead of running a prompt
     #[arg(long, value_name = "PATH")]
     pub history: Option<PathBuf>,
-    /// Stream run/router events as JSON lines; other commands keep their JSON results
+    /// Emit uncolored compact JSON; runs/router stream JSON lines
     #[arg(long, global = true)]
     pub json: bool,
     /// Accepted for compatibility; the settled result already goes to stdout
@@ -157,7 +157,7 @@ pub enum Family {
     },
     /// Discover, select and refresh models
     #[command(
-        after_help = r"Use 'eden models list' for provider and model identifiers. 'eden models select PROVIDER MODEL --session PATH' selects a session model (and may create PATH); 'eden models default PROVIDER MODEL' saves the global default. current/cycle and other commands with --session require an existing file. Model commands print JSON results with or without --json."
+        after_help = r"Use 'eden models list' for provider and model identifiers. 'eden models select PROVIDER MODEL --session PATH' selects a session model (and may create PATH); 'eden models default PROVIDER MODEL' saves the global default. current/cycle and other commands with --session require an existing file. Model commands print indented JSON with automatic terminal color; --json prints uncolored compact JSON."
     )]
     Models {
         #[command(subcommand)]

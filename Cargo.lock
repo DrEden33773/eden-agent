@@ -1146,6 +1146,7 @@ dependencies = [
  "eden-agent",
  "eden-kernel",
  "eden-protocol",
+ "serde",
  "serde_json",
  "tokio",
 ]

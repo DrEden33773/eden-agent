@@ -81,7 +81,15 @@ def records(path: pathlib.Path) -> list[dict[str, Any]]:
 
 
 def lines(result: subprocess.CompletedProcess[str]) -> list[dict[str, Any]]:
-    return [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+    # Ordinary results may span lines; copy --apply emits two JSON documents.
+    decoder = json.JSONDecoder()
+    remaining = result.stdout.lstrip()
+    values = []
+    while remaining:
+        value, end = decoder.raw_decode(remaining)
+        values.append(value)
+        remaining = remaining[end:].lstrip()
+    return values
 
 
 def digest(path: pathlib.Path) -> str:

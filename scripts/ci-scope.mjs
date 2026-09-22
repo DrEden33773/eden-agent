@@ -26,6 +26,8 @@ export function scopeFor(event, paths) {
         "scripts/checks.mjs",
         "scripts/hooks.mjs",
         "scripts/install-hooks.mjs",
+        "scripts/format-editor.mjs",
+        "scripts/install-formatter.mjs",
         "package.json",
         ".gitignore",
       ].includes(path)

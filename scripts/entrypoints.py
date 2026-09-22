@@ -10,7 +10,7 @@ import threading
 from typing import Any
 
 from install import library, package, target
-from verification import ROOT, author_artifact, installed, run
+from verification import ROOT, author_artifact, example, installed, run
 
 
 def check(host: pathlib.Path, composition: pathlib.Path, scratch: pathlib.Path) -> dict[str, bool]:
@@ -29,7 +29,7 @@ def check(host: pathlib.Path, composition: pathlib.Path, scratch: pathlib.Path) 
     )
     controlled_path.write_text(json.dumps(controlled), encoding="utf-8")
     run(
-        ["cargo", "test", "--locked", "-p", "eden-cli", "--test", "rpc", "--", "--ignored"],
+        [example("rpc-tests"), "--ignored"],
         ROOT,
         env={**os.environ, "EDEN_RPC_TEST_COMPOSITION": str(controlled_path)},
         timeout=120,

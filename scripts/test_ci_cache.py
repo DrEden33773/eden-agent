@@ -323,6 +323,29 @@ class SelectionIdentityTests(CacheKeyCase):
         self.assertEqual(self.keys()["test_selection"]["packages"], [])
 
 
+class CacheWarmTests(unittest.TestCase):
+    def test_warming_compiles_each_platform_selection_without_running_tests(self):
+        warm = importlib.import_module("ci-warm")
+        for runner, (_, packages) in cache.TEST_SELECTIONS.items():
+            with (
+                patch.dict(warm.os.environ, {"CI_CACHE_OS": runner}),
+                patch.object(warm, "run") as run,
+                patch.object(warm, "prepare") as prepare,
+            ):
+                warm.main()
+            commands = [call.args[0] for call in run.call_args_list]
+            tests = [command for command in commands if command[:2] == ["cargo", "test"]]
+            self.assertEqual(len(tests), 1)
+            self.assertIn("--no-run", tests[0])
+            self.assertEqual("--workspace" in tests[0], not packages)
+            self.assertEqual(
+                {tests[0][i + 1] for i, arg in enumerate(tests[0]) if arg == "-p"},
+                set(packages),
+            )
+            self.assertIn(["node", "scripts/checks.mjs", "test", "--no-run"], commands)
+            prepare.assert_called_once_with()
+
+
 class WorkflowIdentityTests(unittest.TestCase):
     """The native commands and cache identity must agree."""
 

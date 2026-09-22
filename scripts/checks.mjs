@@ -210,10 +210,30 @@ for dependency in config["dependency-groups"]["dev"]:
       .flatMap((other) => ["--skip", other]);
   const failures = [];
   for (const manifest of selected) {
+    if (kind === "test") {
+      const metadata = spawnSync(
+        cargo.program,
+        ["metadata", "--no-deps", "--format-version=1", "--locked", "--manifest-path", manifest],
+        { cwd: root, env: rustEnv, encoding: "utf8" },
+      );
+      if (metadata.error || metadata.status !== 0)
+        throw new Error(
+          `Cannot select author tests: ${metadata.error?.message ?? metadata.stderr}`,
+        );
+      const data = JSON.parse(metadata.stdout);
+      if (
+        !data.packages
+          .filter((pkg) => data.workspace_members.includes(pkg.id))
+          .some((pkg) => pkg.targets.some((target) => target.test || target.doctest))
+      ) {
+        console.log(`test: ${manifest} has no enabled test targets`);
+        continue;
+      }
+    }
     console.log(`${kind}: ${manifest}`);
     const args =
       kind === "test"
-        ? ["test", "--manifest-path", manifest, "--locked", "--no-fail-fast"]
+        ? ["test", "--manifest-path", manifest, "--locked", "--no-fail-fast", ...extra]
         : [
             "clippy",
             "--manifest-path",

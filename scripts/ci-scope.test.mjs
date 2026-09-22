@@ -5,24 +5,31 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { changedPaths, FAMILIES, piPass, qualityPass, scopeFor, staticPass } from "./ci-scope.mjs";
+import {
+  changedPaths,
+  FAMILIES,
+  hooksPass,
+  qualityPass,
+  scopeFor,
+  staticPass,
+} from "./ci-scope.mjs";
 
-test("associated families union inputs and keep native suites together", () => {
+test("associated inputs select hooks only for tooling and configuration", () => {
   const selected = (paths, event = "pull_request") =>
     FAMILIES.filter((key) => scopeFor(event, paths)[key]);
   for (const event of ["pull_request", "push"]) {
     assert.deepEqual(selected(["README.md", "docs/a/b.md", "AGENTS.md"], event), ["markdown"]);
     assert.deepEqual(selected(["scripts/install.py"], event), ["python", "native"]);
-    assert.deepEqual(selected(["scripts/prepare-pi-reference.mjs"], event), [
+    assert.deepEqual(selected(["scripts/verify-pi-reference.mjs"], event), [
       "javascript",
       "native",
-      "pi_reference",
     ]);
     assert.deepEqual(selected(["crates/a/src/lib.rs", "README.md"], event), [
       "markdown",
       "rust",
       "native",
     ]);
+    assert.deepEqual(selected(["crates/eden-fmt/src/lib.rs"], event), ["rust", "native", "hooks"]);
   }
   for (const path of [
     "Cargo.lock",
@@ -32,9 +39,9 @@ test("associated families union inputs and keep native suites together", () => {
     "rustfmt.toml",
     "clippy.toml",
   ])
-    assert.deepEqual(selected([path]), ["rust", "native"]);
-  assert.deepEqual(selected([".markdownlint-cli2.jsonc"]), ["markdown", "native"]);
-  assert.deepEqual(selected(["biome.json"]), ["javascript", "native"]);
+    assert.deepEqual(selected([path]), ["rust", "native", "hooks"]);
+  assert.deepEqual(selected([".markdownlint-cli2.jsonc"]), ["markdown", "native", "hooks"]);
+  assert.deepEqual(selected(["biome.json"]), ["javascript", "native", "hooks"]);
   for (const path of [
     "scripts/ci-scope.mjs",
     "scripts/ci-proof.test.mjs",
@@ -46,108 +53,75 @@ test("associated families union inputs and keep native suites together", () => {
     ".github/workflows/quality.yml",
     "package.json",
     ".gitignore",
-    "THIRD_PARTY_NOTICES.md",
     "LICENSE",
     "new-fixture.json",
+    "rustfmt-toolchain",
   ])
     assert.deepEqual(selected([path]), FAMILIES, path);
-  assert.deepEqual(selected(["pnpm-lock.yaml"]), [
-    "markdown",
-    "javascript",
-    "native",
-    "pi_reference",
-  ]);
+  assert.deepEqual(selected(["pnpm-lock.yaml"]), ["markdown", "javascript", "native", "hooks"]);
   for (const path of ["pyproject.toml", "uv.lock"])
-    assert.deepEqual(selected([path]), ["python", "native"]);
+    assert.deepEqual(selected([path]), ["python", "native", "hooks"]);
+  assert.deepEqual(selected(["crates/a/src/lib.rs", "uv.lock"]), [
+    "python",
+    "rust",
+    "native",
+    "hooks",
+  ]);
   assert.deepEqual(selected([]), FAMILIES);
   assert.deepEqual(selected(["README.md"], "workflow_dispatch"), FAMILIES);
 });
 
-test("Pi refresh follows reference inputs while Eden keeps its native acceptance", () => {
-  for (const event of ["pull_request", "push"]) {
-    for (const path of [
-      "crates/eden-coding/src/lib.rs",
-      "scripts/verify-coding.py",
-      "scripts/verify-archive.py",
-      "scripts/http_fixture.py",
-      "Cargo.lock",
-    ]) {
-      const selected = scopeFor(event, [path]);
-      assert.equal(selected.native, true, path);
-      assert.equal(selected.pi_reference, false, path);
-    }
-    for (const path of [
-      "scripts/prepare-pi-reference.mjs",
-      "scripts/verify-pi-reference.mjs",
-      "pnpm-lock.yaml",
-      "package.json",
-      ".github/workflows/native-verify.yml",
-      "scripts/ci-scope.mjs",
-      "new-reference-data.json",
-    ]) {
-      const selected = scopeFor(event, ["crates/eden-coding/src/lib.rs", path]);
-      assert.equal(selected.pi_reference, true, path);
-      assert.equal(selected.native, true, path);
-    }
-  }
-});
-
-test("Pi gate distinguishes unselected steps from failed or missing verification", () => {
-  const ids = ["pi-checkout", "pi-deps", "pi-prepare", "pi-corpus"];
+test("Hook gate distinguishes unselected steps from failed or missing verification", () => {
+  const ids = ["hooks"];
   for (const chosen of [true, false]) {
     const selected = scopeFor("pull_request", [
-      chosen ? "scripts/verify-pi-reference.mjs" : "crates/eden-coding/src/lib.rs",
+      chosen ? "scripts/checks.mjs" : "crates/eden-coding/src/lib.rs",
     ]);
     const expected = chosen ? "success" : "skipped";
     const steps = Object.fromEntries(ids.map((id) => [id, { outcome: expected }]));
-    assert.equal(piPass(selected, steps), true);
+    assert.equal(hooksPass(selected, steps), true);
     for (const id of ids) {
       for (const outcome of ["success", "skipped", "failure", "cancelled", undefined]) {
         if (outcome !== expected)
-          assert.equal(piPass(selected, { ...steps, [id]: { outcome } }), false);
+          assert.equal(hooksPass(selected, { ...steps, [id]: { outcome } }), false);
       }
       const missing = { ...steps };
       delete missing[id];
-      assert.equal(piPass(selected, missing), false);
+      assert.equal(hooksPass(selected, missing), false);
     }
     for (const invalid of [undefined, "true", null])
-      assert.equal(piPass({ ...selected, pi_reference: invalid }, steps), false);
-    assert.equal(piPass({ ...selected, native: false }, steps), false);
+      assert.equal(hooksPass({ ...selected, hooks: invalid }, steps), false);
+    assert.equal(hooksPass({ ...selected, native: false }, steps), false);
   }
-  assert.equal(piPass(null, {}), false);
+  assert.equal(hooksPass(null, {}), false);
 });
 
-test("Pi gate CLI persists selection and propagates rejected step outcomes", () => {
-  const root = mkdtempSync(join(tmpdir(), "eden-pi-gate-"));
+test("Hook gate CLI persists selection and propagates rejected step outcomes", () => {
+  const root = mkdtempSync(join(tmpdir(), "eden-hooks-gate-"));
   try {
     const script = new URL("./ci-scope.mjs", import.meta.url);
     const selected = scopeFor("pull_request", ["crates/eden-coding/src/lib.rs"]);
-    const steps = Object.fromEntries(
-      ["pi-checkout", "pi-deps", "pi-prepare", "pi-corpus"].map((id) => [
-        id,
-        { outcome: "skipped" },
-      ]),
-    );
+    const steps = Object.fromEntries(["hooks"].map((id) => [id, { outcome: "skipped" }]));
     for (const chosen of [false, true]) {
-      const result = spawnSync(process.execPath, [fileURLToPath(script), "pi-gate"], {
+      const result = spawnSync(process.execPath, [fileURLToPath(script), "hooks-gate"], {
         cwd: root,
         env: {
           ...process.env,
-          CI_SELECTED: JSON.stringify({ ...selected, pi_reference: chosen }),
+          CI_SELECTED: JSON.stringify({ ...selected, hooks: chosen }),
           CI_STEPS: JSON.stringify(steps),
         },
       });
       assert.equal(result.status, chosen ? 1 : 0, result.stderr?.toString());
-      const receipt = JSON.parse(readFileSync(join(root, "artifacts/ci/pi-selection.json")));
+      const receipt = JSON.parse(readFileSync(join(root, "artifacts/ci/hooks-selection.json")));
       assert.equal(receipt.status, chosen ? "failed" : "not_selected");
-      assert.equal(receipt.selected.pi_reference, chosen);
+      assert.equal(receipt.selected, chosen);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("native workflow forwards selection and gates all Pi preparation and execution", () => {
+test("native workflow gates hooks, retires Pi and separates main cache maintenance", () => {
   const quality = readFileSync(
     new URL("../.github/workflows/quality.yml", import.meta.url),
     "utf8",
@@ -156,21 +130,24 @@ test("native workflow forwards selection and gates all Pi preparation and execut
     new URL("../.github/workflows/native-verify.yml", import.meta.url),
     "utf8",
   );
-  for (const job of ["native-pr", "native-main"]) {
-    const body = quality.split(`  ${job}:\n`)[1].split(/\n {2}[\w-]+:/)[0];
-    assert.match(body, /selected: \$\{\{ needs\.scope\.outputs\.selected \}\}/);
-  }
+  assert.doesNotMatch(native, /pi-reference|pi-gate|pi-corpus/);
   const steps = native.split(/\n {6}- /).slice(1);
-  for (const id of ["pi-checkout", "pi-deps", "pi-prepare", "pi-corpus"]) {
-    const matches = steps.filter((step) => step.includes(`id: ${id}\n`));
-    assert.equal(matches.length, 1, id);
-    assert.match(matches[0], /if: \$\{\{ fromJSON\(inputs\.selected\)\.pi_reference == true \}\}/);
+  const hook = steps.find((step) => step.includes("id: hooks\n"));
+  assert.match(hook, /fromJSON\(inputs.selected\).hooks == true/);
+  assert.match(hook, /!inputs.cache-only/);
+  assert.match(native, /always\(\) && !inputs.cache-only/);
+  assert.match(native, /scripts\/ci-scope.mjs hooks-gate/);
+  for (const step of steps.filter((step) => step.includes("actions/cache/save@"))) {
+    assert.match(step, /inputs.save-cache/);
+    assert.match(step, /github.ref == 'refs\/heads\/main'/);
+    assert.match(step, /github.event_name != 'pull_request'/);
   }
-  const gate = steps.find((step) => step.includes("node scripts/ci-scope.mjs pi-gate"));
-  assert(gate);
-  assert.match(gate, /if: always\(\)/);
-  assert.match(gate, /CI_SELECTED: \$\{\{ inputs\.selected \}\}/);
-  assert.match(gate, /CI_STEPS: \$\{\{ toJson\(steps\) \}\}/);
+  assert.doesNotMatch(quality, /actions\/cache\/save@/);
+  const warm = quality.split("  cache-main:\n")[1].split("  quality:")[0];
+  assert.match(warm, /needs.prove.outputs.verified == 'true'/);
+  assert.match(warm, /cache-only: true/);
+  assert.match(warm, /cache-mode: write/);
+  assert.doesNotMatch(quality.split("  quality:")[1], /cache-main/);
 });
 
 for (const source of ["build.rs", "scripts/verify-pi-reference.mjs"]) {
@@ -197,7 +174,7 @@ for (const source of ["build.rs", "scripts/verify-pi-reference.mjs"]) {
       const paths = changedPaths(base, git("rev-parse", "HEAD"), root);
       assert.deepEqual(paths, [source, "docs/sample.md"].sort());
       assert.equal(scopeFor("pull_request", paths).native, true);
-      assert.equal(scopeFor("pull_request", paths).pi_reference, source.endsWith(".mjs"));
+      assert.equal(scopeFor("pull_request", paths).hooks, false);
       assert.throws(() => changedPaths("--invalid", base, root), /exact commit IDs/);
       assert.throws(() => changedPaths("f".repeat(40), base, root), /Unable to inspect/);
       const head = git("rev-parse", "HEAD");
@@ -235,12 +212,9 @@ test("Quality requires successful scope and every selected result", () => {
     );
   }
   assert.equal(qualityPass({ ...valid, selected: { native: false } }), false);
-  assert.equal(
-    qualityPass({ ...valid, selected: { ...valid.selected, pi_reference: true } }),
-    false,
-  );
-  for (const pi_reference of [undefined, null, "false"])
-    assert.equal(qualityPass({ ...valid, selected: { ...valid.selected, pi_reference } }), false);
+  assert.equal(qualityPass({ ...valid, selected: { ...valid.selected, hooks: true } }), false);
+  for (const hooks of [undefined, null, "false"])
+    assert.equal(qualityPass({ ...valid, selected: { ...valid.selected, hooks } }), false);
   assert.equal(qualityPass({ ...valid, native: "success" }), false);
 });
 
@@ -263,8 +237,8 @@ test("main proof reuses selected coverage independently of cache availability", 
   assert.equal(qualityPass({ ...proven, verified: "false" }), false);
   assert.equal(qualityPass({ ...proven, lint: "success" }), false);
   assert.equal(qualityPass({ ...proven, scope: "failure" }), false);
-  for (const pi_reference of [true, false]) {
-    const coverage = { ...selected, native: true, pi_reference };
+  for (const hooks of [true, false]) {
+    const coverage = { ...selected, native: true, hooks };
     assert.equal(qualityPass({ ...proven, selected: coverage }), true);
     assert.equal(qualityPass({ ...proven, selected: coverage, verified: "false" }), false);
   }

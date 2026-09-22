@@ -422,7 +422,14 @@ mod tests {
             })
             .collect();
         let original = Fault::new("Unavailable", "third-plugin", "initialization rejected");
-        let error = crate::rollback_initialization(original.clone(), &instances).await;
+        let error = crate::rollback_initialization(
+            original.clone(),
+            &instances
+                .iter()
+                .map(|i| Arc::new(crate::Instance::Native(i.clone())))
+                .collect::<Vec<_>>(),
+        )
+        .await;
         assert_eq!(error.code, original.code);
         assert_eq!(error.source, original.source);
         assert!(error.message.starts_with(&original.message));

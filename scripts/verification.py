@@ -27,6 +27,8 @@ AUTHORS = (
     "service-a",
     "service-b",
     "model-services",
+    "embedded-client",
+    "entrypoint-extension",
 )
 INVALID = ("wrong-abi", "wrong-sdk", "short-table", "metadata-panic", "init-panic")
 EXAMPLES = (
@@ -207,7 +209,7 @@ def sync_files(files: dict[pathlib.Path, bytes], destination: pathlib.Path) -> N
 
 def export_authors(destination: pathlib.Path) -> None:
     files: dict[pathlib.Path, bytes] = {}
-    for name in ("eden-protocol", "eden-plugin-sdk"):
+    for name in ("eden-protocol", "eden-plugin-sdk", "eden-kernel", "eden-workspace", "eden-agent"):
         base = ROOT / "crates" / name
         for path in base.rglob("*"):
             if path.is_file() and "target" not in path.relative_to(base).parts:
@@ -220,9 +222,7 @@ def export_authors(destination: pathlib.Path) -> None:
         "\n".join(
             line
             for line in manifest.splitlines()
-            if not line.startswith(
-                ("exclude =", "eden-kernel =", "eden-agent =", "eden-process =", "eden-workspace =")
-            )
+            if not line.startswith(("exclude =", "eden-process ="))
         )
         + "\n"
     )
@@ -234,9 +234,7 @@ def export_authors(destination: pathlib.Path) -> None:
             if path.is_file() and "target" not in path.relative_to(base).parts:
                 data = path.read_bytes()
                 if path.name == "Cargo.toml":
-                    data = data.replace(
-                        b"../../../crates/eden-plugin-sdk", b"../../sdk/crates/eden-plugin-sdk"
-                    )
+                    data = data.replace(b"../../../crates/", b"../../sdk/crates/")
                 files[pathlib.Path("authors") / name / path.relative_to(base)] = data
     sync_files(files, destination)
 
@@ -339,7 +337,11 @@ def prepare(output: pathlib.Path | None = None) -> dict[str, Any]:
         if feature:
             args.extend(["--features", feature])
         run(args, exported / "authors" / name, timeout=None)
-        lib = library("author_" + name.replace("-", "_"))
+        lib = (
+            ("author-embedded-client" + suffix)
+            if name == "embedded-client"
+            else library("author_" + name.replace("-", "_"))
+        )
         folder = compiled / (feature or name)
         folder.mkdir(parents=True)
         shutil.copy2(author_target / "debug" / lib, folder / lib)
@@ -420,7 +422,11 @@ def author_artifact(name: str, feature: str | None = None) -> pathlib.Path:
         pathlib.Path(receipt["seeds"])
         / "authors"
         / (feature or name)
-        / library("author_" + name.replace("-", "_"))
+        / (
+            ("author-embedded-client" + (".exe" if os.name == "nt" else ""))
+            if name == "embedded-client"
+            else library("author_" + name.replace("-", "_"))
+        )
     )
 
 

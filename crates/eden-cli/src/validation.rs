@@ -28,6 +28,9 @@ pub(crate) fn validate(cli: &Cli, matches: &ArgMatches) -> Result<(), String> {
         _ => format!("--{}", id.replace('_', "-")),
     };
     if let Some(family) = &cli.family {
+        if matches!(family, Family::Rpc) && cli.print {
+            return Err("--print cannot be combined with rpc".into());
+        }
         for id in prompt_options {
             if explicit(id) {
                 return Err(format!(
@@ -39,7 +42,7 @@ pub(crate) fn validate(cli: &Cli, matches: &ArgMatches) -> Result<(), String> {
         if cli.session.is_some()
             && !matches!(
                 family,
-                Family::Models { .. } | Family::Auth { .. } | Family::Router { .. }
+                Family::Models { .. } | Family::Auth { .. } | Family::Router { .. } | Family::Rpc
             )
         {
             return Err(
@@ -61,7 +64,7 @@ pub(crate) fn validate(cli: &Cli, matches: &ArgMatches) -> Result<(), String> {
             );
         }
     } else if cli.history.is_some() {
-        if cli.session.is_some() || cli.prompt.is_some() {
+        if cli.session.is_some() || !cli.prompt.is_empty() {
             return Err("--history cannot be combined with --session/--resume or a prompt".into());
         }
         for id in prompt_options.into_iter().filter(|id| *id != "history") {

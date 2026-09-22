@@ -175,6 +175,7 @@ fn tools() -> Vec<ToolDefinition> {
     .into_iter()
     .filter(|(name, _, _)| matches!(*name, "read" | "write" | "edit" | "bash"))
     .map(|(name, description, parameters)| ToolDefinition {
+        execution: Default::default(),
         name: name.into(),
         description: description.into(),
         parameters,
@@ -216,6 +217,9 @@ async fn provider_retry(
                 if error.code != "RetryableProviderFailure" || attempt == settings.max_retries {
                     return Err(error);
                 }
+                let Some(mut wait) = settings.begin_retry() else {
+                    return Err(error);
+                };
                 let delay_ms = settings
                     .base_delay_ms
                     .saturating_mul(2_u64.saturating_pow(attempt))
@@ -226,6 +230,14 @@ async fn provider_retry(
                 )?;
                 let cancellation = cx.scope.cancellation();
                 tokio::select! {
+                    biased;
+                    _ = wait.stopped() => {
+                        cx.emit(
+                            "model_retry_stopped",
+                            json!({ "attempt": attempt + 1 }),
+                        )?;
+                        return Err(error);
+                    },
                     _ = cancellation.cancelled() => {
                         return Err(Fault::new("Cancelled", "coding-loop", "retry cancelled"));
                     },
@@ -414,7 +426,7 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
         let reply = match provider_retry(&cx, &projected, &settings).await {
             Ok(reply) => reply,
             Err(error)
-                if settings.compaction_enabled
+                if settings.auto_compaction()
                     && matches!(error.code.as_str(), "ContextOverflow" | "RecoverableLength") =>
             {
                 let history: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
@@ -533,7 +545,7 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
                 json!({ "id": id, "request_id": request_id }),
             )?;
         }
-        let usage_overflow = settings.compaction_enabled
+        let usage_overflow = settings.auto_compaction()
             && limits.context_window > 0
             && context::usage_tokens(&reply.usage).is_some_and(|n| {
                 n > limits
@@ -541,101 +553,9 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
                     .saturating_sub(settings.reserve_tokens)
             });
         cx.emit("model_usage", reply.usage)?;
-        let mut called = false;
-        let mut answer = String::new();
-        for item in reply.items {
-            match item {
-                Item::ToolCall {
-                    call_id,
-                    name,
-                    arguments,
-                } => {
-                    called = true;
-                    let result = match serde_json_decode(&arguments) {
-                        Ok(arguments) => {
-                            async {
-                                let original = ToolRequest {
-                                    cwd: input.cwd.clone(),
-                                    call_id: call_id.clone(),
-                                    name,
-                                    arguments,
-                                };
-                                let execution =
-                                    optional_call::<_, ToolRequest>(&cx, r::BEFORE_TOOL, &original)
-                                        .await?
-                                        .unwrap_or_else(|| original.clone());
-                                if execution.call_id != original.call_id
-                                    || execution.cwd != original.cwd
-                                {
-                                    // A single literal makes rustfmt skip this enclosing tool closure.
-                                    return Err(Fault::new(
-                                        "InvalidInput",
-                                        "before-tool",
-                                        "hooks may change tool name and arguments, but not call \
-                                         identity or cwd",
-                                    ));
-                                }
-                                append(
-                                    &cx,
-                                    "tool_execution_intent",
-                                    json!({ "original": original, "execution": execution }),
-                                )
-                                .await?;
-                                cx.call::<_, ToolResult>(TOOL, &execution).await
-                            }
-                            .await
-                        }
-                        Err(error) => Err(error),
-                    };
-                    let result = match result {
-                        Ok(value) => value,
-                        Err(error)
-                            if error.code == "Cancelled" || error.code == "CleanupFailure" =>
-                        {
-                            return Err(error);
-                        }
-                        Err(error) => ToolResult {
-                            content: vec![],
-                            details: serde_json::Value::Null,
-                            artifacts: vec![],
-                            text: error.to_string(),
-                            exit_code: None,
-                            truncated: false,
-                            error: Some(error),
-                        },
-                    };
-                    append(
-                        &cx,
-                        "tool_result",
-                        json!(Item::ToolResult {
-                            call_id: call_id.clone(),
-                            result
-                        }),
-                    )
-                    .await
-                    .map_err(|error| {
-                        Fault::new(
-                            "PersistenceFailure",
-                            "coding-loop",
-                            format!(
-                                "Tool call {call_id}: external side effects may already have \
-                                 occurred; result commit failed: {error}",
-                                error = error
-                            ),
-                        )
-                    })?;
-                }
-                Item::Message { content, .. } => {
-                    for block in content {
-                        if let Block::Text { text } = block {
-                            answer.push_str(&text);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        if usage_overflow {
+        let (called, answer) =
+            tool_execution::run(&cx, &input.cwd, reply.items, &projected.tools).await?;
+        if usage_overflow && settings.auto_compaction() {
             let history: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
             let _: ModelInput = cx
                 .call(
@@ -665,14 +585,24 @@ fn descriptor() -> Descriptor {
     Descriptor {
         package: "coding".into(),
         version: "0.1.0".into(),
-        provides: vec![LOOP.into(), CONTEXT.into(), QUEUE.into()],
+        provides: vec![
+            CODING_CONTROL.into(),
+            LOOP.into(),
+            CONTEXT.into(),
+            QUEUE.into(),
+        ],
     }
 }
 fn create(config: Value) -> Result<Package, Fault> {
     let settings = Settings::parse(config)?;
     let loop_settings = settings.clone();
+    let control_settings = settings.clone();
     let queue_lock = Arc::new(tokio::sync::Mutex::new(()));
     Ok(Package::new("coding")
+        .service(CODING_CONTROL, move |request, _cx| {
+            let state = control_settings.control(request);
+            async move { Ok(state) }
+        })
         .service(LOOP, move |input, cx| run(input, cx, loop_settings.clone()))
         .service(CONTEXT, move |input, cx| {
             context(input, cx, settings.clone())
@@ -818,3 +748,8 @@ mod s2_tests {
         assert!(text.contains("recent task"));
     }
 }
+
+#[cfg(test)]
+mod control_tests;
+
+mod tool_execution;

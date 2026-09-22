@@ -9,6 +9,30 @@ pub(crate) fn prepare(
     events: &Arc<Events>,
     history: Option<&Path>,
 ) -> Result<eden_protocol::Composition, Fault> {
+    let selected: eden_protocol::Composition = serde_json::from_slice(
+        &std::fs::read(composition)
+            .map_err(|e| Fault::new("FileFailure", "composition", e.to_string()))?,
+    )
+    .map_err(|e| Fault::new("InvalidInput", "composition", e.to_string()))?;
+    prepare_resolved(
+        selected,
+        composition.parent().unwrap_or(Path::new(".")),
+        cwd,
+        workspace_options,
+        events,
+        history,
+        &std::collections::BTreeSet::new(),
+    )
+}
+pub(crate) fn prepare_resolved(
+    mut selected: eden_protocol::Composition,
+    base: &Path,
+    cwd: &str,
+    workspace_options: &WorkspaceOptions,
+    events: &Arc<Events>,
+    history: Option<&Path>,
+    local: &std::collections::BTreeSet<String>,
+) -> Result<eden_protocol::Composition, Fault> {
     let workspace = eden_workspace::Workspace::discover(Path::new(cwd), workspace_options)?;
     for diagnostic in &workspace.diagnostics {
         events.push(
@@ -17,11 +41,6 @@ pub(crate) fn prepare(
             serde_json::json!({ "level": diagnostic.level, "message": diagnostic.message }),
         );
     }
-    let mut selected: eden_protocol::Composition = serde_json::from_slice(
-        &std::fs::read(composition)
-            .map_err(|e| Fault::new("FileFailure", "composition", e.to_string()))?,
-    )
-    .map_err(|e| Fault::new("InvalidInput", "composition", e.to_string()))?;
     for package in &mut selected.packages {
         if let Some(config) = workspace
             .settings
@@ -99,11 +118,21 @@ pub(crate) fn prepare(
         }
     }
     eden_kernel::preflight(&selected)?;
+    let embedded: Vec<_> = selected
+        .packages
+        .iter()
+        .filter(|p| local.contains(&p.descriptor.package))
+        .cloned()
+        .collect();
+    selected
+        .packages
+        .retain(|p| !local.contains(&p.descriptor.package));
     eden_workspace::packages::resolve_paths(
         &mut selected,
-        composition.parent().unwrap_or(Path::new(".")),
+        base,
         &workspace.global_dir.join("distribution"),
     )?;
+    selected.packages.extend(embedded);
     for package in &mut selected.packages {
         if package
             .descriptor

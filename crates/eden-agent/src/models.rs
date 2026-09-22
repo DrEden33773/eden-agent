@@ -189,7 +189,7 @@ impl Session {
         .await
     }
     pub(crate) async fn freeze_model(&self, run_id: u64) -> Result<Option<m::ModelTarget>, Fault> {
-        if self.role(m::MODEL_CATALOG).is_err() {
+        if !self.has_role(m::MODEL_CATALOG) {
             return Ok(None);
         }
         let selection = self.model_selection().await?;
@@ -269,10 +269,13 @@ mod tests {
             history_path: None,
             offline_records: Mutex::new(vec![]),
             events,
+            interactions: Arc::new(interaction::Interactions::default()),
             state: Mutex::new(State {
                 closed: false,
                 next: 1,
                 active: None,
+                shells: BTreeMap::new(),
+                commands: BTreeMap::new(),
                 management: false,
                 pending_inputs: 0,
                 terminals: BTreeMap::new(),

@@ -252,6 +252,7 @@ async fn context(input: ContextInput, cx: CallContext) -> Result<ModelInput, Fau
         max_output_tokens: None,
         items,
         tools: vec![ToolDefinition {
+            execution: Default::default(),
             name: "write".into(),
             description: "Independent author write schema".into(),
             parameters: json!({

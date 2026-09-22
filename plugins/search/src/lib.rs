@@ -399,6 +399,7 @@ fn catalog() -> Vec<ToolDefinition> {
                 });
             }
             ToolDefinition {
+                execution: Default::default(),
                 name: name.into(),
                 description: if name == "grep" {
                     "Search file contents with FFF. Literal and case-sensitive by default. Results \

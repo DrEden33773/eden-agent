@@ -186,6 +186,10 @@ pub struct Package {
     handlers: BTreeMap<String, Handler>,
 }
 impl Package {
+    /// The contribution identity callers must supply again when reopening a saved session.
+    pub fn descriptor(&self) -> &Descriptor {
+        &self.descriptor
+    }
     /// Start a package with its name, version `0.1.0` and no roles yet.
     pub fn new(name: &str) -> Self {
         Self {

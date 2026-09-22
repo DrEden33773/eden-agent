@@ -833,3 +833,185 @@ async fn bash_path_roundtrip_read_edit_preserves_space_and_unicode_cwd() {
         "after\n"
     );
 }
+
+#[test]
+fn user_shell_role_is_exported_with_matching_factory_descriptor() {
+    assert_eq!(create(Value::Null).unwrap().descriptor(), &descriptor());
+    assert!(
+        descriptor()
+            .provides
+            .iter()
+            .any(|role| role == eden_plugin_sdk::protocol::shell::USER_SHELL)
+    );
+}
+
+mod user_shell {
+    use super::*;
+    use eden_plugin_sdk::{
+        Cancellation,
+        abi::{Bytes, HostApi, Reply},
+        local::LocalInstance,
+        protocol::{Outcome, Request, Terminal, shell::*},
+    };
+    use std::sync::Arc;
+
+    struct Host {
+        hook: Option<ShellHookReply>,
+        events: tokio::sync::mpsc::UnboundedSender<ShellOutput>,
+    }
+    unsafe extern "C" fn request(context: usize, bytes: Bytes, reply: Reply) -> u64 {
+        // SAFETY: Tests retain the host through the awaited instance stop barrier.
+        let host = unsafe { &*(context as *const Host) };
+        // SAFETY: The SDK owns the request bytes until this callback returns.
+        let request: Request = unsafe { bytes.decode() }.unwrap();
+        assert_eq!(request.contract, BEFORE_USER_SHELL);
+        let terminal = match &host.hook {
+            Some(hook) => Terminal {
+                outcome: Outcome::Completed(serde_json::to_value(hook).unwrap()),
+                cleanup_errors: vec![],
+            },
+            None => Terminal::failed(Fault::new("MissingDependency", "router", BEFORE_USER_SHELL)),
+        };
+        // SAFETY: An admitted request owns the reply token exactly once.
+        unsafe { reply.send(&terminal) };
+        1
+    }
+    unsafe extern "C" fn cancel(_: usize, _: u64) {}
+    unsafe extern "C" fn event(context: usize, bytes: Bytes) {
+        // SAFETY: Host and event bytes remain live for this synchronous callback.
+        let host = unsafe { &*(context as *const Host) };
+        // SAFETY: The SDK owns this borrowed span for the callback duration.
+        let event: Request = unsafe { bytes.decode() }.unwrap();
+        if event.contract == "user_shell_output" {
+            let _ = host
+                .events
+                .send(serde_json::from_value(event.payload).unwrap());
+        }
+    }
+    fn instance(project: &Project, host: &Host) -> Arc<LocalInstance> {
+        let package = create(json!({
+            "tools": [],
+            "read_only": true,
+            "artifact_dir": project.0.join("artifacts"),
+        }))
+        .unwrap();
+        // SAFETY: Each test awaits stop before dropping the boxed host; callbacks
+        // synchronously copy bytes and share only an immutable hook and a channel.
+        unsafe {
+            LocalInstance::new(
+                package,
+                HostApi {
+                    context: host as *const Host as usize,
+                    request,
+                    cancel,
+                    event,
+                },
+            )
+        }
+    }
+    fn input(project: &Project, command: &str) -> Request {
+        Request {
+            session_id: 1,
+            run_id: 9,
+            contract: USER_SHELL.into(),
+            payload: json!(ShellRequest {
+                cwd: project.0.to_string_lossy().into_owned(),
+                command: command.into(),
+                shell: "bash".into()
+            }),
+        }
+    }
+    #[tokio::test]
+    async fn explicit_shell_streams_bytes_with_model_tools_disabled_and_hooks_can_rewrite_or_replace()
+     {
+        let project = Project::new();
+        for hook in [
+            None,
+            Some(ShellHookReply::Execute {
+                request: ShellRequest {
+                    cwd: project.0.to_string_lossy().into_owned(),
+                    command: "printf rewritten".into(),
+                    shell: "bash".into(),
+                },
+            }),
+            Some(ShellHookReply::Return {
+                result: output("overridden".into(), Some(0), false),
+            }),
+        ] {
+            let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+            let expected = match &hook {
+                None => "original",
+                Some(ShellHookReply::Execute { .. }) => "rewritten",
+                _ => "overridden",
+            };
+            let host = Box::new(Host { hook, events });
+            let instance = instance(&project, &host);
+            let result: ToolResult = serde_json::from_value(
+                instance
+                    .call(input(&project, "printf original"), Cancellation::default())
+                    .await
+                    .into_result()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(result.text, expected);
+            assert_eq!(result.exit_code, Some(0));
+            let mut bytes = vec![];
+            while let Ok(event) = receiver.try_recv() {
+                assert_eq!(event.stream, "stdout");
+                bytes.extend(event.bytes);
+            }
+            if expected == "overridden" {
+                assert!(bytes.is_empty());
+                assert_eq!(result.details["hook_override"], true);
+            } else {
+                assert_eq!(bytes, expected.as_bytes());
+                assert_eq!(result.details["process_tree_settled"], true);
+            }
+            instance.stop().await.unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn user_shell_cancellation_waits_for_descendant_and_pipe_cleanup() {
+        use tokio::io::AsyncReadExt;
+        let project = Project::new();
+        let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let host = Box::new(Host { hook: None, events });
+        let instance = instance(&project, &host);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let command = format!("exec 3<>/dev/tcp/127.0.0.1/{port}; sleep 300 & printf ready; wait");
+        let cancel = Cancellation::default();
+        let client = instance.clone();
+        let request = input(&project, &command);
+        let token = cancel.clone();
+        let task = tokio::spawn(async move { client.call(request, token).await });
+        let (mut socket, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.bytes, b"ready");
+        cancel.cancel();
+        let terminal = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(terminal.outcome, Outcome::Cancelled));
+        assert!(terminal.cleanup_errors.is_empty());
+        let mut byte = [0];
+        match tokio::time::timeout(Duration::from_secs(2), socket.read(&mut byte))
+            .await
+            .unwrap()
+        {
+            Ok(0) => {}
+            #[cfg(windows)]
+            Err(error) if error.raw_os_error() == Some(10054) => {}
+            other => panic!("descendant retained shell connection: {other:?}"),
+        }
+        instance.stop().await.unwrap();
+    }
+}

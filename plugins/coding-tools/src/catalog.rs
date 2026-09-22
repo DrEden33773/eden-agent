@@ -131,6 +131,7 @@ pub(super) fn tools() -> Vec<ToolDefinition> {
     ]
     .into_iter()
     .map(|(name, description, parameters)| ToolDefinition {
+        execution: Default::default(),
         name: name.into(),
         description: description.into(),
         parameters,

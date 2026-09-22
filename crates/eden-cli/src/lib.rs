@@ -9,6 +9,8 @@ pub mod environment;
 pub mod model_commands;
 /// Structured stdout presentation and machine record framing.
 pub mod output;
+/// Versioned JSONL transport over one owned Session.
+pub mod rpc;
 /// Shared-session management commands.
 pub mod session_commands;
 /// Single outlet for human-readable messages.
@@ -181,22 +183,38 @@ pub async fn wait_for_run(
     json: bool,
     shell: &shell::Shell,
 ) -> Result<eden_agent::Terminal, Box<dyn std::error::Error>> {
+    wait_for_run_after(session, run, json, shell, &mut 0).await
+}
+
+/// Wait for one run while retaining the output cursor across sequential prompts.
+/// This prevents JSON subscribers from receiving earlier runs a second time.
+pub async fn wait_for_run_after(
+    session: &eden_agent::Session,
+    run: u64,
+    json: bool,
+    shell: &shell::Shell,
+    sequence: &mut u64,
+) -> Result<eden_agent::Terminal, Box<dyn std::error::Error>> {
     for event in session
         .events()
         .iter()
-        .filter(|event| event.kind == "resource_diagnostic")
+        .filter(|event| event.sequence > *sequence && event.kind == "resource_diagnostic")
     {
         shell.diagnostic(&resource_diagnostic(&event.payload));
     }
     if !json {
-        return Ok(session.wait(run).await?);
+        let terminal = session.wait(run).await?;
+        *sequence = session
+            .events()
+            .last()
+            .map_or(*sequence, |event| event.sequence);
+        return Ok(terminal);
     }
-    let mut sequence = 0;
     loop {
-        let events = session.events_after(sequence).await;
+        let events = session.events_after(*sequence).await;
         let mut settled = false;
         for event in events {
-            sequence = event.sequence;
+            *sequence = event.sequence;
             settled |= event.kind == "settled" && event.run_id == run;
             output::record(&event)?;
         }

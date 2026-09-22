@@ -22,7 +22,7 @@ The standalone consumer in `tests/contract-authors/embedded-client` depends only
 
 ## Operations and admission
 
-`submit_blocks` and `resume` accept a model run and return its run ID. `wait` returns the terminal after cleanup; `cancel` only signals cancellation. State, tools, commands, resources, models, history and queue queries can be read without waiting for a model run to finish. `enqueue` and `withdraw_queue` remain available during a model run. Withdrawal affects waiting/returned entries on the current branch; delivered entries must first return through cancellation. A withdrawal is recorded independently of model consumption and cannot reappear after reopening.
+`submit_blocks` and `resume` accept a model run and return its run ID. `wait` returns the terminal after cleanup; `cancel` only signals cancellation. State, tools, commands, resources, models, history and queue queries can be read without waiting for a model run to finish. `enqueue`, `withdraw_queue`, and `configure_queue` remain available during a model run. Queue mode changes are ordered with the next delivery transaction and do not rewrite already delivered entries. Withdrawal affects waiting/returned entries on the current branch; delivered entries must first return through cancellation. A withdrawal is recorded independently of model consumption and cannot reappear after reopening.
 
 `control` changes automatic compaction or retry policy for this live package instance. `StopRetry` ends the current backoff with its original provider error and does not cancel other work. These switches do not edit saved workspace settings. History navigation, compaction, reload, metadata and composition changes require idle admission.
 

@@ -94,6 +94,25 @@ impl Session {
         name: String,
         arguments: serde_json::Value,
     ) -> Result<u64, Fault> {
+        self.start_control_operation(
+            eden_protocol::resources::COMMAND,
+            serde_json::json!(eden_protocol::resources::CommandRequest {
+                cwd: self.cwd().into(),
+                name: name.clone(),
+                arguments
+            }),
+            serde_json::json!({ "command": name }),
+            Ok,
+        )
+    }
+    pub(crate) fn start_control_operation(
+        &self,
+        contract: &str,
+        payload: serde_json::Value,
+        accepted: serde_json::Value,
+        project: fn(serde_json::Value) -> Result<serde_json::Value, Fault>,
+    ) -> Result<u64, Fault> {
+        let contract = contract.to_owned();
         self.0.kernel.get()?;
         let (run_id, cancel) = {
             let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -113,9 +132,7 @@ impl Session {
             state.commands.insert(id, cancel.clone());
             (id, cancel)
         };
-        self.0
-            .events
-            .push(run_id, "accepted", serde_json::json!({ "command": name }));
+        self.0.events.push(run_id, "accepted", accepted);
         let session = self.clone();
         tokio::spawn(async move {
             let mut terminal = session
@@ -125,16 +142,18 @@ impl Session {
                     Request {
                         session_id: session.id(),
                         run_id,
-                        contract: eden_protocol::resources::COMMAND.into(),
-                        payload: serde_json::json!(eden_protocol::resources::CommandRequest {
-                            cwd: session.cwd().into(),
-                            name,
-                            arguments
-                        }),
+                        contract,
+                        payload,
                     },
                     cancel,
                 )
                 .await;
+            if let Outcome::Completed(value) = &mut terminal.outcome {
+                terminal.outcome = match project(std::mem::take(value)) {
+                    Ok(value) => Outcome::Completed(value),
+                    Err(error) => Outcome::Failed(error),
+                };
+            }
             if session.0.coding
                 && let Err(error) = session
                     .commit(run_id, "terminal", serde_json::json!(terminal))

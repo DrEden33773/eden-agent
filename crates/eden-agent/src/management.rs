@@ -849,23 +849,22 @@ impl Session {
             )
         })
     }
-    /// Choose how the queue delivers steering and follow-up submissions.
+    /// Choose delivery modes even during a model run. The queue transaction orders this
+    /// change with Take; already delivered inputs stay unchanged.
     pub fn configure_queue(&self, steering: String, follow_up: String) -> Result<u64, Fault> {
-        self.start(true, move |session, run_id, _| async move {
-            as_terminal(
-                session
-                    .service::<_, Vec<c::QueueEntry>>(
-                        run_id,
-                        c::QUEUE,
-                        &c::QueueRequest::Configure {
-                            steering,
-                            follow_up,
-                        },
-                    )
-                    .await
-                    .map(|_| json!("Queue delivery settings saved.")),
-            )
-        })
+        self.start_control_operation(
+            c::QUEUE,
+            json!(c::QueueRequest::Configure {
+                steering,
+                follow_up
+            }),
+            json!({ "queue_configuration": true }),
+            |value| {
+                serde_json::from_value::<Vec<c::QueueEntry>>(value)
+                    .map(|_| json!("Queue delivery settings saved."))
+                    .map_err(|error| Fault::new("InvalidInput", "session", error.to_string()))
+            },
+        )
     }
     /// Add a versioned extension state record through the only history writer.
     pub fn record_state(&self, state: c::ExtensionState) -> Result<u64, Fault> {

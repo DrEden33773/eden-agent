@@ -143,3 +143,42 @@ async fn shutdown_cancels_a_pending_control_call_before_waiting_for_it() {
         .unwrap();
     assert_eq!(pending.await.unwrap().unwrap_err().code, "Cancelled");
 }
+
+#[tokio::test]
+async fn queue_modes_can_change_while_the_model_operation_is_active() {
+    use eden_protocol::coding as c;
+    let queue=Package::new("queue-test").service(c::QUEUE, |request:c::QueueRequest,_| async move {
+        assert!(matches!(request,c::QueueRequest::Configure{steering,follow_up} if steering=="all" && follow_up=="one"));
+        Ok(Vec::<c::QueueEntry>::new())
+    });
+    let cwd = std::env::current_dir().unwrap();
+    let session = Embedded::new(composition(), cwd.clone())
+        .package(package(), "test-v1")
+        .unwrap()
+        .package(queue, "queue-v1")
+        .unwrap()
+        .open(
+            SessionOptions { cwd, history: None },
+            WorkspaceOptions {
+                global_dir: std::env::temp_dir()
+                    .join(format!("eden-queue-config-test-{}", std::process::id())),
+                ..WorkspaceOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+    session.set_interactions(true);
+    let model = session.submit("wait").unwrap();
+    let configured = session.configure_queue("all".into(), "one".into()).unwrap();
+    assert_eq!(
+        session
+            .wait(configured)
+            .await
+            .unwrap()
+            .into_result()
+            .unwrap(),
+        json!("Queue delivery settings saved.")
+    );
+    assert_eq!(session.state().active_run, Some(model));
+    session.shutdown().await.unwrap();
+}

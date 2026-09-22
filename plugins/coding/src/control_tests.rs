@@ -307,3 +307,67 @@ async fn stop_retry_returns_original_failure_without_cancelling_scope_or_next_ca
 fn exported_descriptor_matches_factory_roles() {
     assert_eq!(create(Value::Null).unwrap().descriptor(), &descriptor());
 }
+
+#[tokio::test]
+async fn changed_delivery_mode_applies_to_next_take_without_rewriting_delivered_entries() {
+    let host = Box::<Host>::default();
+    let package = instance(&host, create(Value::Null).unwrap());
+    for _ in 0..3 {
+        call(
+            &package,
+            QUEUE,
+            QueueRequest::Enqueue {
+                kind: "steering".into(),
+                content: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let first: Vec<QueueEntry> = serde_json::from_value(
+        call(
+            &package,
+            QUEUE,
+            QueueRequest::Take {
+                kind: "steering".into(),
+            },
+        )
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(first.len(), 1);
+    call(
+        &package,
+        QUEUE,
+        QueueRequest::Configure {
+            steering: "all".into(),
+            follow_up: "one".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let next: Vec<QueueEntry> = serde_json::from_value(
+        call(
+            &package,
+            QUEUE,
+            QueueRequest::Take {
+                kind: "steering".into(),
+            },
+        )
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(next.len(), 2);
+    assert!(next.iter().all(|entry| entry.id != first[0].id));
+    let records = host.records.lock().unwrap().clone();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|r| r.kind == "queue_delivered" && r.payload["id"] == first[0].id)
+            .count(),
+        1
+    );
+    package.stop().await.unwrap();
+}

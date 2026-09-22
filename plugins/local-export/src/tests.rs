@@ -64,7 +64,7 @@ fn default_projection_drops_private_state_and_unselected_branch_bytes() {
     let artifact = export(ExportRequest {
         records,
         selection: Selection::default(),
-        format: Format::Html,
+        format: Format::Jsonl,
     })
     .unwrap();
     for canary in [
@@ -72,12 +72,12 @@ fn default_projection_drops_private_state_and_unselected_branch_bytes() {
         "STATE_CANARY",
         "IMAGE_CANARY",
         "BRANCH_CANARY",
-        "<script>",
     ] {
         assert!(!artifact.content.contains(canary), "{canary}");
     }
     assert!(artifact.content.contains("chosen"));
-    assert!(artifact.content.contains("&lt;/script&gt;"));
+    assert!(artifact.content.contains("</script><script>"));
+    assert_eq!(artifact.filename, "conversation.jsonl");
 }
 #[test]
 fn filtered_jsonl_is_reading_data_and_never_a_restore_backup() {
@@ -156,7 +156,7 @@ fn selected_thinking_extracts_display_text_inside_provider_envelope() {
             thinking: true,
             ..Selection::default()
         },
-        format: Format::Html,
+        format: Format::Jsonl,
     })
     .unwrap();
     assert!(artifact.content.contains("visible reasoning"));

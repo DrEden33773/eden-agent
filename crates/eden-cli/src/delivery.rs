@@ -35,13 +35,16 @@ pub async fn run(cli: &Cli) -> Result<i32, Box<dyn Error>> {
                 path,
                 destination,
                 selection,
-                jsonl,
+                jsonl: _,
             }) => {
+                if destination.extension().is_some_and(|ext| ext == "html") {
+                    return Err("HTML export has been removed; use a .jsonl preview".into());
+                }
                 let artifact = delivery
                     .export_file_with_cancel(
                         path,
                         serde_json::from_str(selection)?,
-                        if *jsonl { Format::Jsonl } else { Format::Html },
+                        Format::Jsonl,
                         cancel.clone(),
                     )
                     .await?;

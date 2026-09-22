@@ -164,91 +164,16 @@ fn project(request: &ExportRequest) -> Result<(Vec<Value>, Vec<String>), Fault> 
     }
     Ok((entries, warnings))
 }
-fn escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
-fn render_blocks(value: &Value) -> String {
-    let mut html = String::new();
-    for block in value.as_array().into_iter().flatten() {
-        match block["type"].as_str() {
-            Some("text") => html.push_str(&format!(
-                "<pre>{}</pre>",
-                escape(block["text"].as_str().unwrap_or_default())
-            )),
-            Some("image")
-                if matches!(
-                    block["media_type"].as_str(),
-                    Some("image/png" | "image/jpeg" | "image/gif" | "image/webp")
-                ) && base64::engine::general_purpose::STANDARD
-                    .decode(block["data"].as_str().unwrap_or_default())
-                    .is_ok() =>
-            {
-                html.push_str(&format!(
-                    "<img alt=\"Selected attachment\" src=\"data:{};base64,{}\">",
-                    escape(block["media_type"].as_str().unwrap_or_default()),
-                    escape(block["data"].as_str().unwrap_or_default())
-                ))
-            }
-            _ => html.push_str(&format!(
-                "<details><summary>Selected attachment (base64)</summary><pre>{}</pre></details>",
-                escape(&block.to_string())
-            )),
-        }
-    }
-    html
-}
 fn export(request: ExportRequest) -> Result<Artifact, Fault> {
     let (entries, warnings) = project(&request)?;
-    let (filename, media_type, content) = match request.format {
-        Format::Jsonl => {
-            let mut text = String::from("{\"format\":\"eden-reading-v1\",\"restorable\":false}\n");
-            for entry in &entries {
-                text.push_str(&entry.to_string());
-                text.push('\n');
-            }
-            ("conversation.jsonl", "application/x-ndjson", text)
-        }
-        Format::Html => {
-            let mut html = String::from(include_str!("template.html"));
-            for entry in &entries {
-                let body = &entry["content"];
-                let label = body["role"]
-                    .as_str()
-                    .or_else(|| body["type"].as_str())
-                    .unwrap_or("Record");
-                html.push_str(&format!(
-                    "<article><header>{} · turn {} · record {}</header>",
-                    escape(label),
-                    entry["run_id"],
-                    entry["sequence"]
-                ));
-                if body["type"] == "message" {
-                    html.push_str(&render_blocks(&body["content"]));
-                } else {
-                    html.push_str(&format!(
-                        "<pre>{}</pre>",
-                        escape(
-                            &serde_json::to_string_pretty(body)
-                                .map_err(|e| invalid(e.to_string()))?
-                        )
-                    ));
-                }
-                html.push_str("</article>");
-            }
-            for warning in &warnings {
-                html.push_str(&format!("<p class=\"warning\">{}</p>", escape(warning)));
-            }
-            html.push_str("</main></body></html>");
-            ("conversation.html", "text/html", html)
-        }
-    };
+    let mut content = String::from("{\"format\":\"eden-reading-v1\",\"restorable\":false}\n");
+    for entry in entries {
+        content.push_str(&entry.to_string());
+        content.push('\n');
+    }
     Ok(Artifact {
-        filename: filename.into(),
-        media_type: media_type.into(),
+        filename: "conversation.jsonl".into(),
+        media_type: "application/x-ndjson".into(),
         content,
         warnings,
     })

@@ -94,14 +94,25 @@ def main() -> None:
             }:
                 item["library"] = "missing-original-plugin"
         write(config, stripped)
-        preview = scratch / "preview.html"
+        preview = scratch / "preview.jsonl"
         reply = invoke(["export", history, preview])
         # Text mode normalizes Windows CRLF; publication promises the exact preview bytes.
         frozen = preview.read_bytes().decode("utf-8")
-        assert "CONFIG_CANARY" not in frozen and "&lt;script&gt;" in frozen and "中文" in frozen
+        assert "CONFIG_CANARY" not in frozen and "<script>" in frozen and "中文" in frozen
+        assert json.loads(frozen.splitlines()[0]) == {
+            "format": "eden-reading-v1",
+            "restorable": False,
+        }
+        rejected = invoke(["export", history, scratch / "legacy.html"], False)
+        assert "HTML export has been removed" in rejected.stderr
         backup = scratch / "backup.jsonl"
         copied = run([host, "history", "export", history, backup], scratch, env=environment)
         assert copied.returncode == 0 and "CONFIG_CANARY" in backup.read_text(encoding="utf-8")
+        import hashlib
+
+        backup_digest = hashlib.sha256(backup.read_bytes()).hexdigest()
+        rejected = invoke(["share", backup, "--sha256", backup_digest, "--confirm"], False)
+        assert "share requires an eden-reading-v1 preview" in rejected.stderr
         requests: list[dict[str, Any]] = []
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -136,7 +147,7 @@ def main() -> None:
             published = invoke(["share", preview, "--sha256", reply["sha256"], "--confirm"])
             assert published["visibility"] == "secret" and "Anyone with" in published["notice"]
             assert requests[0]["public"] is False
-            assert requests[0]["files"]["conversation.html"]["content"] == frozen
+            assert requests[0]["files"]["conversation.jsonl"]["content"] == frozen
             lost = invoke(["share", preview, "--sha256", reply["sha256"], "--confirm"], False)
             assert "PublicationUnknown" in lost.stderr and len(requests) == 2
             preview.write_text(frozen + "edited", encoding="utf-8")
@@ -159,9 +170,9 @@ def main() -> None:
             "roles": {role: "delivery-services" for role in roles},
         }
         write(config, external)
-        custom = scratch / "custom.html"
+        custom = scratch / "custom.jsonl"
         custom_reply = invoke(["export", history, custom])
-        assert custom.read_text(encoding="utf-8") == "External renderer: 2 records"
+        assert "External renderer: 2 records" in custom.read_text(encoding="utf-8")
         custom_share = invoke(["share", custom, "--sha256", custom_reply["sha256"], "--confirm"])
         assert custom_share["url"] == "https://example.invalid/author-target" and custom_share[
             "content"
@@ -171,7 +182,7 @@ def main() -> None:
             marker = scratch / "export.ready"
             external["packages"][0]["config"] = {"marker": str(marker)}
             write(config, external)
-            cancelled_preview = scratch / "cancelled.html"
+            cancelled_preview = scratch / "cancelled.jsonl"
             pending = subprocess.Popen(
                 [
                     str(host),
@@ -204,12 +215,78 @@ def main() -> None:
                     pending.wait()
         external["packages"][0]["config"] = {"fail": True}
         write(config, external)
-        failed = invoke(["export", history, scratch / "failed.html"], False)
+        failed = invoke(["export", history, scratch / "failed.jsonl"], False)
         assert "export failed" in failed.stderr and "finalizer failed" in failed.stderr
         results["three_external_sdk_roles"] = True
         write(config, selected)
         sdk = run([example("delivery_probe"), config], scratch, env=environment)
         assert sdk.returncode == 0, (sdk.stdout, sdk.stderr)
+        official_rpc = subprocess.Popen(
+            [str(host), "--offline-startup", "--composition", str(config), "rpc"],
+            cwd=scratch,
+            env=environment,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+        )
+        assert official_rpc.stdin is not None and official_rpc.stdout is not None
+        try:
+            ready = json.loads(official_rpc.stdout.readline())
+            assert ready["type"] == "ready", ready
+            for identity, params in (("default", {}), ("old-html", {"format": "html"})):
+                official_rpc.stdin.write(
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "id": identity,
+                            "session_id": ready["session_id"],
+                            "method": "export",
+                            "params": params,
+                        }
+                    )
+                    + "\n"
+                )
+                official_rpc.stdin.flush()
+                while True:
+                    line = official_rpc.stdout.readline()
+                    assert line, "official RPC exited before export response"
+                    response = json.loads(line)
+                    if response.get("id") == identity:
+                        break
+                if identity == "default":
+                    assert response["type"] == "result", response
+                    assert response["result"]["filename"] == "conversation.jsonl"
+                    assert json.loads(response["result"]["content"].splitlines()[0]) == {
+                        "format": "eden-reading-v1",
+                        "restorable": False,
+                    }
+                else:
+                    assert response["type"] == "error", response
+                    assert "HTML export has been removed" in response["error"]["message"]
+            official_rpc.stdin.write(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "id": "close",
+                        "session_id": ready["session_id"],
+                        "method": "shutdown",
+                        "params": {},
+                    }
+                )
+                + "\n"
+            )
+            official_rpc.stdin.flush()
+            assert official_rpc.wait(timeout=20) == 0
+        finally:
+            if official_rpc.poll() is None:
+                official_rpc.kill()
+                official_rpc.wait()
+            official_rpc.stdin.close()
+            official_rpc.stdout.close()
+            if official_rpc.stderr is not None:
+                official_rpc.stderr.close()
         selected["packages"].append(
             package(
                 "delivery-services",

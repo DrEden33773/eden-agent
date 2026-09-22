@@ -48,6 +48,8 @@ test("associated inputs select hooks only for tooling and configuration", () => 
     "scripts/test_ci_cache.py",
     "scripts/checks.mjs",
     "scripts/install-hooks.mjs",
+    "scripts/format-editor.mjs",
+    "scripts/install-formatter.mjs",
     "tests/development-hooks.test.mjs",
     ".githooks/pre-commit",
     ".github/workflows/quality.yml",

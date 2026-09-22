@@ -49,6 +49,12 @@ pub struct Parsed {
     after_help = r"Run 'eden help <command>' or 'eden <command> --help' for more information on a command."
 )]
 pub struct Cli {
+    /// Suppress all official startup maintenance networking; explicit later actions remain allowed
+    #[arg(long, global = true)]
+    pub offline_startup: bool,
+    /// Disable automatic startup update checks
+    #[arg(long, global = true)]
+    pub no_update_check: bool,
     /// Directory to run in
     #[arg(long, global = true, value_name = "DIR")]
     pub cwd: Option<PathBuf>,
@@ -150,6 +156,38 @@ pub struct Cli {
 /// The command families `eden` accepts.
 #[derive(Debug, Subcommand)]
 pub enum Family {
+    /// Export a selected reading copy without loading the original conversation plugins
+    Export {
+        /// Public history file
+        path: PathBuf,
+        /// New preview file
+        destination: PathBuf,
+        /// Selection object: head, runs, messages, tools, thinking, attachments, full_outputs
+        #[arg(long, default_value = "{}")]
+        selection: String,
+        /// Produce reading JSONL instead of HTML
+        #[arg(long)]
+        jsonl: bool,
+    },
+    /// Publish the exact reviewed file to a secret gist
+    Share {
+        /// Previously prepared preview
+        path: PathBuf,
+        /// Identity returned by export
+        #[arg(long)]
+        sha256: String,
+        /// Explicitly authorize upload; anyone with the URL can access the gist
+        #[arg(long)]
+        confirm: bool,
+    },
+    /// Check, prepare or activate through the selected update service
+    Update {
+        /// JSON UpdateRequest; default discovers channels without network
+        #[arg(default_value = "{\"operation\":\"discover\"}")]
+        request: String,
+    },
+    /// Validate a complete installation locally without starting a conversation
+    InstallationCheck,
     /// Serve version 1 JSONL requests over stdin/stdout until disconnect or shutdown
     Rpc,
     /// Inspect and manage a llama.cpp router

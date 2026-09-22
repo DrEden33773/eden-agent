@@ -3,6 +3,8 @@
 
 /// Declarative command surface of the `eden` executable.
 pub mod cli;
+/// Independent export, publication and installation maintenance.
+pub mod delivery;
 /// Explicit environment-file parsing for CLI startup.
 pub mod environment;
 /// Model and API-key operations through the shared session services.
@@ -32,6 +34,12 @@ pub fn workspace_options(cli: &cli::Cli) -> eden_agent::WorkspaceOptions {
     }
     if cli.no_trust_project {
         options.project_trust = Some(false);
+    }
+    if cli.offline_startup {
+        options.overrides["offline_startup"] = serde_json::json!(true);
+    }
+    if cli.no_update_check {
+        options.overrides["update_check"] = serde_json::json!(false);
     }
     options
 }

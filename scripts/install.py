@@ -2,6 +2,7 @@
 """Assemble an explicit local installation from already built artifacts."""
 
 import argparse
+import hashlib
 import json
 import os
 import pathlib
@@ -91,6 +92,10 @@ def install(
         build_target() / profile / ("eden" + suffix),
         destination / "bin" / ("eden" + suffix),
     )
+    shutil.copy2(
+        build_target() / profile / ("eden-launch" + suffix),
+        destination / "bin" / ("eden-launch" + suffix),
+    )
     name = library("eden_standard")
     if controlled:
         shutil.copy2(build_target() / profile / name, plugin_dir / name)
@@ -125,7 +130,12 @@ def install(
             ),
             ("local-history", ["eden.session-store.v2"]),
             ("workspace-resources", ["eden.resource-source.v1"]),
-            ("distribution", ["eden.distribution-commands.v1", "eden.distribution.v1"]),
+            (
+                "distribution",
+                ["eden.distribution-commands.v1", "eden.distribution.v1", "eden.update-source.v1"],
+            ),
+            ("local-export", ["eden.exporter.v1"]),
+            ("github-share", ["eden.share-target.v1"]),
             (
                 "contributions",
                 [
@@ -189,6 +199,20 @@ def install(
         bundle(ROOT, destination, target())
     else:
         shutil.copytree(license_directory, destination / "third-party-licenses", dirs_exist_ok=True)
+    (destination / "package.json").write_text("{}\n", encoding="utf-8")
+    manifest = {
+        "version": "v0.1.0",
+        "target": target(),
+        "executable": "bin/eden" + suffix,
+        "files": {
+            path.relative_to(destination).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(destination.rglob("*"))
+            if path.is_file() and path.name != "release.json"
+        },
+    }
+    (destination / "release.json").write_text(
+        json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+    )
     return destination
 
 

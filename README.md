@@ -66,3 +66,5 @@ Account login, device authorization, private callback input and token refresh ar
 Local model discovery, search, server-side download, load/unload and cancellation use the replaceable ModelManager role; see [llama.cpp router](docs/router.md).
 
 Rust consumers can use the [embedding API](docs/embedding.md); subprocess clients use the [stdio RPC protocol](docs/rpc.md).
+
+See [export, explicit sharing and startup maintenance](docs/delivery.md) for reading snapshots and delivery services, and [updates](docs/updates.md) for complete-installation transactions.

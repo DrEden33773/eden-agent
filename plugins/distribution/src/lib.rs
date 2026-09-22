@@ -2,6 +2,7 @@
 mod files;
 mod manager;
 mod source;
+mod updates;
 use eden_plugin_sdk::{
     Package,
     protocol::{
@@ -17,7 +18,11 @@ fn descriptor() -> Descriptor {
     Descriptor {
         package: "distribution".into(),
         version: "0.1.0".into(),
-        provides: vec![CATALOG.into(), COMMAND.into()],
+        provides: vec![
+            CATALOG.into(),
+            COMMAND.into(),
+            eden_plugin_sdk::protocol::updates::UPDATE_SOURCE.into(),
+        ],
     }
 }
 fn create(config: Value) -> Result<Package, Fault> {
@@ -35,7 +40,8 @@ fn create(config: Value) -> Result<Package, Fault> {
         root,
         client: source::client(config["ca_certificate"].as_str().map(std::path::Path::new))?,
     });
-    Ok(Package::new("distribution")
+    let updater_manager = manager.clone();
+    let package = Package::new("distribution")
         .service(CATALOG, |_: CatalogRequest, _| async {
             Ok(CommandCatalog {
                 commands: catalog(),
@@ -55,7 +61,8 @@ fn create(config: Value) -> Result<Package, Fault> {
                     .await
                     .map_err(|_| manager::error("Unavailable", "package command completion lost"))?
             }
-        }))
+        });
+    updates::attach(package, updater_manager, &config)
 }
 eden_plugin_sdk::export_plugin!(descriptor, create);
 async fn dispatch(

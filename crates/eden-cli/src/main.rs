@@ -46,6 +46,12 @@ fn start(parsed: Parsed, shell: &Shell) -> Result<i32, Box<dyn std::error::Error
 }
 async fn run(parsed: Parsed, shell: &Shell) -> Result<i32, Box<dyn std::error::Error>> {
     match &parsed.cli.family {
+        Some(
+            Family::Export { .. }
+            | Family::Share { .. }
+            | Family::Update { .. }
+            | Family::InstallationCheck,
+        ) => eden_cli::delivery::run(&parsed.cli).await,
         Some(Family::Rpc) => eden_cli::rpc::run(&parsed.cli).await,
         Some(Family::Models { .. } | Family::Auth { .. } | Family::Router { .. }) => {
             eden_cli::model_commands::run(&parsed.cli).await

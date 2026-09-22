@@ -137,6 +137,7 @@ impl Session {
             self.service::<_, c::StoreReply>(run_id, c::STORE, &c::StoreRequest::Close)
                 .await?;
         }
+        self.0.maintenance.stop().await;
         self.0.kernel.shutdown().await?;
         self.0.events.push(
             run_id,

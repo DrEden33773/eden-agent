@@ -29,6 +29,7 @@ AUTHORS = (
     "model-services",
     "embedded-client",
     "entrypoint-extension",
+    "delivery-services",
 )
 INVALID = ("wrong-abi", "wrong-sdk", "short-table", "metadata-panic", "init-panic")
 EXAMPLES = (
@@ -40,6 +41,7 @@ EXAMPLES = (
     "context_probe",
     "workspace_probe",
     "router_probe",
+    "delivery_probe",
 )
 _RECEIPT: dict[str, Any] | None = None
 

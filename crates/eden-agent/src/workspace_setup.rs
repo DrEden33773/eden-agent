@@ -103,6 +103,15 @@ pub(crate) fn prepare_resolved(
                 package.config = serde_json::json!({});
             }
             package.config["root"] = serde_json::json!(workspace.global_dir.join("distribution"));
+            if package.config["updates"]["managed_root"].is_null()
+                && let Some(root) = std::env::var_os("EDEN_MANAGED_ROOT")
+            {
+                if !package.config["updates"].is_object() {
+                    package.config["updates"] = serde_json::json!({});
+                }
+                package.config["updates"]["managed_root"] =
+                    serde_json::json!(std::path::PathBuf::from(root));
+            }
         }
         if package.descriptor.package == "coding-tools" {
             if !package.config.is_object() {

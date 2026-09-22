@@ -1157,6 +1157,36 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
     #[tokio::test]
+    async fn package_initialization_does_not_contact_catalog_router_or_credentials() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let directory =
+            std::env::temp_dir().join(format!("eden-startup-model-{}", std::process::id()));
+        let package = crate::create(serde_json::json!({
+            "global_dir": directory,
+            "offline_startup": true,
+            "catalog": { "source": endpoint },
+            "router": { "url": endpoint, "search_url": endpoint },
+            "credentials": { "providers": { "openai": { "literal": "fixture" } } },
+            "cloud": { "amazon-bedrock": { "region": "us-east-1" } },
+        }))
+        .unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        assert!(
+            package
+                .descriptor()
+                .provides
+                .iter()
+                .any(|role| role == MODEL_CATALOG)
+        );
+        assert!(!directory.exists());
+    }
+    #[tokio::test]
     async fn offline_refresh_does_not_connect() {
         let mut catalog = fixture("http://127.0.0.1:1".into(), None);
         catalog.config.offline = true;

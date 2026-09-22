@@ -29,6 +29,9 @@ const METHODS: &[&str] = &[
     "resume",
     "cancel",
     "history",
+    "export",
+    "share",
+    "update",
     "tree",
     "queue",
     "enqueue",
@@ -249,6 +252,25 @@ fn dispatch(
             session.cancel(field(request, "run_id")?)?;
             Dispatch::Immediate(json!({ "cancel_requested": true }))
         }
+        "export" => {
+            let selection = parameter(
+                request
+                    .params
+                    .get("selection")
+                    .cloned()
+                    .unwrap_or(json!({})),
+            )?;
+            let format = parameter(
+                request
+                    .params
+                    .get("format")
+                    .cloned()
+                    .unwrap_or(json!("html")),
+            )?;
+            query(async move { Ok(json!(s.export(selection, format).await?)) })
+        }
+        "share" => Dispatch::Run(session.publish(parameter(request.params.clone())?)?, false),
+        "update" => Dispatch::Run(session.update(parameter(request.params.clone())?)?, false),
         "history" => query(async move { Ok(json!(s.history().await?)) }),
         "tree" => query(async move {
             let records = s.history().await?;

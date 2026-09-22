@@ -121,7 +121,12 @@ async fn shutdown_cancels_a_pending_control_call_before_waiting_for_it() {
         .unwrap()
         .open(
             SessionOptions { cwd, history: None },
-            WorkspaceOptions::default(),
+            WorkspaceOptions {
+                global_dir: std::env::temp_dir()
+                    .join(format!("eden-control-test-{}", std::process::id())),
+                project_trust: Some(false),
+                ..WorkspaceOptions::default()
+            },
         )
         .await
         .unwrap();

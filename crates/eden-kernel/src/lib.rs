@@ -373,7 +373,15 @@ impl Kernel {
             .iter()
             .map(|p| {
                 std::fs::canonicalize(base.join(&p.library)).map_err(|e| {
-                    Fault::new("MissingDependency", &p.descriptor.package, e.to_string())
+                    Fault::new(
+                        "MissingDependency",
+                        &p.descriptor.package,
+                        format!(
+                            "cannot resolve native library {}: {e}; restore the plugin file or \
+                             select a composition with installed libraries",
+                            base.join(&p.library).display()
+                        ),
+                    )
                 })
             })
             .collect::<Result<_, _>>()?;

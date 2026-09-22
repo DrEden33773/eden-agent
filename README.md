@@ -19,6 +19,8 @@ On Windows use `python` and `artifacts/install/bin/eden.exe`. Set an exact model
 
 The installed directory contains `bin/eden`, `composition.json`, versioned native packages under `plugins/`, and license notices. Move or archive that directory as a unit. There is no global installation step or implicit download at startup.
 
+Use `eden help`, `eden help models` or `eden help models select` to explore commands without loading plugins. `-h` and `--help` remain available at every command level. Building only the CLI with `cargo run --bin eden` does not assemble an installation: its default composition would be `target/composition.json`. After the build and install steps above, you can also run `cargo run --locked --bin eden -- --composition artifacts/install/composition.json models list`. Explicit composition and history paths are relative to the invoking process directory, independently of `--cwd`.
+
 ## Rust embedding
 
 ```sh

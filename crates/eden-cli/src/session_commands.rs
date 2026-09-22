@@ -28,21 +28,23 @@ pub async fn run(cli: &Cli, shell: &Shell) -> Result<i32> {
         SessionAction::Tree { path } => return tree(path, shell),
         _ => {}
     }
-    if let Some((kind, arguments)) = copy_action(action) {
-        return copy_session(cli, kind, arguments).await;
+    if let Some((kind, arguments, target, public_only)) = copy_action(action) {
+        return copy_session(cli, kind, arguments, target, public_only).await;
     }
     control(cli, shell, action).await
 }
 
 /// The copy kind a session action performs, if it copies a session.
-fn copy_action(action: &SessionAction) -> Option<(CopyKind, &CopyArgs)> {
+fn copy_action(action: &SessionAction) -> Option<(CopyKind, &CopyArgs, Option<u64>, bool)> {
     match action {
-        SessionAction::Fork { copy } => Some((CopyKind::Fork, copy)),
-        SessionAction::Clone { copy } => Some((CopyKind::Clone, copy)),
-        SessionAction::Import { copy } => Some((CopyKind::Import, copy)),
-        SessionAction::Upgrade { copy } => Some((CopyKind::Upgrade, copy)),
-        SessionAction::Recover { copy } => Some((CopyKind::Recover, copy)),
-        SessionAction::Migrate { copy } => Some((CopyKind::Migrate, copy)),
+        SessionAction::Fork { copy, at } => Some((CopyKind::Fork, copy, *at, false)),
+        SessionAction::Clone { copy } => Some((CopyKind::Clone, copy, None, false)),
+        SessionAction::Import { copy } => Some((CopyKind::Import, copy, None, false)),
+        SessionAction::Upgrade { copy } => Some((CopyKind::Upgrade, copy, None, false)),
+        SessionAction::Recover { copy } => Some((CopyKind::Recover, copy, None, false)),
+        SessionAction::Migrate { copy, public_only } => {
+            Some((CopyKind::Migrate, copy, None, *public_only))
+        }
         _ => None,
     }
 }
@@ -132,16 +134,22 @@ fn tree(path: &Path, shell: &Shell) -> Result<i32> {
     Ok(0)
 }
 
-async fn copy_session(cli: &Cli, kind: CopyKind, copy: &CopyArgs) -> Result<i32> {
+async fn copy_session(
+    cli: &Cli,
+    kind: CopyKind,
+    copy: &CopyArgs,
+    target: Option<u64>,
+    public_only: bool,
+) -> Result<i32> {
     let plan = Session::plan_copy(
         &crate::composition(cli)?,
         CopyOptions {
             source: copy.source.clone(),
             destination: copy.destination.clone(),
             kind,
-            target: copy.at,
+            target,
             cwd: cli.cwd.clone(),
-            public_only: copy.public_only,
+            public_only,
         },
     )
     .await?;
@@ -159,19 +167,7 @@ async fn copy_session(cli: &Cli, kind: CopyKind, copy: &CopyArgs) -> Result<i32>
 async fn control(cli: &Cli, shell: &Shell, action: &SessionAction) -> Result<i32> {
     let json_output = cli.json;
     let path = action_path(action).ok_or("session action needs a history path")?;
-    let cwd = match &cli.cwd {
-        Some(cwd) => cwd.clone(),
-        None => PathBuf::from(
-            eden_kernel::history::read(&path)?
-                .first()
-                .and_then(|r| r.payload["cwd"].as_str())
-                .ok_or("missing recorded cwd")?,
-        ),
-    };
-    let options = eden_agent::SessionOptions {
-        cwd,
-        history: Some(path),
-    };
+    let options = crate::session_options(cli, Some(path), false)?;
     let workspace = crate::workspace_options(cli);
     let session = if matches!(action, SessionAction::Switch { .. }) {
         Session::open_rebound(&crate::composition(cli)?, options, workspace).await?

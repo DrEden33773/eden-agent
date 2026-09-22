@@ -12,6 +12,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol, cast
 
@@ -22,6 +23,7 @@ from verification import example, installed, prepare
 class CodingServer(Protocol):
     requests: list[dict[str, Any]]
     address: str
+    release: threading.Event
 
     def close(self) -> None: ...
 
@@ -193,6 +195,27 @@ def main() -> None:
         for folder in [caller, project, relocated]:
             folder.mkdir()
 
+        # An empty allowed catalog fails during summary preparation, before any
+        # provider request. The SDK probe reopens to verify durable selection.
+        unavailable = copy.deepcopy(composition)
+        for package in unavailable["packages"]:
+            if package["descriptor"]["package"] == "model-access":
+                package["config"] = {"catalog": {"allowed_models": [], "offline": True}}
+        unavailable_path = destination / "summary-unavailable.json"
+        write(unavailable_path, unavailable)
+        results["summary_preparation_rollback"] = lines(
+            run(
+                [
+                    probe,
+                    unavailable_path,
+                    project,
+                    scratch / "summary-preparation.jsonl",
+                    "summary-rollback",
+                ],
+                caller,
+            )
+        )
+
         def respond(body: dict[str, Any], index: int) -> list[dict[str, Any]]:
             if index == 0:
                 return call(
@@ -216,6 +239,52 @@ def main() -> None:
         server = Server(respond)
         try:
             config = configure(destination, composition, server, "sessions")
+            missing_library = destination / "missing-native-library"
+            broken = copy.deepcopy(composition)
+            broken["packages"][0]["library"] = str(missing_library)
+            broken_path = destination / "missing-library.json"
+            write(broken_path, broken)
+            rejected = run(
+                [host, "--composition", broken_path, "--cwd", project, "models", "list"],
+                caller,
+                check=False,
+            )
+            assert rejected.returncode == 1
+            assert (
+                "MissingDependency (" in rejected.stderr and str(missing_library) in rejected.stderr
+            )
+            assert "restore" in rejected.stderr and "composition" in rejected.stderr
+            results["missing_library_diagnostic"] = {"path_reported": True, "repair_reported": True}
+            # Failure and cancellation both occur after a controlled provider
+            # delta, independently of the unavailable-target preparation case.
+            for mode in ("failure", "cancel"):
+                summary_server = Server(
+                    lambda _body, _index: answer("unused"),
+                    partial=mode == "failure",
+                    gated=mode == "cancel",
+                )
+                try:
+                    summary_config = configure(
+                        destination, composition, summary_server, f"summary-{mode}"
+                    )
+                    results[f"summary_{mode}_rollback"] = lines(
+                        run(
+                            [
+                                probe,
+                                summary_config,
+                                project,
+                                scratch / f"summary-{mode}.jsonl",
+                                "summary-cancel" if mode == "cancel" else "summary-rollback",
+                            ],
+                            caller,
+                        )
+                    )
+                    assert summary_server.requests, (
+                        "summary failed before reaching the controlled provider"
+                    )
+                finally:
+                    summary_server.release.set()
+                    summary_server.close()
 
             def command(
                 *args: str | pathlib.Path, check: bool = True
@@ -259,7 +328,40 @@ def main() -> None:
 
             history = scratch / "tree.jsonl"
             events(submit(history, "ROOT_TASK", cwd=project))
+            # Model commands and session control must share saved-cwd recovery.
+            for flag in ("--session", "--resume"):
+                current = command("--composition", config, "models", "current", flag, history)
+                assert current.returncode == 0
+                with_json = command(
+                    "--composition", config, "--json", "models", "current", flag, history
+                )
+                assert json.loads(current.stdout) == json.loads(with_json.stdout)
+            absent = scratch / "absent-session.jsonl"
+            for args in (
+                ("--session", absent, "models", "current"),
+                ("--session", absent, "--continue"),
+                ("session", "metadata", absent, "--name", "not-created"),
+            ):
+                rejected = command("--composition", config, "--cwd", project, *args, check=False)
+                assert rejected.returncode != 0 and not absent.exists()
+            results["cli_saved_session_target"] = {
+                "caller_cwd_ignored": True,
+                "missing_targets_not_created": True,
+            }
             baseline = records(history)
+            before_switch = history.read_bytes()
+            rejected = session("switch", history, "--cwd", relocated, check=False)
+            assert rejected.returncode != 0 and "cwd" in rejected.stderr
+            assert history.read_bytes() == before_switch
+            bad_cwd = scratch / "ordinary-file"
+            bad_cwd.write_text("not a directory", encoding="utf-8")
+            bad_copy = scratch / "bad-copy.jsonl"
+            rejected = session("clone", history, bad_copy, "--cwd", bad_cwd, "--apply", check=False)
+            assert rejected.returncode != 0 and not bad_copy.exists()
+            results["cli_relocation_guards"] = {
+                "switch_preserves_source": True,
+                "file_cwd_creates_no_copy": True,
+            }
             root = next(
                 record["sequence"]
                 for record in baseline

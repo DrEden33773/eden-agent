@@ -6,6 +6,8 @@ The default `model-access` native package provides a model catalog, private cred
 
 Use the same installed composition for these commands. `--global-dir` selects the user configuration directory; `--session` selects durable history. API keys are read from stdin, never from a command-line value.
 
+`--session PATH` (alias `--resume`) may precede the command or follow its action, for example `eden models select anthropic claude-sonnet-4-5 --session conversation.jsonl`. Selection and authentication operations may create a new history (authentication records remain redacted); `current`, `cycle` and other model/router operations with `--session` require an existing one. Saved cwd is restored when no explicit `--cwd` is provided. `select` and `cycle` require a session; use `default` for a global default. Model and authentication operations return JSON results with or without `--json`; event streaming applies to runs and router operations. Use `eden help models select` for action help.
+
 ```sh
 eden models list
 eden auth set anthropic < /private/key-file

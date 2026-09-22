@@ -5,7 +5,6 @@ use eden_cli::cli::{AttachmentKind, Family, Parsed};
 use eden_cli::shell::Shell;
 use eden_protocol::coding::{Block, LOOP};
 use std::ffi::OsString;
-use std::path::PathBuf;
 
 fn main() {
     let args: Vec<OsString> = std::env::args_os().collect();
@@ -70,23 +69,9 @@ async fn prompt(parsed: &Parsed, shell: &Shell) -> Result<i32, Box<dyn std::erro
         }
         return Ok(0);
     }
-    let mut cwd = match &cli.cwd {
-        Some(directory) => directory.clone(),
-        None => std::env::current_dir()?,
-    };
-    let mut history = cli.session.clone();
-    if let Some(path) = &history
-        && path.exists()
-        && cli.cwd.is_none()
-    {
-        let records = eden_kernel::history::read(path)?;
-        cwd = PathBuf::from(
-            records
-                .first()
-                .and_then(|r| r.payload["cwd"].as_str())
-                .ok_or("missing recorded cwd")?,
-        );
-    }
+    let options = eden_cli::session_options(cli, cli.session.clone(), !cli.continue_session)?;
+    let cwd = options.cwd;
+    let mut history = options.history;
     let resume = cli.continue_session;
     let prompt = if resume {
         String::new()
@@ -145,9 +130,7 @@ async fn prompt(parsed: &Parsed, shell: &Shell) -> Result<i32, Box<dyn std::erro
             }
         });
     }
-    let composition = eden_cli::composition(cli)?;
-    let selected: eden_protocol::Composition =
-        serde_json::from_slice(&std::fs::read(&composition)?)?;
+    let (composition, selected) = eden_cli::load_composition(cli)?;
     if !cli.no_session && history.is_none() && selected.roles.contains_key(LOOP) {
         let root = cwd.join(".eden/sessions");
         std::fs::create_dir_all(&root)?;

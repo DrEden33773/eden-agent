@@ -119,6 +119,20 @@ impl Session {
             Some(path) if path.exists() => eden_kernel::history::read(path)?,
             _ => vec![],
         };
+        // A composition switch changes packages, not the immutable session cwd.
+        // Copy/migration creates a new header when relocating a saved session.
+        if rebind
+            && previous
+                .first()
+                .is_some_and(|record| record.payload["cwd"] != cwd)
+        {
+            return Err(Fault::new(
+                "InvalidInput",
+                "cwd",
+                "cannot change saved cwd during a composition switch; use a session copy or \
+                 migration",
+            ));
+        }
         if previous
             .first()
             .is_some_and(|record| record.schema_version == 1)

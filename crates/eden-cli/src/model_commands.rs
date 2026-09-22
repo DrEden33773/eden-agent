@@ -1,6 +1,6 @@
 //! Scriptable model selection and transient login interaction through the same SDK contracts.
 use crate::cli::{AuthAction, Cli, Family, ModelAction, RouterAction};
-use eden_agent::{Session, SessionOptions};
+use eden_agent::Session;
 use eden_protocol::models::{AuthRequest, CatalogRequest, ManagerRequest, ModelSelection};
 use serde_json::{Value, json};
 use std::{
@@ -144,13 +144,19 @@ pub async fn run(cli: &Cli) -> Result<i32, Box<dyn Error>> {
         std::io::stdout().write_all(input.as_bytes())?;
         return Ok(0);
     }
-    let cwd = cli.cwd.clone().unwrap_or(std::env::current_dir()?);
+    let create = matches!(
+        cli.family,
+        Some(
+            Family::Auth { .. }
+                | Family::Models {
+                    action: ModelAction::Select { .. }
+                }
+        )
+    );
+    let options = crate::session_options(cli, cli.session.clone(), create)?;
     let session = Session::open_with_workspace(
         crate::composition(cli)?,
-        SessionOptions {
-            cwd,
-            history: cli.session.clone(),
-        },
+        options,
         crate::workspace_options(cli),
     )
     .await?;

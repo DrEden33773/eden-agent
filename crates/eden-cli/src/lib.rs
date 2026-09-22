@@ -13,6 +13,7 @@ pub mod session_commands;
 pub mod shell;
 /// Terminal palette shared by clap's rendering and runtime messages.
 pub mod style;
+mod validation;
 /// Resources, explicit project trust and contributed commands.
 pub mod workspace_commands;
 
@@ -29,6 +30,37 @@ pub fn workspace_options(cli: &cli::Cli) -> eden_agent::WorkspaceOptions {
         options.project_trust = Some(false);
     }
     options
+}
+
+/// Resolve a saved session before loading plugins. Creation is explicit per
+/// operation; a supplied cwd must never turn an existing-session command into create.
+pub fn session_options(
+    cli: &cli::Cli,
+    history: Option<std::path::PathBuf>,
+    create: bool,
+) -> Result<eden_agent::SessionOptions, Box<dyn std::error::Error>> {
+    let saved_cwd = if let Some(path) = &history
+        && (!create || path.try_exists()?)
+    {
+        let records = eden_kernel::history::read(path)?;
+        if create && records.is_empty() {
+            None
+        } else {
+            Some(std::path::PathBuf::from(
+                records
+                    .first()
+                    .and_then(|r| r.payload["cwd"].as_str())
+                    .ok_or("session has no recorded cwd")?,
+            ))
+        }
+    } else {
+        None
+    };
+    let cwd = match cli.cwd.clone().or(saved_cwd) {
+        Some(cwd) => cwd,
+        None => std::env::current_dir()?,
+    };
+    Ok(eden_agent::SessionOptions { cwd, history })
 }
 
 /// Workspace options for the default run family.
@@ -96,14 +128,45 @@ fn names(values: &[String]) -> Vec<&str> {
 /// The composition this process runs: the explicit file, or the one beside the
 /// installation that owns this executable.
 pub fn composition(cli: &cli::Cli) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-    Ok(match &cli.composition {
+    Ok(load_composition(cli)?.0)
+}
+
+/// Validate the CLI's composition before any session is created, retaining the
+/// decoded value for prompt setup. Session APIs still validate their own load.
+pub fn load_composition(
+    cli: &cli::Cli,
+) -> Result<(std::path::PathBuf, eden_protocol::Composition), Box<dyn std::error::Error>> {
+    let path = match &cli.composition {
         Some(path) => path.clone(),
         None => std::env::current_exe()?
             .parent()
             .and_then(|directory| directory.parent())
             .ok_or("invalid installation layout")?
             .join("composition.json"),
-    })
+    };
+    let bytes = std::fs::read(&path).map_err(|error| {
+        let hint = if error.kind() == std::io::ErrorKind::NotFound && cli.composition.is_none() {
+            "; run the installed bin/eden or pass --composition PATH (source builds need cargo \
+             build --workspace --locked, then python3 scripts/install.py DIR)"
+        } else if error.kind() == std::io::ErrorKind::NotFound {
+            "; check the explicit --composition path"
+        } else {
+            ""
+        };
+        eden_protocol::Fault::new(
+            "FileFailure",
+            "composition",
+            format!("cannot read {}: {error}{hint}", path.display()),
+        )
+    })?;
+    let selected = serde_json::from_slice(&bytes).map_err(|error| {
+        eden_protocol::Fault::new(
+            "InvalidInput",
+            "composition",
+            format!("cannot parse {}: {error}", path.display()),
+        )
+    })?;
+    Ok((path, selected))
 }
 
 /// Wait for a settled run and optionally stream its ordered JSON events.

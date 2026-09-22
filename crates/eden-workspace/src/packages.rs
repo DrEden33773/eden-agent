@@ -228,7 +228,11 @@ pub fn resolve_paths(
                 Fault::new(
                     "MissingDependency",
                     &package.descriptor.package,
-                    e.to_string(),
+                    format!(
+                        "cannot resolve native library {}: {e}; restore the plugin file or select \
+                         a composition with installed libraries",
+                        package.library
+                    ),
                 )
             })?
             .to_string_lossy()

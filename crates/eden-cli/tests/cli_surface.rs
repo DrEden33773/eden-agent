@@ -56,6 +56,223 @@ impl Drop for Scratch {
 }
 
 #[test]
+fn root_options_are_not_silently_discarded_by_commands() {
+    let scratch = Scratch::new();
+    let history = scratch.path().join("empty.jsonl");
+    fs::write(&history, "").unwrap();
+    for prefix in [
+        vec!["--no-session"],
+        vec!["--session", "another.jsonl"],
+        vec!["--continue"],
+        vec!["--thinking", "high"],
+        vec!["--model", "provider/model"],
+        vec!["--history", "another.jsonl"],
+        vec!["--no-context"],
+        vec!["--read-only"],
+        vec!["--attach", "ignored.txt"],
+    ] {
+        let output = eden()
+            .args(&prefix)
+            .args(["session", "info"])
+            .arg(&history)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{prefix:?}: {}",
+            stdout(&output)
+        );
+        assert!(stderr(&output).contains(prefix[0]), "{}", stderr(&output));
+    }
+    let output = eden()
+        .args(["--session", "ignored.jsonl", "--history"])
+        .arg(&history)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
+fn invalid_run_and_queue_values_fail_before_creating_history() {
+    let scratch = Scratch::new();
+    let history = scratch.path().join("never-created.jsonl");
+    for model in ["bad", "provider/", "/model"] {
+        let output = eden()
+            .args(["--model", model, "--session"])
+            .arg(&history)
+            .arg("hello")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+        assert!(!history.exists());
+    }
+    for action in [
+        vec!["enqueue", "hello", "--kind", "typo"],
+        vec!["queue-mode", "--steering", "typo"],
+    ] {
+        let output = eden()
+            .arg("session")
+            .arg(action[0])
+            .arg(&history)
+            .args(&action[1..])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+        assert!(!history.exists());
+    }
+}
+
+#[test]
+fn model_session_requirements_and_positions_are_parsed_before_loading() {
+    for args in [
+        vec!["models", "select", "provider", "model"],
+        vec!["models", "cycle"],
+    ] {
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+        assert!(stderr(&output).contains("--session"));
+    }
+    let scratch = Scratch::new();
+    let history = scratch.path().join("selected.jsonl");
+    for flag in ["--session", "--resume"] {
+        for suffix in [false, true] {
+            let mut cmd = eden();
+            cmd.arg("--composition")
+                .arg(scratch.path().join("missing-composition.json"));
+            if !suffix {
+                cmd.arg(flag).arg(&history);
+            }
+            cmd.args(["models", "select", "provider", "model"]);
+            if suffix {
+                cmd.arg(flag).arg(&history);
+            }
+            let output = cmd.output().unwrap();
+            assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+            assert!(
+                stderr(&output).contains("composition"),
+                "{}",
+                stderr(&output)
+            );
+            assert!(!history.exists());
+        }
+    }
+}
+
+#[test]
+fn copy_actions_reject_options_they_cannot_apply() {
+    for args in [
+        vec!["session", "clone", "source", "destination", "--at", "2"],
+        vec!["session", "recover", "source", "destination", "--at", "2"],
+        vec!["session", "fork", "source", "destination", "--public-only"],
+    ] {
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    }
+    assert!(!stdout(&run(&["session", "clone", "--help"])).contains("--at"));
+    assert!(!stdout(&run(&["session", "fork", "--help"])).contains("--public-only"));
+}
+
+#[test]
+fn explicit_help_is_a_display_request_even_without_an_installation() {
+    let scratch = Scratch::new();
+    for args in [
+        vec!["help"],
+        vec!["help", "models"],
+        vec!["help", "models", "select"],
+    ] {
+        let output = eden()
+            .current_dir(scratch.path())
+            .args(&args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        assert!(stdout(&output).contains("Usage:"));
+        assert!(output.stderr.is_empty());
+    }
+    assert!(!scratch.path().join(".eden").exists());
+    assert_eq!(run(&["help", "unknown-command"]).status.code(), Some(2));
+    let output = eden()
+        .args(["help", "models", "--env-file"])
+        .arg(scratch.path().join("missing.env"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("env file"));
+    let literal = run(&["--", "help"]);
+    assert_eq!(literal.status.code(), Some(1));
+    assert!(!stdout(&literal).contains("Usage:"));
+}
+
+#[test]
+fn every_visible_command_and_argument_explains_its_purpose() {
+    use clap::CommandFactory;
+    fn inspect(command: &clap::Command, path: &str) {
+        assert!(
+            command
+                .get_about()
+                .is_some_and(|text| !text.to_string().trim().is_empty()),
+            "missing summary: {path}"
+        );
+        for arg in command.get_arguments().filter(|arg| !arg.is_hide_set()) {
+            assert!(
+                arg.get_help()
+                    .or(arg.get_long_help())
+                    .is_some_and(|text| !text.to_string().trim().is_empty()),
+                "missing help: {path} {}",
+                arg.get_id()
+            );
+        }
+        for child in command
+            .get_subcommands()
+            .filter(|c| !c.is_hide_set() && c.get_name() != "help")
+        {
+            inspect(child, &format!("{path} {}", child.get_name()));
+        }
+    }
+    let mut command = eden_cli::cli::Cli::command();
+    command.build();
+    inspect(&command, "eden");
+}
+
+#[test]
+fn composition_failures_identify_the_path_and_the_kind_of_repair() {
+    let scratch = Scratch::new();
+    let missing = scratch.path().join("missing-composition.json");
+    let broken = scratch.path().join("broken-composition.json");
+    fs::write(&broken, "{ invalid json").unwrap();
+    for action in [vec!["models", "list"], vec!["hello"]] {
+        for (path, code) in [
+            (&missing, "FileFailure (composition)"),
+            (&broken, "InvalidInput (composition)"),
+        ] {
+            let output = eden()
+                .current_dir(scratch.path())
+                .arg("--composition")
+                .arg(path)
+                .args(&action)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(1));
+            let error = stderr(&output);
+            assert!(
+                error.contains(code) && error.contains(&path.display().to_string()),
+                "{error}"
+            );
+            assert!(
+                !error.contains("install.py"),
+                "explicit paths should not suggest reinstall: {error}"
+            );
+            assert!(!scratch.path().join(".eden").exists());
+        }
+    }
+    let output = run(&["models", "list"]);
+    assert!(
+        stderr(&output).contains("--composition") && stderr(&output).contains("composition.json")
+    );
+}
+
+#[test]
 fn version_is_one_stdout_line_starting_with_the_program_name() {
     for flag in ["--version", "-V"] {
         let output = run(&[flag]);

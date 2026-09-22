@@ -227,6 +227,9 @@ impl Session {
         composition: impl AsRef<Path>,
         options: CopyOptions,
     ) -> Result<CopyPlan, Fault> {
+        if options.target.is_some() && !matches!(options.kind, CopyKind::Fork) {
+            return Err(invalid("a selected copy target is only supported by fork"));
+        }
         let bytes = std::fs::read(&options.source).map_err(|e| invalid(e.to_string()))?;
         let scan = eden_protocol::history::scan_records(&bytes);
         if scan.diagnostic.is_some() && !matches!(options.kind, CopyKind::Recover) {
@@ -247,10 +250,13 @@ impl Session {
             return Err(invalid("upgrade requires a v1 source"));
         }
         let cwd = match options.cwd {
-            Some(path) => std::fs::canonicalize(path)
-                .map_err(|e| invalid(e.to_string()))?
-                .to_string_lossy()
-                .into_owned(),
+            Some(path) => {
+                let path = std::fs::canonicalize(path).map_err(|e| invalid(e.to_string()))?;
+                if !path.is_dir() {
+                    return Err(invalid("copy cwd must be a directory"));
+                }
+                path.to_string_lossy().into_owned()
+            }
             None => first.payload["cwd"]
                 .as_str()
                 .ok_or_else(|| invalid("source cwd missing"))?
@@ -643,63 +649,69 @@ impl Session {
                     )
                     .await?;
                 if summarize {
-                    let new_path = eden_protocol::history::active_path(&session.history().await?)?;
-                    let ids: BTreeSet<_> = new_path.iter().map(|r| r.sequence).collect();
-                    let departed: Vec<_> = old_path
-                        .into_iter()
-                        .filter(|r| !ids.contains(&r.sequence))
-                        .collect();
-                    if !departed.is_empty() {
-                        let reply = session
-                            .0
-                            .kernel
-                            .invoke(
-                                Request {
-                                    session_id: session.id(),
-                                    run_id,
-                                    contract: c::CONTEXT.into(),
-                                    payload: json!(c::ContextInput {
-                                        target: session.freeze_model(run_id).await?,
-                                        resources: session.context_resources().await?,
-                                        tools: session.context_tools().await?,
-                                        action: "branch_summary".into(),
-                                        records: departed,
-                                        instructions: String::new(),
-                                        limits: c::ModelLimits::default(),
-                                        cwd: session.cwd().into(),
-                                        items: vec![]
-                                    }),
-                                },
-                                cancel,
-                            )
-                            .await
-                            .into_result();
-                        if let Err(error) = reply {
-                            if let Some(target) = head {
-                                session
-                                    .service::<_, c::StoreReply>(
+                    // Preparation errors must restore selection just like invoke failures.
+                    let reply = async {
+                        let new_path =
+                            eden_protocol::history::active_path(&session.history().await?)?;
+                        let ids: BTreeSet<_> = new_path.iter().map(|r| r.sequence).collect();
+                        let departed: Vec<_> = old_path
+                            .into_iter()
+                            .filter(|r| !ids.contains(&r.sequence))
+                            .collect();
+                        if !departed.is_empty() {
+                            session
+                                .0
+                                .kernel
+                                .invoke(
+                                    Request {
+                                        session_id: session.id(),
                                         run_id,
-                                        c::STORE,
-                                        &c::StoreRequest::Navigate {
-                                            target,
-                                            branch: old_branch,
-                                        },
-                                    )
-                                    .await
-                                    .map_err(|restore| {
-                                        // Keep this split so rustfmt checks the error handler.
-                                        Fault::new(
-                                            "PersistenceFailure",
-                                            "navigation",
-                                            format!(
-                                                "summary failed ({error}); could not restore \
-                                                 selection: {restore}",
-                                            ),
-                                        )
-                                    })?;
-                            }
-                            return Err(error);
+                                        contract: c::CONTEXT.into(),
+                                        payload: json!(c::ContextInput {
+                                            target: session.freeze_model(run_id).await?,
+                                            resources: session.context_resources().await?,
+                                            tools: session.context_tools().await?,
+                                            action: "branch_summary".into(),
+                                            records: departed,
+                                            instructions: String::new(),
+                                            limits: c::ModelLimits::default(),
+                                            cwd: session.cwd().into(),
+                                            items: vec![]
+                                        }),
+                                    },
+                                    cancel,
+                                )
+                                .await
+                                .into_result()?;
                         }
+                        Ok::<(), Fault>(())
+                    }
+                    .await;
+                    if let Err(error) = reply {
+                        if let Some(target) = head {
+                            session
+                                .service::<_, c::StoreReply>(
+                                    run_id,
+                                    c::STORE,
+                                    &c::StoreRequest::Navigate {
+                                        target,
+                                        branch: old_branch,
+                                    },
+                                )
+                                .await
+                                .map_err(|restore| {
+                                    // Keep this split so rustfmt checks the error handler.
+                                    Fault::new(
+                                        "PersistenceFailure",
+                                        "navigation",
+                                        format!(
+                                            "summary failed ({error}); could not restore \
+                                             selection: {restore}",
+                                        ),
+                                    )
+                                })?;
+                        }
+                        return Err(error);
                     }
                 }
                 Ok(json!("Branch selected; project files unchanged."))
@@ -1059,6 +1071,93 @@ mod tests {
         assert!(copy.iter().all(|r| !r.kind.starts_with("queue_")));
     }
     #[tokio::test]
+    async fn rebinding_cannot_relocate_a_saved_session() {
+        let directory = std::env::temp_dir().join(format!("eden-rebind-cwd-{}", new_session_id()));
+        std::fs::create_dir(&directory).unwrap();
+        let other = directory.join("other");
+        std::fs::create_dir(&other).unwrap();
+        let source = directory.join("source.jsonl");
+        let bytes = eden_protocol::history::encode_transaction(&[r(
+            1,
+            None,
+            "session",
+            json!({ "cwd": std::fs::canonicalize(&directory).unwrap() }),
+        )])
+        .unwrap();
+        std::fs::write(&source, &bytes).unwrap();
+        let result = Session::open_rebound(
+            directory.join("composition-not-loaded.json"),
+            SessionOptions {
+                cwd: other,
+                history: Some(source.clone()),
+            },
+            WorkspaceOptions {
+                global_dir: directory.join("global"),
+                ..Default::default()
+            },
+        )
+        .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(session) => {
+                session.shutdown().await.unwrap();
+                panic!("rebinding must not relocate the saved session");
+            }
+        };
+        assert_eq!(error.source, "cwd", "{error}");
+        assert!(error.message.contains("copy"), "{error}");
+        assert_eq!(std::fs::read(&source).unwrap(), bytes);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[tokio::test]
+    async fn copy_relocation_requires_a_directory() {
+        let directory = std::env::temp_dir().join(format!("eden-copy-cwd-{}", new_session_id()));
+        std::fs::create_dir(&directory).unwrap();
+        let source = directory.join("source.jsonl");
+        let composition = directory.join("composition.json");
+        let file = directory.join("ordinary-file");
+        std::fs::write(&file, "not a directory").unwrap();
+        std::fs::write(&composition, r#"{"packages":[],"roles":{}}"#).unwrap();
+        std::fs::write(
+            &source,
+            eden_protocol::history::encode_transaction(&[r(
+                1,
+                None,
+                "session",
+                json!({ "cwd": "/offline-source" }),
+            )])
+            .unwrap(),
+        )
+        .unwrap();
+        let options = CopyOptions {
+            source,
+            destination: directory.join("copy.jsonl"),
+            kind: CopyKind::Clone,
+            target: None,
+            cwd: Some(file),
+            public_only: false,
+        };
+        let error = Session::plan_copy(&composition, options.clone())
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("directory"), "{error}");
+        assert!(!options.destination.exists());
+        let plan = Session::plan_copy(
+            &composition,
+            CopyOptions {
+                cwd: Some(directory.clone()),
+                ..options
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            PathBuf::from(plan.cwd),
+            std::fs::canonicalize(&directory).unwrap()
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[tokio::test]
     async fn fork_preview_records_selected_node_and_separate_snapshot_tip() {
         let directory = std::env::temp_dir().join(format!("eden-fork-origin-{}", new_session_id()));
         std::fs::create_dir(&directory).unwrap();
@@ -1090,6 +1189,20 @@ mod tests {
         .unwrap();
         assert_eq!(plan.records[0].payload["origin"]["sequence"], 2);
         assert_eq!(plan.records[0].payload["origin"]["source_tip"], 3);
+        let error = Session::plan_copy(
+            &composition,
+            CopyOptions {
+                source: plan.source,
+                destination: directory.join("clone.jsonl"),
+                kind: CopyKind::Clone,
+                target: Some(2),
+                cwd: None,
+                public_only: false,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.message.contains("fork"), "{error}");
         std::fs::remove_dir_all(directory).unwrap();
     }
     #[test]

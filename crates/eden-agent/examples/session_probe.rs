@@ -12,6 +12,63 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cwd: PathBuf::from(&args[2]),
         history: Some(PathBuf::from(&args[3])),
     };
+    if matches!(args[4].as_str(), "summary-rollback" | "summary-cancel") {
+        let session = Session::open_with(&composition, options.clone()).await?;
+        let initial = session.history().await?;
+        let (target, branch) = eden_protocol::history::branch_state(&initial)?;
+        let run = session.set_metadata("before-failed-summary".into(), vec![])?;
+        session.wait(run).await?.into_result()?;
+        let before = session.history().await?;
+        let metadata = before
+            .iter()
+            .find(|r| r.kind == "session_metadata")
+            .unwrap()
+            .sequence;
+        let run = session.navigate(target.unwrap(), "failed-summary".into(), true)?;
+        if args[4] == "summary-cancel" {
+            // Cancel only after the controlled provider's first delta, so this
+            // exercises an in-flight summary rather than pre-admission cancel.
+            tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                let mut sequence = 0;
+                loop {
+                    for event in session.events_after(sequence).await {
+                        sequence = event.sequence;
+                        if event.kind == "model_text_delta" {
+                            return;
+                        }
+                        assert!(
+                            event.kind != "settled" || event.run_id != run,
+                            "summary settled before its provider delta"
+                        );
+                    }
+                }
+            })
+            .await?;
+            session.cancel(run)?;
+        }
+        let terminal = session.wait(run).await?;
+        assert!(
+            if args[4] == "summary-cancel" {
+                matches!(terminal.outcome, Outcome::Cancelled)
+            } else {
+                matches!(terminal.outcome, Outcome::Failed(_))
+            },
+            "{terminal:?}"
+        );
+        assert!(terminal.cleanup_errors.is_empty());
+        session.shutdown().await?;
+        let reopened = Session::open_with(&composition, options).await?;
+        let records = reopened.history().await?;
+        assert_eq!(eden_protocol::history::branch_state(&records)?.1, branch);
+        assert!(
+            eden_protocol::history::active_path(&records)?
+                .iter()
+                .any(|r| r.sequence == metadata)
+        );
+        reopened.shutdown().await?;
+        println!("{}", json!({ "summary_failure_restores_selection": true }));
+        return Ok(());
+    }
     if args[4] == "stale-copy" {
         let destination = PathBuf::from(&args[5]);
         let plan = Session::plan_copy(

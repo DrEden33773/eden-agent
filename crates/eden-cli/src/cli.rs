@@ -41,12 +41,11 @@ pub struct Parsed {
     name = "eden",
     version,
     about = "A Rust coding agent built from replaceable native plugins",
-    disable_help_subcommand = true,
     subcommand_negates_reqs = true,
     override_usage = "eden [OPTIONS] [PROMPT]\n       eden [OPTIONS] <COMMAND> [ARGS]...",
     next_display_order = 800,
     styles = style::styles(),
-    after_help = "Run 'eden <command> --help' for more information on a command."
+    after_help = r"Run 'eden help <command>' or 'eden <command> --help' for more information on a command."
 )]
 pub struct Cli {
     /// Directory to run in
@@ -91,8 +90,8 @@ pub struct Cli {
     /// Continue a saved session instead of submitting a new prompt
     #[arg(long = "continue", requires = "session", conflicts_with = "prompt")]
     pub continue_session: bool,
-    /// Open or create this session history file
-    #[arg(long, visible_alias = "resume", value_name = "PATH")]
+    /// Session for prompt/model/auth/router commands; queries require an existing file
+    #[arg(long, global = true, visible_alias = "resume", value_name = "PATH")]
     pub session: Option<PathBuf>,
     /// Keep the run in memory and write no session file
     #[arg(long, conflicts_with = "session")]
@@ -100,7 +99,7 @@ pub struct Cli {
     /// Print the records of a history file instead of running a prompt
     #[arg(long, value_name = "PATH")]
     pub history: Option<PathBuf>,
-    /// Stream ordered events as JSON lines on stdout
+    /// Stream run/router events as JSON lines; other commands keep their JSON results
     #[arg(long, global = true)]
     pub json: bool,
     /// Accepted for compatibility; the settled result already goes to stdout
@@ -157,12 +156,18 @@ pub enum Family {
         action: RouterAction,
     },
     /// Discover, select and refresh models
+    #[command(
+        after_help = r"Use 'eden models list' for provider and model identifiers. 'eden models select PROVIDER MODEL --session PATH' selects a session model (and may create PATH); 'eden models default PROVIDER MODEL' saves the global default. current/cycle and other commands with --session require an existing file. Model commands print JSON results with or without --json."
+    )]
     Models {
         #[command(subcommand)]
         /// Operation on model metadata or selection.
         action: ModelAction,
     },
-    /// Manage private API keys
+    /// Sign in to providers and manage private API keys
+    #[command(
+        after_help = r"auth set reads a key from stdin; never pass a secret as a command-line value. login uses an interactive browser or device flow. logout clears managed credentials only; inherited environment credentials can still apply. Authentication results are JSON with or without --json."
+    )]
     Auth {
         #[command(subcommand)]
         /// Authentication operation.
@@ -305,12 +310,6 @@ pub struct CopyArgs {
     pub source: PathBuf,
     /// New history file to create
     pub destination: PathBuf,
-    /// Node id to copy from
-    #[arg(long, value_name = "NODE")]
-    pub at: Option<u64>,
-    /// Leave installation-private records out of the copy
-    #[arg(long)]
-    pub public_only: bool,
     /// Write the new file; without it the plan is only previewed
     #[arg(long)]
     pub apply: bool,
@@ -352,7 +351,7 @@ pub enum SessionAction {
         /// Text to queue
         text: String,
         /// Queue kind recorded with the submission
-        #[arg(long, default_value = "follow_up")]
+        #[arg(long, default_value = "follow_up", value_parser = ["steering", "follow_up"])]
         kind: String,
     },
     /// Choose how steering and follow-up submissions are handled
@@ -360,10 +359,10 @@ pub enum SessionAction {
         /// Session history file
         path: PathBuf,
         /// Mode for steering submissions
-        #[arg(long, default_value = "one")]
+        #[arg(long, default_value = "one", value_parser = ["one", "all"])]
         steering: String,
         /// Mode for follow-up submissions
-        #[arg(long, default_value = "one")]
+        #[arg(long, default_value = "one", value_parser = ["one", "all"])]
         follow_up: String,
     },
     /// Attach a recorded attachment to the head of the session
@@ -412,11 +411,14 @@ pub enum SessionAction {
         #[arg(long, value_name = "TAG")]
         tag: Vec<String>,
     },
-    /// Preview or create an independent copy that keeps the whole tree
+    /// Preview or copy the selected ancestry into an independent session
     Fork {
         /// The source, destination and options shared by every copy action.
         #[command(flatten)]
         copy: CopyArgs,
+        /// Node whose ancestry to copy; defaults to the current head
+        #[arg(long, value_name = "NODE")]
+        at: Option<u64>,
     },
     /// Preview or create an independent copy that keeps the whole tree
     Clone {
@@ -447,51 +449,76 @@ pub enum SessionAction {
         /// The source, destination and options shared by every copy action.
         #[command(flatten)]
         copy: CopyArgs,
+        /// Omit plugin-private and provider state from the new session
+        #[arg(long)]
+        public_only: bool,
     },
 }
 
 /// Model management shares the session and catalog services used by inference.
 #[derive(Debug, Subcommand)]
-#[allow(missing_docs)]
 pub enum ModelAction {
+    /// List model identities, capabilities and availability as JSON
     List,
+    /// Refresh the configured remote catalog, retaining cached data on failure
     Refresh,
+    /// Save the remote catalog source URL
     Source {
+        /// HTTP(S) catalog endpoint, without credentials in the URL
         url: String,
     },
+    /// Save this session's model selection; requires --session PATH
     Select {
+        /// Provider identifier from models list
         provider: String,
+        /// Exact model identifier within that provider
         model: String,
+        /// Requested reasoning level; support depends on the selected model
         #[arg(long)]
         thinking: Option<String>,
     },
+    /// Save a global default model for subsequent selection
     Default {
+        /// Provider identifier from models list
         provider: String,
+        /// Exact model identifier within that provider
         model: String,
+        /// Requested reasoning level; support depends on the selected model
         #[arg(long)]
         thinking: Option<String>,
     },
+    /// Read the selected model; --session selects an existing history
     Current,
+    /// Select the next configured model in an existing --session
     Cycle,
 }
 /// Secret input is read from stdin, never accepted as a command-line argument.
 #[derive(Debug, Subcommand)]
-#[allow(missing_docs)]
 pub enum AuthAction {
+    /// Sign in interactively using a provider's browser or device flow
     Login {
+        /// Provider identifier to authenticate
         provider: String,
+        /// Provider-supported login flow (omitted to use its default)
         #[arg(long, value_parser = ["browser", "device"])]
         method: Option<String>,
     },
+    /// Refresh a provider's managed authorization
     Refresh {
+        /// Provider identifier whose authorization to refresh
         provider: String,
     },
+    /// Store a provider API key read from stdin
     Set {
+        /// Provider identifier that owns the key
         provider: String,
     },
+    /// Remove managed credentials; environment credentials remain available
     Logout {
+        /// Provider identifier whose managed credentials to remove
         provider: String,
     },
+    /// Private subprocess entry for interruptible authorization input
     #[command(hide = true)]
     ReadInput,
 }
@@ -573,6 +600,12 @@ pub fn parse(args: &[OsString], color: ColorChoice) -> Parsed {
         prompt_conflict(family).exit();
     }
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    if let Err(message) = crate::validation::validate(&cli, &matches) {
+        Cli::command()
+            .color(color)
+            .error(ErrorKind::ArgumentConflict, message)
+            .exit();
+    }
     Parsed {
         cli,
         matches,
@@ -704,6 +737,7 @@ fn distance(left: &str, right: &str) -> usize {
 fn probe_command() -> clap::Command {
     Cli::command()
         .ignore_errors(true)
+        .disable_help_subcommand(true)
         .disable_help_flag(true)
         .disable_version_flag(true)
         .arg(
@@ -835,25 +869,37 @@ mod tests {
 
 /// Remote mutations wait for completion; Ctrl-C requests remote stop before exiting.
 #[derive(Debug, Subcommand)]
-#[allow(missing_docs)]
 pub enum RouterAction {
+    /// List the router's observed models and lifecycle state
     List,
+    /// Re-read router state without replaying load or download requests
     Reconnect,
+    /// Search the router's downloadable model catalog
     Search {
+        /// Search text understood by the configured router
         query: String,
     },
+    /// Download a model and wait for remote completion
     Download {
+        /// Download target, commonly owner/repo:quant
         model: String,
     },
+    /// Load a model and wait until it is ready
     Load {
+        /// Model identifier returned by router list or search
         model: String,
+        /// Explicitly unload other observed loaded or sleeping models
         #[arg(long)]
         unload_others: bool,
     },
+    /// Unload a model without deleting its downloaded files
     Unload {
+        /// Loaded model identifier
         model: String,
     },
+    /// Request remote cancellation without deleting model files
     Cancel {
+        /// Model identifier of the operation to cancel
         model: String,
     },
 }

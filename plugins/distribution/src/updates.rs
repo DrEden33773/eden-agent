@@ -20,6 +20,7 @@ use std::{
 #[derive(Clone, Deserialize, Default)]
 struct Config {
     managed_root: Option<PathBuf>,
+    installation_root: Option<PathBuf>,
     #[serde(default)]
     sources: Vec<Tracking>,
 }
@@ -90,6 +91,16 @@ pub(crate) fn attach(
             "updates.managed_root must be absolute",
         ));
     }
+    if config
+        .installation_root
+        .as_ref()
+        .is_some_and(|p| !p.is_absolute())
+    {
+        return Err(error(
+            "InvalidInput",
+            "updates.installation_root must be absolute",
+        ));
+    }
     let updater = Arc::new(Updater { manager, config });
     Ok(
         package.service(UPDATE_SOURCE, move |request: UpdateRequest, cx| {
@@ -111,12 +122,68 @@ pub(crate) fn attach(
 }
 
 impl Updater {
+    fn plugin_versions(&self, name: &str) -> Result<std::collections::BTreeSet<String>, Fault> {
+        Ok(self
+            .manager
+            .list()?
+            .into_iter()
+            .filter_map(|receipt| {
+                if let Some(manifest) = receipt.manifest {
+                    (manifest.descriptor.package == name).then_some(manifest.descriptor.version)
+                } else {
+                    receipt
+                        .resources
+                        .and_then(|resources| (resources.name == name).then_some(resources.version))
+                }
+            })
+            .collect())
+    }
+    fn host_version(&self) -> Result<String, Fault> {
+        let root = if let Some(root) = &self.config.installation_root {
+            root.clone()
+        } else {
+            let executable = std::env::current_exe().map_err(io)?;
+            executable
+                .parent()
+                .and_then(Path::parent)
+                .ok_or_else(|| error("InvalidInput", "host executable has no installation root"))?
+                .to_path_buf()
+        };
+        if root.join("release.json").exists() || self.config.installation_root.is_some() {
+            Ok(read_manifest(&root)?.version)
+        } else {
+            // Source builds have no release manifest; only they use the compiled crate identity.
+            Ok(env!("CARGO_PKG_VERSION").into())
+        }
+    }
     fn status(&self, target: UpdateTarget) -> Result<UpdateStatus, Fault> {
         let managed = target == UpdateTarget::Host && self.config.managed_root.is_some();
-        let current_version = if target == UpdateTarget::Host {
-            Some(env!("CARGO_PKG_VERSION").into())
+        let mut instructions = if managed {
+            "Prepare the complete release, then explicitly activate it. Existing sessions keep \
+             their installation."
         } else {
-            None
+            "Use the original installation channel: rebuild and install a source checkout, or \
+             replace a manually installed complete directory. Plugin preparation does not enable \
+             it; use package.resolve for a new composition."
+        }
+        .to_owned();
+        let current_version = match &target {
+            UpdateTarget::Host => Some(self.host_version()?),
+            UpdateTarget::Plugin { name } => {
+                let versions = self.plugin_versions(name)?;
+                if !versions.is_empty() {
+                    instructions.push_str(&format!(
+                        " Installed versions: {}. These are prepared identities, not a session's \
+                         active binding.",
+                        versions.iter().cloned().collect::<Vec<_>>().join(", ")
+                    ));
+                }
+                if versions.len() == 1 {
+                    versions.into_iter().next()
+                } else {
+                    None
+                }
+            }
         };
         Ok(UpdateStatus {
             configured: target == UpdateTarget::Host
@@ -124,15 +191,7 @@ impl Updater {
             target,
             current_version,
             managed,
-            instructions: if managed {
-                "Prepare the complete release, then explicitly activate it. Existing sessions keep \
-                 their installation."
-            } else {
-                "Use the original installation channel: rebuild and install a source checkout, or \
-                 replace a manually installed complete directory. Plugin preparation does not \
-                 enable it; use package.resolve for a new composition."
-            }
-            .into(),
+            instructions,
             candidate: None,
         })
     }
@@ -154,13 +213,7 @@ impl Updater {
                     if let Some(name) = name {
                         let target = UpdateTarget::Plugin { name: name.clone() };
                         if !targets.iter().any(|s| s.target == target) {
-                            let mut status = self.status(target)?;
-                            status.current_version = receipt
-                                .manifest
-                                .as_ref()
-                                .map(|m| m.descriptor.version.clone())
-                                .or_else(|| receipt.resources.as_ref().map(|r| r.version.clone()));
-                            targets.push(status);
+                            targets.push(self.status(target)?);
                         }
                     }
                 }
@@ -186,6 +239,21 @@ impl Updater {
                             .as_str()
                             .ok_or_else(|| error("InvalidRelease", "missing release tag"))?
                             .to_owned();
+                        let installed = match &target {
+                            UpdateTarget::Plugin { name } => {
+                                self.plugin_versions(name)?.contains(&version)
+                            }
+                            UpdateTarget::Host => {
+                                status
+                                    .current_version
+                                    .as_deref()
+                                    .map(|s| s.strip_prefix('v').unwrap_or(s))
+                                    == Some(version.strip_prefix('v').unwrap_or(&version))
+                            }
+                        };
+                        if installed {
+                            return Ok(UpdateReply::Checked { status });
+                        }
                         let source = match discovery {
                             Discovery::Local { .. } => release["source"].clone(),
                             Discovery::Github { asset, .. } => {
@@ -214,19 +282,12 @@ impl Updater {
                                 })
                             }
                         };
-                        if status
-                            .current_version
-                            .as_deref()
-                            .map(|s| s.trim_start_matches('v'))
-                            != Some(version.trim_start_matches('v'))
-                        {
-                            status.candidate = Some(Candidate {
-                                target,
-                                version,
-                                source,
-                                channel,
-                            });
-                        }
+                        status.candidate = Some(Candidate {
+                            target,
+                            version,
+                            source,
+                            channel,
+                        });
                     }
                 }
                 Ok(UpdateReply::Checked { status })

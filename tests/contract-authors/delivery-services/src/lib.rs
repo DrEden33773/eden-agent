@@ -8,18 +8,47 @@ fn descriptor() -> Descriptor {
     Descriptor {
         package: "delivery-services".into(),
         version: "0.1.0".into(),
-        provides: vec![EXPORTER.into(), SHARE_TARGET.into(), UPDATE_SOURCE.into()],
+        provides: vec![
+            EXPORTER.into(),
+            SHARE_TARGET.into(),
+            UPDATE_SOURCE.into(),
+            eden_plugin_sdk::protocol::INSTANCE_STOP.into(),
+        ],
     }
 }
-fn create(_: Value) -> Result<Package, Fault> {
+fn create(config: Value) -> Result<Package, Fault> {
+    let fail = config["fail"].as_bool().unwrap_or(false);
+    let bytes = config["bytes"].as_u64().unwrap_or(0) as usize;
+    let marker = config["marker"].as_str().map(std::path::PathBuf::from);
     Ok(Package::new("delivery-services")
-        .service(EXPORTER, |request: ExportRequest, _| async move {
-            Ok(Artifact {
-                filename: "conversation.html".into(),
-                media_type: "text/html".into(),
-                content: format!("External renderer: {} records", request.records.len()),
-                warnings: vec![],
-            })
+        .service(EXPORTER, move |request: ExportRequest, cx| {
+            let marker = marker.clone();
+            async move {
+                if let Some(marker) = marker {
+                    let cleaned = marker.with_extension("cleaned");
+                    cx.scope
+                        .cleanup(async move {
+                            std::fs::write(cleaned, "done")
+                                .map_err(|e| Fault::new("FileFailure", "author", e.to_string()))
+                        })
+                        .unwrap();
+                    std::fs::write(marker, "ready").unwrap();
+                    std::future::pending::<()>().await;
+                }
+                if fail {
+                    return Err(Fault::new("ExportFailure", "author", "export failed"));
+                }
+                Ok(Artifact {
+                    filename: "conversation.html".into(),
+                    media_type: "text/html".into(),
+                    content: if bytes > 0 {
+                        "x".repeat(bytes)
+                    } else {
+                        format!("External renderer: {} records", request.records.len())
+                    },
+                    warnings: vec![],
+                })
+            }
         })
         .service(SHARE_TARGET, |request: PublishRequest, _| async move {
             if !request.confirmed {
@@ -46,6 +75,16 @@ fn create(_: Value) -> Result<Package, Fault> {
                     candidate: None,
                 }],
             })
-        }))
+        })
+        .service(
+            eden_plugin_sdk::protocol::INSTANCE_STOP,
+            move |_: Value, _| async move {
+                if fail {
+                    Err(Fault::new("CleanupFailure", "author", "finalizer failed"))
+                } else {
+                    Ok(Value::Null)
+                }
+            },
+        ))
 }
 eden_plugin_sdk::export_plugin!(descriptor, create);

@@ -39,6 +39,7 @@ struct State {
 }
 struct Inner {
     maintenance: startup::Maintenance,
+    previews: Mutex<BTreeMap<String, eden_protocol::delivery::Artifact>>,
     id: u64,
     kernel: generation::Generation,
     workspace_options: WorkspaceOptions,
@@ -233,6 +234,7 @@ impl Session {
         }
         let session = Self(Arc::new(Inner {
             maintenance: Default::default(),
+            previews: Mutex::new(BTreeMap::new()),
             id,
             kernel: generation::Generation::new(kernel),
             workspace_options,

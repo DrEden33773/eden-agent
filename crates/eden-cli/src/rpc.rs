@@ -31,6 +31,7 @@ const METHODS: &[&str] = &[
     "history",
     "export",
     "share",
+    "preview.forget",
     "update",
     "tree",
     "queue",
@@ -267,9 +268,25 @@ fn dispatch(
                     .cloned()
                     .unwrap_or(json!("html")),
             )?;
-            query(async move { Ok(json!(s.export(selection, format).await?)) })
+            query(async move {
+                let (id, artifact) = s.prepare_export(selection, format).await?;
+                let mut value = json!(artifact);
+                value["preview_id"] = json!(id);
+                Ok(value)
+            })
         }
-        "share" => Dispatch::Run(session.publish(parameter(request.params.clone())?)?, false),
+        "share" => {
+            let run = if let Some(id) = request.params.get("preview_id").and_then(Value::as_str) {
+                session.publish_preview(id, field(request, "confirmed")?)?
+            } else {
+                session.publish(parameter(request.params.clone())?)?
+            };
+            Dispatch::Run(run, false)
+        }
+        "preview.forget" => Dispatch::Immediate(json!({
+            "forgotten":
+                session.forget_preview(&field::<String>(request, "preview_id")?),
+        })),
         "update" => Dispatch::Run(session.update(parameter(request.params.clone())?)?, false),
         "history" => query(async move { Ok(json!(s.history().await?)) }),
         "tree" => query(async move {

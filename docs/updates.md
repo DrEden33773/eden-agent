@@ -24,6 +24,10 @@ The distribution package accepts an optional `updates` object alongside its exis
 }
 ```
 
+Host `current_version` comes from the running executable's installation-root `release.json`; source builds without that manifest use the compiled crate version. Embedding hosts whose executable is outside Eden's `bin/` directory can set an absolute `updates.installation_root` explicitly. The active-launcher pointer does not change the identity of an already running old host.
+
+Plugin checks compare the candidate with every installed exact version, so a version already prepared is not offered again. With one installed version, `current_version` contains it; with multiple versions it is null and `instructions` lists those identities without implying a latest version or an active session binding. Discover and Check use the same installed inventory.
+
 Omit `managed_root` for source/manual installs. Plugin sources are opt-in and independent of their locked installed identities. Controlled tests may configure `{"kind":"local","path":"/absolute/releases.json"}`; that file contains GitHub-shaped release objects with a `source` field using the existing distribution local/HTTPS source format. This adapter performs no network requests and is not an official release channel.
 
 ## Complete release format

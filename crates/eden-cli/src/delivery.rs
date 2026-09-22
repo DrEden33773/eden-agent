@@ -38,10 +38,11 @@ pub async fn run(cli: &Cli) -> Result<i32, Box<dyn Error>> {
                 jsonl,
             }) => {
                 let artifact = delivery
-                    .export_file(
+                    .export_file_with_cancel(
                         path,
                         serde_json::from_str(selection)?,
                         if *jsonl { Format::Jsonl } else { Format::Html },
+                        cancel.clone(),
                     )
                     .await?;
                 let digest = save_preview(&artifact, destination)?;
@@ -97,7 +98,13 @@ pub async fn run(cli: &Cli) -> Result<i32, Box<dyn Error>> {
     signal.abort();
     let stopped = delivery.shutdown().await;
     match (result, stopped) {
-        (Err(e), _) => Err(e),
+        (Err(e), Err(cleanup)) => Err(eden_protocol::Fault::new(
+            "CleanupFailure",
+            "delivery",
+            format!("operation failed: {e}; shutdown failed: {cleanup}"),
+        )
+        .into()),
+        (Err(e), Ok(())) => Err(e),
         (Ok(_), Err(e)) => Err(e.into()),
         (Ok(code), Ok(())) => Ok(code),
     }

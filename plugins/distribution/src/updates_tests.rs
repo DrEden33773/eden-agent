@@ -81,6 +81,7 @@ impl Fixture {
             }),
             config: Config {
                 managed_root: Some(self.0.join("managed")),
+                installation_root: None,
                 sources: vec![],
             },
         }
@@ -291,4 +292,136 @@ fn latest_activation_fails_closed_and_ignores_pending_record() {
     )
     .unwrap();
     assert!(active_installation(&fixture.0).is_err());
+}
+
+#[tokio::test]
+async fn plugin_check_suppresses_any_installed_exact_version_and_reports_single_identity() {
+    let fixture = Fixture::new();
+    let mut updater = fixture.updater();
+    let index = fixture.0.join("plugin-releases.json");
+    let target = UpdateTarget::Plugin {
+        name: "example".into(),
+    };
+    updater.config.sources.push(Tracking {
+        target: target.clone(),
+        source: Discovery::Local {
+            path: index.clone(),
+        },
+    });
+    for version in ["2.0.0", "10.0.0"] {
+        let root = fixture.0.join(version);
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            serde_json::to_vec(&json!({ "resources": { "name": "example", "version": version } }))
+                .unwrap(),
+        )
+        .unwrap();
+        updater
+            .manager
+            .install(Source::Local { path: root }, false, Cancellation::default())
+            .await
+            .unwrap();
+        if version == "2.0.0" {
+            assert_eq!(
+                updater
+                    .status(target.clone())
+                    .unwrap()
+                    .current_version
+                    .as_deref(),
+                Some("2.0.0")
+            );
+        }
+    }
+    let status = updater.status(target.clone()).unwrap();
+    assert!(status.current_version.is_none());
+    assert!(status.instructions.contains("2.0.0") && status.instructions.contains("10.0.0"));
+    let UpdateReply::Discovered { targets } = updater
+        .dispatch(UpdateRequest::Discover, Cancellation::default())
+        .await
+        .unwrap()
+    else {
+        panic!("expected discovery")
+    };
+    let discovered = targets
+        .iter()
+        .find(|status| status.target == target)
+        .unwrap();
+    assert!(discovered.current_version.is_none());
+    assert_eq!(discovered.instructions, status.instructions);
+    for (version, available) in [
+        ("2.0.0", false),
+        ("10.0.0", false),
+        ("11.0.0", true),
+        ("v2.0.0", true),
+    ] {
+        std::fs::write(
+            &index,
+            serde_json::to_vec(&json!([{
+                "tag_name": version,
+                "draft": false,
+                "prerelease": false,
+                "source": { "kind": "local", "path": "unused" },
+            }]))
+            .unwrap(),
+        )
+        .unwrap();
+        let UpdateReply::Checked { status } = updater
+            .dispatch(
+                UpdateRequest::Check {
+                    target: target.clone(),
+                    channel: Channel::Stable,
+                },
+                Cancellation::default(),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected check")
+        };
+        assert_eq!(status.candidate.is_some(), available, "{version}");
+    }
+}
+
+#[tokio::test]
+async fn host_check_uses_running_installation_manifest_instead_of_crate_version() {
+    let fixture = Fixture::new();
+    let candidate = fixture.candidate("v4.2.0-preview", true);
+    let mut updater = fixture.updater();
+    updater.config = serde_json::from_value(json!({
+        "managed_root": fixture.0.join("managed"),
+        "installation_root": candidate.source["path"],
+    }))
+    .unwrap();
+    let index = fixture.0.join("host-releases.json");
+    std::fs::write(
+        &index,
+        serde_json::to_vec(&json!([{
+            "tag_name": candidate.version,
+            "prerelease": true,
+            "draft": false,
+            "source": candidate.source,
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+    updater.config.sources.push(Tracking {
+        target: UpdateTarget::Host,
+        source: Discovery::Local { path: index },
+    });
+    let UpdateReply::Checked { status } = updater
+        .dispatch(
+            UpdateRequest::Check {
+                target: UpdateTarget::Host,
+                channel: Channel::Prerelease,
+            },
+            Cancellation::default(),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("expected check")
+    };
+    assert_eq!(status.current_version.as_deref(), Some("v4.2.0-preview"));
+    assert!(status.candidate.is_none());
 }

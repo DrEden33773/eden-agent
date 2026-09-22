@@ -7,10 +7,12 @@ import json
 import os
 import pathlib
 import platform
+import signal
 import socket
 import subprocess
 import tempfile
 import threading
+import time
 from typing import Any
 
 from delivery_updates import verify_updates
@@ -150,7 +152,11 @@ def main() -> None:
         author = author_artifact("delivery-services")
         roles = ["eden.exporter.v1", "eden.share-target.v1", "eden.update-source.v1"]
         external = {
-            "packages": [package("delivery-services", roles, str(author), target())],
+            "packages": [
+                package(
+                    "delivery-services", [*roles, "eden.instance-stop.v1"], str(author), target()
+                )
+            ],
             "roles": {role: "delivery-services" for role in roles},
         }
         write(config, external)
@@ -162,10 +168,61 @@ def main() -> None:
             "content"
         ] == custom.read_text(encoding="utf-8")
         assert invoke(["update"])["targets"][0]["current_version"] == "external-source"
+        if os.name != "nt":
+            marker = scratch / "export.ready"
+            external["packages"][0]["config"] = {"marker": str(marker)}
+            write(config, external)
+            cancelled_preview = scratch / "cancelled.html"
+            pending = subprocess.Popen(
+                [
+                    str(host),
+                    "--composition",
+                    str(config),
+                    "export",
+                    str(history),
+                    str(cancelled_preview),
+                ],
+                cwd=scratch,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                deadline = time.monotonic() + 10
+                while (
+                    not marker.exists() and pending.poll() is None and time.monotonic() < deadline
+                ):
+                    time.sleep(0.02)
+                assert marker.exists(), "exporter did not become ready"
+                pending.send_signal(signal.SIGINT)
+                _, error = pending.communicate(timeout=10)
+                assert pending.returncode != 0 and "Cancelled" in error
+                assert marker.with_suffix(".cleaned").exists() and not cancelled_preview.exists()
+            finally:
+                if pending.poll() is None:
+                    pending.kill()
+                    pending.wait()
+        external["packages"][0]["config"] = {"fail": True}
+        write(config, external)
+        failed = invoke(["export", history, scratch / "failed.html"], False)
+        assert "export failed" in failed.stderr and "finalizer failed" in failed.stderr
         results["three_external_sdk_roles"] = True
         write(config, selected)
         sdk = run([example("delivery_probe"), config], scratch, env=environment)
         assert sdk.returncode == 0, (sdk.stdout, sdk.stderr)
+        selected["packages"].append(
+            package(
+                "delivery-services",
+                [*roles, "eden.instance-stop.v1"],
+                str(author),
+                target(),
+                {"bytes": 2 * 1024 * 1024},
+            )
+        )
+        selected["roles"]["eden.exporter.v1"] = "delivery-services"
+        selected["roles"]["eden.share-target.v1"] = "delivery-services"
+        write(config, selected)
         process = subprocess.Popen(
             [str(host), "--offline-startup", "--composition", str(config), "rpc"],
             cwd=scratch,
@@ -209,7 +266,35 @@ def main() -> None:
 
         try:
             exported = request("export", "export", {})
-            assert "Conversation" in exported["content"]
+            assert len(exported["content"]) == 2 * 1024 * 1024
+            process.stdin.write(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "id": "publish",
+                        "session_id": session_id,
+                        "method": "share",
+                        "params": {"preview_id": exported["preview_id"], "confirmed": True},
+                    }
+                )
+                + "\n"
+            )
+            process.stdin.flush()
+            while True:
+                value = json.loads(process.stdout.readline())
+                if (
+                    value.get("id") == "publish"
+                    and value.get("type") == "event"
+                    and value["event"]["kind"] == "settled"
+                ):
+                    assert (
+                        len(value["event"]["payload"]["outcome"]["value"]["content"])
+                        == 2 * 1024 * 1024
+                    ), value
+                    break
+            assert request("forget", "preview.forget", {"preview_id": exported["preview_id"]})[
+                "forgotten"
+            ]
             request("close", "shutdown", {})
             assert process.wait(timeout=20) == 0
         finally:
@@ -222,6 +307,12 @@ def main() -> None:
                 process.stderr.close()
         assert not list((scratch / "global").rglob("*.jsonl"))
         results["sdk_rpc_memory_export"] = True
+        selected["packages"] = [
+            p for p in selected["packages"] if p["descriptor"]["package"] != "delivery-services"
+        ]
+        selected["roles"]["eden.exporter.v1"] = "local-export"
+        selected["roles"]["eden.share-target.v1"] = "github-share"
+        write(config, selected)
         results["updates"] = verify_updates(installation, scratch / "updates")
     write(ROOT / "artifacts/delivery-verification.json", results)
     print(json.dumps(results, indent=2))

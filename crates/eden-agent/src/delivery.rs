@@ -121,6 +121,17 @@ impl Delivery {
         selection: Selection,
         format: Format,
     ) -> Result<Artifact, Fault> {
+        self.export_file_with_cancel(path, selection, format, Cancellation::default())
+            .await
+    }
+    /// Export with caller-owned cancellation; cleanup settles before the result is returned.
+    pub async fn export_file_with_cancel(
+        &self,
+        path: impl AsRef<Path>,
+        selection: Selection,
+        format: Format,
+        cancel: Cancellation,
+    ) -> Result<Artifact, Fault> {
         let records = history::read(path.as_ref())?;
         serde_json::from_value(
             self.invoke(
@@ -130,7 +141,7 @@ impl Delivery {
                     selection,
                     format
                 }),
-                Cancellation::default(),
+                cancel,
             )
             .await?,
         )
@@ -156,7 +167,7 @@ fn data_fault(e: serde_json::Error) -> Fault {
     Fault::new("InvalidInput", "delivery", e.to_string())
 }
 /// Save the exact preview plus a SHA-256 identity for an explicit later publication.
-/// Both destinations must be new files; the returned identity is supplied to `read_preview`.
+/// The destination must be a new file; the returned identity is supplied to `read_preview`.
 pub fn save_preview(artifact: &Artifact, path: &Path) -> Result<String, Fault> {
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
@@ -216,6 +227,56 @@ impl Session {
             },
         )
         .await
+    }
+    /// Retain up to eight fixed previews so transports can publish large artifacts by identity.
+    /// A client discards an unused preview explicitly; identical bytes reuse the same identity.
+    pub async fn prepare_export(
+        &self,
+        selection: Selection,
+        format: Format,
+    ) -> Result<(String, Artifact), Fault> {
+        let artifact = self.export(selection, format).await?;
+        let id = preview_digest(&serde_json::to_vec(&artifact).map_err(data_fault)?);
+        let mut previews = self.0.previews.lock().unwrap_or_else(|e| e.into_inner());
+        if previews.len() >= 8 && !previews.contains_key(&id) {
+            return Err(Fault::new(
+                "PreviewLimit",
+                "delivery",
+                "discard an unused preview before preparing another",
+            ));
+        }
+        previews.insert(id.clone(), artifact.clone());
+        Ok((id, artifact))
+    }
+    /// Release an unused preview; publication never rereads conversation history.
+    pub fn forget_preview(&self, id: &str) -> bool {
+        self.0
+            .previews
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id)
+            .is_some()
+    }
+    /// Publish the exact retained preview with explicit confirmation, without a transport-sized upload.
+    pub fn publish_preview(&self, id: &str, confirmed: bool) -> Result<u64, Fault> {
+        let artifact = self
+            .0
+            .previews
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .cloned()
+            .ok_or_else(|| {
+                Fault::new(
+                    "UnknownPreview",
+                    "delivery",
+                    "preview missing; prepare and review again",
+                )
+            })?;
+        self.publish(PublishRequest {
+            artifact,
+            confirmed,
+        })
     }
     /// Publish previously previewed bytes as a cancellable owned operation, never fresh history.
     pub fn publish(&self, request: PublishRequest) -> Result<u64, Fault> {

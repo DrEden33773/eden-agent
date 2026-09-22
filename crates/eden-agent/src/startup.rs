@@ -60,9 +60,6 @@ impl Session {
             return;
         };
         if !kernel.has_role(UPDATE_SOURCE) {
-            self.0
-                .events
-                .push(0, "update_check", json!({ "status": "unconfigured" }));
             return;
         }
         let events = self.0.events.clone();

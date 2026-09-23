@@ -162,6 +162,9 @@ impl Session {
             {
                 terminal.cleanup_errors.push(error);
             }
+            if let Err(error) = session.persist_static_presentation(run_id).await {
+                terminal.cleanup_errors.push(error);
+            }
             let mut state = session.0.state.lock().unwrap_or_else(|e| e.into_inner());
             state.commands.remove(&run_id);
             session.0.presentation.end_run(run_id);

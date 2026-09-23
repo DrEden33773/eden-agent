@@ -42,7 +42,11 @@ pub(crate) fn validate(cli: &Cli, matches: &ArgMatches) -> Result<(), String> {
         if cli.session.is_some()
             && !matches!(
                 family,
-                Family::Models { .. } | Family::Auth { .. } | Family::Router { .. } | Family::Rpc
+                Family::Models { .. }
+                    | Family::Auth { .. }
+                    | Family::Router { .. }
+                    | Family::Rpc
+                    | Family::Live { .. }
             )
         {
             return Err(

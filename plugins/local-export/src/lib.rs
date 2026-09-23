@@ -162,6 +162,17 @@ fn project(request: &ExportRequest) -> Result<(Vec<Value>, Vec<String>), Fault> 
             "content": content,
         }));
     }
+    for view in eden_plugin_sdk::protocol::presentation::static_views(&request.records, s) {
+        entries.push(json!({
+            "sequence": view
+                .view
+                .source
+                .as_ref()
+                .and_then(|source| source.record_sequence),
+            "run_id": view.run_id,
+            "content": { "type": "presentation", "view": view },
+        }));
+    }
     Ok((entries, warnings))
 }
 fn export(request: ExportRequest) -> Result<Artifact, Fault> {

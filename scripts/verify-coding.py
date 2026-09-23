@@ -155,8 +155,10 @@ def events(
 ) -> list[dict[str, Any]]:
     data = [json.loads(line) for line in result.stdout.splitlines()]
     accepted = next(i for i, item in enumerate(data) if item["kind"] == "accepted")
-    assert data[-1]["kind"] == "settled" and accepted < len(data) - 1
-    terminal = data[-1]["payload"]
+    # Background session events (run_id 0) may arrive after this submission settles.
+    submission = [item for item in data[accepted:] if item["run_id"] == data[accepted]["run_id"]]
+    assert len(submission) > 1 and submission[-1]["kind"] == "settled"
+    terminal = submission[-1]["payload"]
     assert (terminal["outcome"]["status"] == "completed") is completed, terminal
     assert terminal["cleanup_errors"] == [], terminal
     assert [e["sequence"] for e in data] == list(

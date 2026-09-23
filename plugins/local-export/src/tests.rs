@@ -202,10 +202,18 @@ fn static_presentation_obeys_selection_without_leaking_title_or_fallback() {
                     "nodes": [
                         { "kind": "diff", "id": "diff", "before": "old", "after": "new" },
                         {
-                            "kind": "attachment",
-                            "id": "file",
-                            "name": "FILE_CANARY",
-                            "record_sequence": 2,
+                            "kind": "group",
+                            "id": "attachment-group",
+                            "title": "FILE_CANARY",
+                            "children": [
+                                {
+                                    "kind": "attachment",
+                                    "id": "file",
+                                    "name": "FILE_CANARY",
+                                    "record_sequence": 2,
+                                },
+                                { "kind": "text", "id": "safe", "text": "safe text" },
+                            ],
                         },
                         { "kind": "button", "id": "old-action", "action": "run", "label": "Run" }
                     ],
@@ -215,13 +223,29 @@ fn static_presentation_obeys_selection_without_leaking_title_or_fallback() {
     ];
     let artifact = export(ExportRequest {
         records: records.clone(),
-        selection: Selection::default(),
+        selection: Selection {
+            full_outputs: true,
+            ..Selection::default()
+        },
         format: Format::Jsonl,
     })
     .unwrap();
     assert!(artifact.content.contains("diff"));
     assert!(!artifact.content.contains("FILE_CANARY"));
     assert!(!artifact.content.contains("old-action"));
+    let artifact = export(ExportRequest {
+        records: records.clone(),
+        selection: Selection {
+            messages: false,
+            attachments: true,
+            full_outputs: true,
+            ..Selection::default()
+        },
+        format: Format::Jsonl,
+    })
+    .unwrap();
+    assert!(artifact.content.contains("safe text"));
+    assert!(!artifact.content.contains("FILE_CANARY"));
     let artifact = export(ExportRequest {
         records,
         selection: Selection {

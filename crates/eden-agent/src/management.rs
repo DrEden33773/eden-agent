@@ -1004,6 +1004,7 @@ mod tests {
             &copy,
             &eden_protocol::delivery::Selection {
                 attachments: true,
+                full_outputs: true,
                 ..Default::default()
             },
         );

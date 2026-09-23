@@ -127,7 +127,7 @@ pub async fn run_host(
                 let (stream, _) = accepted?;
                 let shared = shared.clone();
                 tokio::spawn(async move {
-                    let _ = serve(stream, shared).await;
+                    let _ = serve(stream, Host::Live(shared)).await;
                 });
             },
             _ = stopped.changed() => {
@@ -144,20 +144,44 @@ pub async fn run_host(
     removed?;
     Ok(0)
 }
-async fn serve(mut stream: TcpStream, shared: Arc<Shared>) -> Result<(), Fault> {
+enum Host {
+    Live(Arc<Shared>),
+    Static(Arc<StaticShared>),
+}
+impl Host {
+    fn token(&self) -> &str {
+        match self {
+            Self::Live(shared) => &shared.token,
+            Self::Static(shared) => &shared.token,
+        }
+    }
+    fn web_root(&self) -> Option<&Path> {
+        match self {
+            Self::Live(shared) => shared.web_root.as_deref(),
+            Self::Static(shared) => shared.web_root.as_deref(),
+        }
+    }
+    async fn dispatch(&self, method: &str, path: &str, body: Value) -> Result<Value, Fault> {
+        match self {
+            Self::Live(shared) => dispatch(shared, method, path, body).await,
+            Self::Static(shared) => dispatch_static(shared, method, path).await,
+        }
+    }
+}
+async fn serve(mut stream: TcpStream, host: Host) -> Result<(), Fault> {
     let request = read_request(&mut stream).await;
     let (status, mime, bytes) = match request {
         Ok((method, path, headers, body)) => {
             let route = path.split('?').next().unwrap_or("/");
             if method == "GET" && (route == "/" || route.starts_with("/assets/")) {
-                match static_file(shared.web_root.as_deref(), &shared.token, route, &path) {
+                match static_file(host.web_root(), host.token(), route, &path) {
                     Ok((mime, bytes)) => (200, mime, bytes),
                     Err(error) => json_error(error),
                 }
-            } else if headers.get("x-eden-token") != Some(&shared.token) {
-                json_error(fault("Unauthorized", "invalid live host token"))
+            } else if headers.get("x-eden-token").map(String::as_str) != Some(host.token()) {
+                json_error(fault("Unauthorized", "invalid host token"))
             } else {
-                match dispatch(&shared, &method, &path, body).await {
+                match host.dispatch(&method, &path, body).await {
                     Ok(value) => (
                         200,
                         "application/json",
@@ -550,7 +574,7 @@ pub async fn run_read_host(
                 let (stream, _) = accepted?;
                 let shared = shared.clone();
                 tokio::spawn(async move {
-                    let _ = serve_static(stream, shared).await;
+                    let _ = serve(stream, Host::Static(shared)).await;
                 });
             },
             _ = stopped.changed() => if *stopped.borrow() {
@@ -562,64 +586,26 @@ pub async fn run_read_host(
     std::fs::remove_file(endpoint_path)?;
     Ok(0)
 }
-async fn serve_static(mut stream: TcpStream, shared: Arc<StaticShared>) -> Result<(), Fault> {
-    let result = read_request(&mut stream).await;
-    let (status, mime, bytes) = match result {
-        Ok((method, path, headers, _)) => {
-            let route = path.split('?').next().unwrap_or("/");
-            if method == "GET" && (route == "/" || route.starts_with("/assets/")) {
-                match static_file(shared.web_root.as_deref(), &shared.token, route, &path) {
-                    Ok((mime, bytes)) => (200, mime, bytes),
-                    Err(error) => json_error(error),
-                }
-            } else if headers.get("x-eden-token") != Some(&shared.token) {
-                json_error(fault("Unauthorized", "invalid read host token"))
-            } else {
-                let response = match (method.as_str(), route) {
-                    ("POST", "/attach") => Ok(json!({ "attachment": 1 })),
-                    ("POST", "/detach") => Ok(json!({ "detached": true })),
-                    ("GET", "/snapshot") => {
-                        if query_parameter(&path, "after").is_some() {
-                            tokio::time::sleep(Duration::from_secs(4)).await;
-                        }
-                        Ok(json!({
-                            "presentation": shared.snapshot,
-                            "state": { "active_run": null, "closed": true, "read_only": true },
-                        }))
-                    }
-                    ("POST", "/shutdown") => {
-                        shared.stop.send_replace(true);
-                        Ok(json!({ "stopping": true }))
-                    }
-                    _ => Err(fault("Unsupported", "saved presentation is read-only")),
-                };
-                match response {
-                    Ok(value) => (
-                        200,
-                        "application/json",
-                        serde_json::to_vec(&json!({ "ok": true, "result": value })).unwrap(),
-                    ),
-                    Err(error) => json_error(error),
-                }
+async fn dispatch_static(shared: &StaticShared, method: &str, path: &str) -> Result<Value, Fault> {
+    let route = path.split('?').next().unwrap_or(path);
+    match (method, route) {
+        ("POST", "/attach") => Ok(json!({ "attachment": 1 })),
+        ("POST", "/detach") => Ok(json!({ "detached": true })),
+        ("GET", "/snapshot") => {
+            if query_parameter(path, "after").is_some() {
+                tokio::time::sleep(Duration::from_secs(4)).await;
             }
+            Ok(json!({
+                "presentation": shared.snapshot,
+                "state": { "active_run": null, "closed": true, "read_only": true },
+            }))
         }
-        Err(error) => json_error(error),
-    };
-    let header = format!(
-        "HTTP/1.1 {status} {}\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: \
-         close\r\nCache-Control: no-store\r\n\r\n",
-        if status == 200 { "OK" } else { "Error" },
-        bytes.len()
-    );
-    stream
-        .write_all(header.as_bytes())
-        .await
-        .map_err(|error| fault("OutputFailure", error.to_string()))?;
-    stream
-        .write_all(&bytes)
-        .await
-        .map_err(|error| fault("OutputFailure", error.to_string()))?;
-    Ok(())
+        ("POST", "/shutdown") => {
+            shared.stop.send_replace(true);
+            Ok(json!({ "stopping": true }))
+        }
+        _ => Err(fault("Unsupported", "saved presentation is read-only")),
+    }
 }
 /// A small HTTP client for the terminal adapter and installed process probe.
 pub async fn call(

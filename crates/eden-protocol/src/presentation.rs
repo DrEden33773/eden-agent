@@ -349,7 +349,8 @@ pub fn static_views(records: &[Record], selection: &Selection) -> Vec<LiveView> 
     let attachments: BTreeSet<u64> = path
         .iter()
         .filter(|record| {
-            record.kind == "attachment" || contains_embedded_attachment(&record.payload)
+            (record.kind == "attachment" || contains_embedded_attachment(&record.payload))
+                && attachment_record_selected(record, selection)
         })
         .map(|record| record.sequence)
         .collect();
@@ -379,6 +380,7 @@ pub fn static_views(records: &[Record], selection: &Selection) -> Vec<LiveView> 
             };
             let run_id = raw.get("run_id").and_then(Value::as_u64);
             if !class_selected(source.class, selection)
+                || (source.class == ContentClass::Tool && !selection.full_outputs)
                 || run_id != Some(record.run_id)
                 || run_id != Some(origin.run_id)
                 || !source_record_matches(source.class, origin)
@@ -388,12 +390,16 @@ pub fn static_views(records: &[Record], selection: &Selection) -> Vec<LiveView> 
             let Some(fallback) = raw.get("fallback").and_then(Value::as_str) else {
                 continue;
             };
-            let had_attachment = raw
-                .get("nodes")
-                .and_then(Value::as_array)
-                .is_some_and(|nodes| nodes.iter().any(contains_attachment));
+            let has_excluded_attachment =
+                raw.get("nodes")
+                    .and_then(Value::as_array)
+                    .is_some_and(|nodes| {
+                        nodes
+                            .iter()
+                            .any(|node| excluded_attachment(node, &attachments))
+                    });
             let hide_attachment_text =
-                !selection.attachments && (had_attachment || saved.version != VERSION);
+                has_excluded_attachment || (!selection.attachments && saved.version != VERSION);
             let title = if hide_attachment_text {
                 "Saved presentation"
             } else {
@@ -504,7 +510,18 @@ fn remap_nodes(nodes: &mut Vec<Value>, mapping: &std::collections::BTreeMap<u64,
             true
         }
         Some("text" | "code" | "diff" | "table" | "status" | "form" | "button") => true,
-        _ => false,
+        _ => {
+            if let Some(old) = node.get("record_sequence").and_then(Value::as_u64) {
+                let Some(new) = mapping.get(&old) else {
+                    return false;
+                };
+                node["record_sequence"] = serde_json::json!(new);
+            }
+            if let Some(children) = node.get_mut("children").and_then(Value::as_array_mut) {
+                remap_nodes(children, mapping);
+            }
+            true
+        }
     });
 }
 
@@ -551,12 +568,34 @@ fn contains_embedded_attachment(value: &Value) -> bool {
         _ => false,
     }
 }
-fn contains_attachment(node: &Value) -> bool {
-    node.get("kind").and_then(Value::as_str) == Some("attachment")
+fn attachment_record_selected(record: &Record, selection: &Selection) -> bool {
+    if !selection.attachments
+        || (!selection.runs.is_empty() && !selection.runs.contains(&record.run_id))
+    {
+        return false;
+    }
+    match record.kind.as_str() {
+        "message" | "queue_delivered" => selection.messages,
+        "tool_result" => selection.tools && selection.full_outputs,
+        "attachment" => true,
+        kind if kind.contains('.') => selection.extensions,
+        _ => false,
+    }
+}
+fn excluded_attachment(node: &Value, allowed: &BTreeSet<u64>) -> bool {
+    (node.get("kind").and_then(Value::as_str) == Some("attachment")
+        && node
+            .get("record_sequence")
+            .and_then(Value::as_u64)
+            .is_none_or(|sequence| !allowed.contains(&sequence)))
         || node
             .get("children")
             .and_then(Value::as_array)
-            .is_some_and(|children| children.iter().any(contains_attachment))
+            .is_some_and(|children| {
+                children
+                    .iter()
+                    .any(|child| excluded_attachment(child, allowed))
+            })
 }
 fn static_node(raw: &Value, attachments: &BTreeSet<u64>, selection: &Selection) -> Option<Node> {
     if raw.get("kind").and_then(Value::as_str) == Some("group") {
@@ -568,9 +607,30 @@ fn static_node(raw: &Value, attachments: &BTreeSet<u64>, selection: &Selection) 
             .collect();
         return Some(Node::Group {
             id: raw.get("id")?.as_str()?.into(),
-            title: raw.get("title")?.as_str()?.into(),
+            title: if excluded_attachment(raw, attachments) {
+                "Saved group".into()
+            } else {
+                raw.get("title")?.as_str()?.into()
+            },
             children,
         });
+    }
+    if let Some(children) = raw.get("children").and_then(Value::as_array) {
+        let children: Vec<Node> = children
+            .iter()
+            .filter_map(|child| static_node(child, attachments, selection))
+            .collect();
+        if !children.is_empty() {
+            return Some(Node::Group {
+                id: raw
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .into(),
+                title: "Additional content".into(),
+                children,
+            });
+        }
     }
     let node: Node = serde_json::from_value(raw.clone()).ok()?;
     match node {
@@ -679,7 +739,12 @@ mod static_tests {
     #[test]
     fn selection_drops_actions_and_attachment_metadata_without_losing_the_diff() {
         let records = history();
-        let views = static_views(&records, &Selection::default());
+        assert!(static_views(&records, &Selection::default()).is_empty());
+        let selection = Selection {
+            full_outputs: true,
+            ..Selection::default()
+        };
+        let views = static_views(&records, &selection);
         assert_eq!(views.len(), 1);
         assert!(!views[0].active);
         assert_eq!(views[0].view.title, "Saved presentation");
@@ -690,17 +755,47 @@ mod static_tests {
         ));
         let selection = Selection {
             tools: false,
+            full_outputs: true,
             ..Selection::default()
         };
         assert!(static_views(&records, &selection).is_empty());
         let selection = Selection {
             attachments: true,
+            full_outputs: true,
             ..Selection::default()
         };
         assert!(matches!(
             static_views(&records, &selection)[0].view.nodes.as_slice(),
             [Node::Diff { .. }, Node::Attachment { .. }]
         ));
+    }
+    #[test]
+    fn excluded_attachment_target_scrubs_parent_titles_and_fallback() {
+        let mut records = history();
+        records[3].payload["views"][0]["nodes"] = json!([{
+            "kind": "group",
+            "id": "group",
+            "title": "FILE_CANARY",
+            "children": [
+                { "kind": "attachment", "id": "file", "name": "FILE_CANARY", "record_sequence": 2 },
+                { "kind": "text", "id": "safe", "text": "visible" }
+            ],
+        }]);
+        let selection = Selection {
+            messages: false,
+            attachments: true,
+            full_outputs: true,
+            ..Selection::default()
+        };
+        let views = static_views(&records, &selection);
+        let bytes = serde_json::to_string(&views).unwrap();
+        assert_eq!(views.len(), 1);
+        assert!(!bytes.contains("FILE_CANARY"));
+        assert!(bytes.contains("visible"));
+        assert!(
+            matches!(&views[0].view.nodes[0], Node::Group { title, children, .. }
+            if title == "Saved group" && matches!(children.as_slice(), [Node::Text { .. }]))
+        );
     }
     #[test]
     fn copy_rebases_source_and_attachment_and_drops_missing_references() {
@@ -712,6 +807,24 @@ mod static_tests {
         assert_eq!(payload["views"][0]["nodes"].as_array().unwrap().len(), 2);
         remap_static_record(&mut payload, &BTreeMap::new());
         assert!(payload["views"].as_array().unwrap().is_empty());
+        let mut future = history()[3].payload.clone();
+        future["views"][0]["nodes"] = json!([{
+            "kind": "future_chart",
+            "id": "chart",
+            "children": [
+                { "kind": "text", "id": "label", "text": "still readable" },
+                { "kind": "attachment", "id": "file", "name": "review.pdf", "record_sequence": 2 }
+            ],
+        }]);
+        remap_static_record(&mut future, &BTreeMap::from([(2, 8), (3, 9)]));
+        assert_eq!(
+            future["views"][0]["nodes"][0]["children"][0]["text"],
+            "still readable"
+        );
+        assert_eq!(
+            future["views"][0]["nodes"][0]["children"][1]["record_sequence"],
+            8
+        );
     }
     #[test]
     fn unknown_nodes_keep_known_siblings_and_future_versions_use_fallback() {
@@ -727,6 +840,7 @@ mod static_tests {
         }]);
         let selection = Selection {
             attachments: true,
+            full_outputs: true,
             ..Selection::default()
         };
         let views = static_views(&records, &selection);

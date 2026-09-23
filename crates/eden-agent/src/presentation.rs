@@ -202,6 +202,9 @@ impl Hub {
             self.bump(&mut state);
         }
     }
+    // A saved view inherits its source record's selection class. Resolve a missing
+    // sequence from the run's latest matching content; a terminal is only a
+    // fallback for results that have no separate committed tool/extension node.
     pub(crate) fn static_record(&self, run_id: u64, records: &[c::Record]) -> p::StaticRecord {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let views = state
@@ -582,6 +585,19 @@ impl Session {
         }
         state.activity.remove(&attachment);
         hub.bump(&mut state);
+        Ok(())
+    }
+    /// Commit the last source-bound views after a run's terminal record settles.
+    pub(crate) async fn persist_static_presentation(&self, run_id: u64) -> Result<(), Fault> {
+        if !self.0.coding || !self.0.kernel.available() {
+            return Ok(());
+        }
+        let records = self.history().await?;
+        let saved = self.0.presentation.static_record(run_id, &records);
+        if !saved.views.is_empty() {
+            self.commit(run_id, "presentation_static", serde_json::json!(saved))
+                .await?;
+        }
         Ok(())
     }
     /// Capture one atomic live sequence with its current views and activity.

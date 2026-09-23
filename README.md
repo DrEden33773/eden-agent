@@ -69,4 +69,4 @@ Rust consumers can use the [embedding API](docs/embedding.md); subprocess client
 
 See [export, explicit sharing and startup maintenance](docs/delivery.md) for reading snapshots and delivery services, and [updates](docs/updates.md) for complete-installation transactions.
 
-The [live presentation contract](docs/presentation.md) provides one semantic Rust plugin view for minimal Ratatui and React/Spectrum adapters through an explicit local shared host; static history projection is a later slice.
+The [presentation contract](docs/presentation.md) provides one semantic Rust plugin view for minimal Ratatui and React/Spectrum adapters through an explicit local shared host, plus plugin-free read-only access to saved semantic views.

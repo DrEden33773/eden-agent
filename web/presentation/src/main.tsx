@@ -54,7 +54,7 @@ type Snapshot = {
   views: View[];
   activity: { attachment: number; frontend: string; target: ActivityTarget }[];
 };
-type State = { active_run: number | null; closed: boolean };
+type State = { active_run: number | null; closed: boolean; read_only?: boolean };
 type Frame = { presentation: Snapshot; state: State };
 type Fault = { code: string; message: string };
 const token = new URLSearchParams(location.search).get("token") ?? "";
@@ -434,12 +434,14 @@ function App() {
     <Provider theme={defaultTheme} colorScheme="dark">
       <main>
         <header>
-          <h1>Eden live</h1>
+          <h1>{frame?.state.read_only ? "Eden saved presentation" : "Eden live"}</h1>
           <span>Session {frame?.presentation.session_id ?? "connecting"}</span>
         </header>
         <div className="status" role="status">
           {others.map((item) => `${item.frontend} is typing in ${item.target.kind}`).join(" · ") ||
-            "Connected to the shared session"}
+            (frame?.state.read_only
+              ? "Read-only saved history"
+              : "Connected to the shared session")}
         </div>
         <section className="views" aria-label="Live presentation">
           {frame?.presentation.views.map((view) => (
@@ -460,44 +462,46 @@ function App() {
           ))}
           {frame?.presentation.views.length === 0 && <p>Waiting for a live view.</p>}
         </section>
-        <footer>
-          <TextField
-            label="Message"
-            value={composer}
-            onChange={changeComposer}
-            onBlur={stopActivity}
-            width="100%"
-          />
-          <div className="controls">
-            <Button variant="cta" onPress={() => void send("prompt")}>
-              Send
-            </Button>
-            <Button variant="secondary" onPress={() => void send("steering")}>
-              Steer
-            </Button>
-            <Button variant="secondary" onPress={() => void send("follow_up")}>
-              Follow up
-            </Button>
-            {pendingAttempt && (
-              <Button variant="secondary" onPress={() => void retryPending()}>
-                Retry last request
+        {!frame?.state.read_only && (
+          <footer>
+            <TextField
+              label="Message"
+              value={composer}
+              onChange={changeComposer}
+              onBlur={stopActivity}
+              width="100%"
+            />
+            <div className="controls">
+              <Button variant="cta" onPress={() => void send("prompt")}>
+                Send
               </Button>
-            )}
-            <Button
-              variant="negative"
-              isDisabled={!frame?.state.active_run}
-              onPress={() => {
-                stopActivity();
-                void api("/cancel", { run_id: frame?.state.active_run })
-                  .then(() => setMessage("Cancellation requested"))
-                  .catch((error) => setMessage(String(error)));
-              }}
-            >
-              Cancel run
-            </Button>
-          </div>
-          <p role="status">{message}</p>
-        </footer>
+              <Button variant="secondary" onPress={() => void send("steering")}>
+                Steer
+              </Button>
+              <Button variant="secondary" onPress={() => void send("follow_up")}>
+                Follow up
+              </Button>
+              {pendingAttempt && (
+                <Button variant="secondary" onPress={() => void retryPending()}>
+                  Retry last request
+                </Button>
+              )}
+              <Button
+                variant="negative"
+                isDisabled={!frame?.state.active_run}
+                onPress={() => {
+                  stopActivity();
+                  void api("/cancel", { run_id: frame?.state.active_run })
+                    .then(() => setMessage("Cancellation requested"))
+                    .catch((error) => setMessage(String(error)));
+                }}
+              >
+                Cancel run
+              </Button>
+            </div>
+            <p role="status">{message}</p>
+          </footer>
+        )}
       </main>
     </Provider>
   );

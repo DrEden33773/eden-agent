@@ -201,6 +201,9 @@ fn copy_records(
                 );
             }
         }
+        if copy.kind == "presentation_static" {
+            eden_protocol::presentation::remap_static_record(&mut copy.payload, &mapping);
+        }
         if copy.kind == "model_response"
             && let Some(generation) = copy.payload["usage_generation"].as_u64()
             && generation != 0
@@ -941,6 +944,77 @@ mod tests {
             kind: kind.into(),
             payload,
         }
+    }
+    #[test]
+    fn copied_static_presentation_rebases_both_record_references() {
+        let records = vec![
+            r(1, None, "session", json!({})),
+            r(
+                2,
+                Some(1),
+                "message",
+                json!({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{
+                        "type": "file",
+                        "name": "review.pdf",
+                        "media_type": "application/pdf",
+                        "data": "AA==",
+                    }],
+                }),
+            ),
+            r(3, Some(2), "provider_state", json!({ "private": true })),
+            r(4, Some(3), "terminal", json!({ "status": "completed" })),
+            r(
+                5,
+                Some(4),
+                "presentation_static",
+                json!({
+                    "version": 1,
+                    "views": [{
+                        "owner": "author",
+                        "run_id": 1,
+                        "revision": 1,
+                        "active": false,
+                        "id": "result",
+                        "slot": "tool_result",
+                        "title": "Result",
+                        "fallback": "Result",
+                        "platforms": [],
+                        "source": { "record_sequence": 4, "class": "tool" },
+                        "nodes": [{
+                            "kind": "attachment",
+                            "id": "file",
+                            "name": "review.pdf",
+                            "record_sequence": 2,
+                        }],
+                    }],
+                }),
+            ),
+        ];
+        let copy = copy_records(&records, &CopyKind::Clone, None, 99, true).unwrap();
+        assert_eq!(copy.len(), 4);
+        assert_eq!(copy[3].payload["views"][0]["source"]["record_sequence"], 3);
+        assert_eq!(
+            copy[3].payload["views"][0]["nodes"][0]["record_sequence"],
+            2
+        );
+        let views = eden_protocol::presentation::static_views(
+            &copy,
+            &eden_protocol::delivery::Selection {
+                attachments: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(views.len(), 1);
+        assert!(matches!(
+            views[0].view.nodes.as_slice(),
+            [eden_protocol::presentation::Node::Attachment {
+                record_sequence: 2,
+                ..
+            }]
+        ));
     }
     #[test]
     fn fork_keeps_ancestors_and_rebases_identity() {

@@ -163,3 +163,74 @@ fn selected_thinking_extracts_display_text_inside_provider_envelope() {
     assert!(!artifact.content.contains("SIGNATURE_CANARY"));
     assert!(!artifact.content.contains("private-target"));
 }
+
+#[test]
+fn static_presentation_obeys_selection_without_leaking_title_or_fallback() {
+    let records = vec![
+        record(1, "session", json!({})),
+        record(
+            2,
+            "message",
+            json!({
+                "type": "message",
+                "role": "assistant",
+                "content": [{
+                    "type": "file",
+                    "name": "FILE_CANARY",
+                    "media_type": "application/pdf",
+                    "data": "AA==",
+                }],
+            }),
+        ),
+        record(3, "terminal", json!({ "status": "completed" })),
+        record(
+            4,
+            "presentation_static",
+            json!({
+                "version": 1,
+                "views": [{
+                    "owner": "author",
+                    "run_id": 1,
+                    "revision": 1,
+                    "active": false,
+                    "id": "view",
+                    "slot": "tool_result",
+                    "title": "FILE_CANARY",
+                    "fallback": "FILE_CANARY",
+                    "platforms": [],
+                    "source": { "record_sequence": 3, "class": "tool" },
+                    "nodes": [
+                        { "kind": "diff", "id": "diff", "before": "old", "after": "new" },
+                        {
+                            "kind": "attachment",
+                            "id": "file",
+                            "name": "FILE_CANARY",
+                            "record_sequence": 2,
+                        },
+                        { "kind": "button", "id": "old-action", "action": "run", "label": "Run" }
+                    ],
+                }],
+            }),
+        ),
+    ];
+    let artifact = export(ExportRequest {
+        records: records.clone(),
+        selection: Selection::default(),
+        format: Format::Jsonl,
+    })
+    .unwrap();
+    assert!(artifact.content.contains("diff"));
+    assert!(!artifact.content.contains("FILE_CANARY"));
+    assert!(!artifact.content.contains("old-action"));
+    let artifact = export(ExportRequest {
+        records,
+        selection: Selection {
+            tools: false,
+            ..Selection::default()
+        },
+        format: Format::Jsonl,
+    })
+    .unwrap();
+    assert!(!artifact.content.contains("diff"));
+    assert!(!artifact.content.contains("FILE_CANARY"));
+}

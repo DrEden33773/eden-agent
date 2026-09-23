@@ -4,6 +4,7 @@
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -11,11 +12,26 @@ import time
 import urllib.error
 import urllib.request
 
-from install import ROLES, ROOT, package, target
+from install import ROLES, ROOT, build_target, library, package, target
 from verification import author_artifact, installed, prepare
 
 ACTION = "eden.presentation.action.v1"
-PROVIDES = [ROLES[0], ACTION, *ROLES[1:]]
+CODING = "eden.coding-loop.v2"
+CODING_CONTEXT = "eden.coding-context.v2"
+CODING_PROVIDER = "eden.coding-provider.v1"
+CODING_TOOL = "eden.coding-tool.v1"
+QUEUE = "eden.submission-queue.v2"
+STORE = "eden.session-store.v2"
+PROVIDES = [
+    ROLES[0],
+    CODING_CONTEXT,
+    CODING_PROVIDER,
+    CODING_TOOL,
+    QUEUE,
+    CODING,
+    ACTION,
+    *ROLES[1:],
+]
 
 
 def call(endpoint: dict, route: str, body: dict | None = None) -> dict:
@@ -138,25 +154,94 @@ def tui_keyboard_probe(binary: pathlib.Path, endpoint_file: pathlib.Path, endpoi
         os.close(master)
 
 
+def read_tui_probe(binary: pathlib.Path, endpoint_file: pathlib.Path) -> bool:
+    """Open the saved result through the same terminal renderer without its plugin."""
+    if os.name == "nt":
+        return False
+    import fcntl
+    import pty
+    import select
+    import struct
+    import termios
+
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 110, 0, 0))
+    client = subprocess.Popen(
+        [binary, "live-tui", "--endpoint", endpoint_file],
+        cwd=endpoint_file.parent,
+        stdin=slave,
+        stdout=slave,
+        stderr=subprocess.PIPE,
+        env={**os.environ, "TERM": "xterm-256color"},
+    )
+    os.close(slave)
+    try:
+        output = bytearray()
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([master], [], [], 0.2)
+            if ready:
+                output.extend(os.read(master, 65536))
+            if b"read-only" in output and b"fn old()" in output and b"src/main.rs" in output:
+                break
+        else:
+            raise AssertionError(("saved TUI content missing", bytes(output[-800:])))
+        os.write(master, b"")
+        while client.poll() is None and time.monotonic() < deadline:
+            ready, _, _ = select.select([master], [], [], 0.1)
+            if ready:
+                try:
+                    os.read(master, 65536)
+                except OSError:
+                    break
+        assert client.wait(timeout=1) == 0
+        return True
+    finally:
+        if client.poll() is None:
+            client.kill()
+            client.wait()
+        os.close(master)
+
+
 def main() -> None:
     prepare()
     destination = installed(ROOT / "artifacts/install-presentation", controlled=True)
     with tempfile.TemporaryDirectory(prefix="eden-presentation-") as temp:
         scratch = pathlib.Path(temp)
         binary = destination / "bin" / ("eden.exe" if sys.platform == "win32" else "eden")
-        native = author_artifact("presentation-live")
+        native = scratch / author_artifact("presentation-live").name
+        shutil.copy2(author_artifact("presentation-live"), native)
         composition = {
-            "packages": [package("presentation-live", PROVIDES, str(native), target())],
-            "roles": {role: "presentation-live" for role in ROLES},
+            "packages": [
+                package("presentation-live", PROVIDES, str(native), target()),
+                package(
+                    "local-history",
+                    [STORE],
+                    str(build_target() / "debug" / library("eden_local_history")),
+                    target(),
+                ),
+            ],
+            "roles": {
+                **{role: "presentation-live" for role in ROLES},
+                CODING: "presentation-live",
+                CODING_CONTEXT: "presentation-live",
+                CODING_PROVIDER: "presentation-live",
+                CODING_TOOL: "presentation-live",
+                QUEUE: "presentation-live",
+                STORE: "local-history",
+            },
             "resource_packages": [],
         }
         composition_file = scratch / "composition.json"
         composition_file.write_text(json.dumps(composition), encoding="utf-8")
         endpoint_file = scratch / "endpoint.json"
+        history_file = scratch / "history.jsonl"
         command = [
             binary,
             "--composition",
             composition_file,
+            "--session",
+            history_file,
             "--offline-startup",
             "--no-trust-project",
             "live",
@@ -285,7 +370,67 @@ def main() -> None:
             tui_keyboard = tui_keyboard_probe(binary, endpoint_file, endpoint)
             call(endpoint, "/shutdown", {})
             assert host.wait(timeout=15) == 0
-            assert not endpoint_file.exists()
+            assert history_file.is_file()
+            records = [
+                record
+                for line in history_file.read_text(encoding="utf-8").splitlines()
+                for record in json.loads(line).get("transaction", [json.loads(line)])
+            ]
+            saved = [record for record in records if record["kind"] == "presentation_static"]
+            assert len(saved) >= 2, [record["kind"] for record in records]
+            assert any(
+                node["kind"] == "diff"
+                for record in saved
+                for view in record["payload"]["views"]
+                for node in view["nodes"]
+            )
+            native.unlink()
+            shutil.copy2(history_file, ROOT / "artifacts/presentation-history.jsonl")
+            read_endpoint_file = scratch / "read-endpoint.json"
+            read_command = [
+                binary,
+                "read",
+                history_file,
+                "--endpoint",
+                read_endpoint_file,
+            ]
+            if web_root.is_dir():
+                read_command.extend(["--web-root", web_root])
+            reader = subprocess.Popen(
+                read_command, cwd=scratch, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            )
+            try:
+                for _ in range(100):
+                    if read_endpoint_file.is_file():
+                        break
+                    if reader.poll() is not None:
+                        raise AssertionError(reader.communicate())
+                    time.sleep(0.05)
+                read_endpoint = json.loads(read_endpoint_file.read_text(encoding="utf-8"))
+                static = call(read_endpoint, "/snapshot")
+                assert static["state"]["read_only"] is True
+                assert all(not view["active"] for view in static["presentation"]["views"])
+                assert any(
+                    node["kind"] == "diff"
+                    for view in static["presentation"]["views"]
+                    for node in view["nodes"]
+                )
+                saved_tui = read_tui_probe(binary, read_endpoint_file)
+                for route, body in (
+                    ("/action", action),
+                    ("/prompt", {"request_id": "read-only", "text": "run"}),
+                ):
+                    try:
+                        call(read_endpoint, route, body)
+                        raise AssertionError(f"{route} executed in read-only history")
+                    except RuntimeError as error:
+                        assert "Unsupported" in str(error)
+                call(read_endpoint, "/shutdown", {})
+                assert reader.wait(timeout=15) == 0
+            finally:
+                if reader.poll() is None:
+                    reader.kill()
+                    reader.wait()
             evidence = {
                 "session_id": endpoint["session_id"],
                 "view_revision": view["revision"],
@@ -294,6 +439,9 @@ def main() -> None:
                 "late_dialog_run": late,
                 "host_exit": 0,
                 "tui_keyboard": tui_keyboard,
+                "static_views": len(static["presentation"]["views"]),
+                "plugin_removed_read_only": True,
+                "saved_tui": saved_tui,
             }
             artifact = ROOT / "artifacts/presentation-verification.json"
             artifact.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
@@ -302,7 +450,7 @@ def main() -> None:
             if host.poll() is None:
                 host.kill()
                 host.wait()
-            if host.returncode and host.stderr is not None:
+            if host.returncode and host.stderr is not None and not host.stderr.closed:
                 print(host.stderr.read(), file=sys.stderr)
 
 

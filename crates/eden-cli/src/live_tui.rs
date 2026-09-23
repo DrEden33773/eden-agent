@@ -47,6 +47,7 @@ enum Focus {
 struct Screen {
     snapshot: Snapshot,
     active_run: Option<u64>,
+    read_only: bool,
     composer: String,
     drafts: BTreeMap<DraftKey, Value>,
     option_cursor: BTreeMap<DraftKey, usize>,
@@ -233,10 +234,17 @@ fn draw(terminal: &mut RawTerminal, screen: &Screen) -> io::Result<()> {
             .collect::<Vec<_>>()
             .join(" · ");
         frame.render_widget(
-            Paragraph::new(format!(
-                "Session {} · run {:?} · {}",
-                screen.snapshot.session_id, screen.active_run, peers
-            )),
+            Paragraph::new(if screen.read_only {
+                format!(
+                    "Session {} · saved presentation · read-only",
+                    screen.snapshot.session_id
+                )
+            } else {
+                format!(
+                    "Session {} · run {:?} · {}",
+                    screen.snapshot.session_id, screen.active_run, peers
+                )
+            }),
             areas[0],
         );
         let mut content = Vec::new();
@@ -308,11 +316,15 @@ fn draw(terminal: &mut RawTerminal, screen: &Screen) -> io::Result<()> {
             Focus::Button { action, .. } => format!("Action: {action}"),
         };
         frame.render_widget(
-            Paragraph::new(format!(
-                "{focused}\n{}\nTab focus · Enter submit · Ctrl+x cancel · Ctrl+r retry · Esc \
-                 detach",
-                screen.message
-            ))
+            Paragraph::new(if screen.read_only {
+                "Saved view · Esc to close".to_owned()
+            } else {
+                format!(
+                    "{focused}\n{}\nTab focus · Enter submit · Ctrl+x cancel · Ctrl+r retry · Esc \
+                     detach",
+                    screen.message
+                )
+            })
             .block(Block::default().title("Input").borders(Borders::ALL)),
             areas[2],
         );
@@ -441,6 +453,7 @@ async fn run_attached(endpoint: &Path, attachment: u64) -> Result<i32, Box<dyn s
     let mut screen = Screen {
         snapshot,
         active_run: initial["state"]["active_run"].as_u64(),
+        read_only: initial["state"]["read_only"] == true,
         composer: String::new(),
         drafts: BTreeMap::new(),
         option_cursor: BTreeMap::new(),
@@ -477,6 +490,7 @@ async fn run_attached(endpoint: &Path, attachment: u64) -> Result<i32, Box<dyn s
             let value = receiver.borrow_and_update().clone();
             screen.snapshot = serde_json::from_value(value["presentation"].clone())?;
             screen.active_run = value["state"]["active_run"].as_u64();
+            screen.read_only = value["state"]["read_only"] == true;
         }
         draw(&mut terminal, &screen)?;
         if let Some((target, at)) = &screen.last_activity
@@ -504,6 +518,9 @@ async fn run_attached(endpoint: &Path, attachment: u64) -> Result<i32, Box<dyn s
         }
         if key.code == KeyCode::Esc {
             break;
+        }
+        if screen.read_only {
+            continue;
         }
         if key.code == KeyCode::Tab || key.code == KeyCode::BackTab {
             if let Some((target, _)) = screen.last_activity.take() {

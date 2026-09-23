@@ -520,6 +520,21 @@ impl Session {
                     terminal.cleanup_errors.push(error);
                 }
             }
+            if session.0.coding && session.0.kernel.available() {
+                match session.history().await {
+                    Ok(records) => {
+                        let saved = session.0.presentation.static_record(run_id, &records);
+                        if !saved.views.is_empty()
+                            && let Err(error) = session
+                                .commit(run_id, "presentation_static", serde_json::json!(saved))
+                                .await
+                        {
+                            terminal.cleanup_errors.push(error);
+                        }
+                    }
+                    Err(error) => terminal.cleanup_errors.push(error),
+                }
+            }
             let mut state = session.0.state.lock().unwrap_or_else(|e| e.into_inner());
             state.terminals.insert(run_id, terminal.clone());
             session.0.events.push(

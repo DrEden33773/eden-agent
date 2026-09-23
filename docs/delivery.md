@@ -18,6 +18,8 @@ The official publisher creates a **secret gist**. Anyone with its URL can access
 
 ## Rust and RPC
 
+Saved semantic presentation views are projected as `type: "presentation"` reading entries using the same selection. Their source record and class must survive the selected ancestry; excluded content cannot reappear through title, fallback, node or attachment reference. Business actions are removed from exported views. Copying public history remaps saved source and attachment references. The independent `eden read HISTORY --endpoint PATH` host opens complete history without its business plugins; it does not accept reading JSONL as restorable input.
+
 `Session::export(Selection, Format)` returns an in-memory `Artifact` from committed history, including for memory-only sessions. It does not write a preview file. `Session::publish(PublishRequest)` and `Session::update(UpdateRequest)` return owned run IDs; use the existing wait/cancel/shutdown API. The client presents the artifact for review and sets `confirmed` only after explicit user authorization.
 
 `eden_agent::delivery::Delivery::open` loads only requested delivery roles from an explicitly trusted installation composition, independently of the old session's business packages. `export_file` reads validated public history; `invoke` accepts the same public protocol data and a cancellation token. Always await `shutdown`. `save_preview` creates a new file and returns its identity; `read_preview` rejects bytes that changed since review and files without the reading JSONL marker, including complete history backups. The official publisher applies the same marker check to in-memory artifacts.

@@ -202,6 +202,47 @@ impl Hub {
             self.bump(&mut state);
         }
     }
+    pub(crate) fn static_record(&self, run_id: u64, records: &[c::Record]) -> p::StaticRecord {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let views = state
+            .views
+            .values()
+            .filter(|view| view.run_id == run_id)
+            .filter_map(|view| {
+                let mut view = view.clone();
+                let source = view.view.source.as_mut()?;
+                let origin = match source.record_sequence {
+                    Some(sequence) => records.iter().find(|record| record.sequence == sequence),
+                    None => records
+                        .iter()
+                        .rev()
+                        .find(|record| {
+                            record.run_id == run_id
+                                && record.kind != "terminal"
+                                && p::source_record_matches(source.class, record)
+                        })
+                        .or_else(|| {
+                            records.iter().rev().find(|record| {
+                                record.run_id == run_id
+                                    && record.kind == "terminal"
+                                    && p::source_record_matches(source.class, record)
+                            })
+                        }),
+                }?;
+                if origin.run_id != run_id || !p::source_record_matches(source.class, origin) {
+                    return None;
+                }
+                let sequence = origin.sequence;
+                source.record_sequence = Some(sequence);
+                view.active = false;
+                serde_json::to_value(view).ok()
+            })
+            .collect();
+        p::StaticRecord {
+            version: p::VERSION,
+            views,
+        }
+    }
     pub(crate) fn close(&self) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.closed = true;

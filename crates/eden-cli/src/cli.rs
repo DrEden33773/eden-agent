@@ -199,6 +199,17 @@ pub enum Family {
         #[arg(long, value_name = "DIR")]
         web_root: Option<PathBuf>,
     },
+    /// Read a saved presentation through the same adapters without loading business plugins
+    Read {
+        /// Committed public history file
+        path: PathBuf,
+        /// Credential-bearing endpoint for local read-only clients
+        #[arg(long, value_name = "PATH")]
+        endpoint: PathBuf,
+        /// Built React/Spectrum adapter directory
+        #[arg(long, value_name = "DIR")]
+        web_root: Option<PathBuf>,
+    },
     /// Attach the minimal Ratatui adapter to an explicitly selected live host
     LiveTui {
         /// Endpoint description issued by `eden live`

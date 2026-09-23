@@ -16,8 +16,12 @@ fn composition() -> Composition {
 }
 
 async fn session(package: Package) -> eden_agent::Session {
+    session_with_packages(package, vec![]).await
+}
+
+async fn session_with_packages(package: Package, others: Vec<Package>) -> eden_agent::Session {
     let cwd = std::env::current_dir().unwrap();
-    Embedded::new(composition(), cwd.clone())
+    let mut embedded = Embedded::new(composition(), cwd.clone())
         .package(
             package
                 .service(CONTEXT, |_: Value, _| async { Ok::<_, Fault>(Value::Null) })
@@ -27,7 +31,11 @@ async fn session(package: Package) -> eden_agent::Session {
                 .service(TOOL, |_: Value, _| async { Ok::<_, Fault>(Value::Null) }),
             "presentation-test-v1",
         )
-        .unwrap()
+        .unwrap();
+    for package in others {
+        embedded = embedded.package(package, "second-author-v1").unwrap();
+    }
+    embedded
         .open(
             SessionOptions { cwd, history: None },
             WorkspaceOptions {
@@ -365,6 +373,287 @@ async fn removing_and_republishing_a_view_never_reuses_an_action_revision() {
         json!({ "calls": 1 })
     );
     session.detach_presentation(attachment).unwrap();
+    session.cancel(run).unwrap();
+    session.wait(run).await.unwrap();
+    session.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn run_settlement_waits_for_admitted_action_cleanup() {
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+    for (command, stop) in [
+        (false, "cancel"),
+        (false, "normal"),
+        (false, "shutdown"),
+        (true, "cancel"),
+        (true, "normal"),
+        (true, "shutdown"),
+    ] {
+        let entered = Arc::new(Notify::new());
+        let cleanup_started = Arc::new(Notify::new());
+        let release_cleanup = Arc::new(Notify::new());
+        let release_run = Arc::new(Notify::new());
+        let run_handler = {
+            let release = release_run.clone();
+            move |_: Value, cx: eden_plugin_sdk::CallContext| {
+                let release = release.clone();
+                async move {
+                    cx.present(View::new("v", Slot::Panel, "V").node(Node::Button {
+                        id: "b".into(),
+                        action: "do".into(),
+                        label: "Do".into(),
+                    }))
+                    .await?;
+                    release.notified().await;
+                    Ok::<_, Fault>(Value::Null)
+                }
+            }
+        };
+        let package = Package::new("presenter")
+            .service(AGENT_LOOP, run_handler.clone())
+            .service(eden_protocol::resources::COMMAND, run_handler)
+            .service(ACTION, {
+                let entered = entered.clone();
+                let started = cleanup_started.clone();
+                let release = release_cleanup.clone();
+                move |_: ActionRequest, cx| {
+                    let entered = entered.clone();
+                    let started = started.clone();
+                    let release = release.clone();
+                    async move {
+                        cx.scope.cleanup(async move {
+                            started.notify_one();
+                            release.notified().await;
+                            Ok(())
+                        })?;
+                        entered.notify_one();
+                        std::future::pending::<Result<Value, Fault>>().await
+                    }
+                }
+            });
+        let session = session(package).await;
+        session.attach_presentation("web").unwrap();
+        let run = if command {
+            session.command("go".into(), Value::Null).unwrap()
+        } else {
+            session.submit("go").unwrap()
+        };
+        let view = loop {
+            let snapshot = session.presentation_snapshot();
+            if let Some(view) = snapshot.views.first() {
+                break view.clone();
+            }
+            session.presentation_changed(snapshot.sequence).await;
+        };
+        let request = ActionRequest {
+            session_id: session.id(),
+            owner: "presenter".into(),
+            view_id: "v".into(),
+            revision: view.revision,
+            action: "do".into(),
+            request_id: "action1".into(),
+            values: Value::Null,
+        };
+        let caller = session.clone();
+        let action_request = request.clone();
+        let action = tokio::spawn(async move { caller.presentation_action(action_request).await });
+        entered.notified().await;
+        let shutdown = if stop == "shutdown" {
+            let session = session.clone();
+            Some(tokio::spawn(async move { session.shutdown().await }))
+        } else {
+            if stop == "normal" {
+                release_run.notify_one();
+            } else {
+                session.cancel(run).unwrap();
+            }
+            None
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            cleanup_started.notified(),
+        )
+        .await
+        .expect("run termination must cancel outstanding actions");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), session.wait(run))
+                .await
+                .is_err(),
+            "settled before action cleanup completed"
+        );
+        if command {
+            assert!(session.state().command_runs.contains(&run));
+        } else {
+            assert_eq!(session.state().active_run, Some(run));
+        }
+        assert!(shutdown.as_ref().is_none_or(|task| !task.is_finished()));
+        assert!(!action.is_finished());
+        assert!(session.submit("too early").is_err());
+        assert_eq!(
+            session
+                .presentation_action(ActionRequest {
+                    request_id: "late".into(),
+                    ..request.clone()
+                })
+                .await
+                .unwrap_err()
+                .code,
+            "Unavailable"
+        );
+        release_cleanup.notify_one();
+        let result = action.await.unwrap();
+        session.wait(run).await.unwrap();
+        assert_eq!(session.presentation_action(request).await, result);
+        if let Some(shutdown) = shutdown {
+            shutdown.await.unwrap().unwrap();
+        }
+        session.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn two_authors_have_ordered_panels_and_exclusive_slot_conflicts() {
+    const SECOND: &str = "test.second-presenter.v1";
+    let second = Package::new("author-b").service(SECOND, |slot: Slot, cx| async move {
+        cx.present(
+            View::new(format!("second-{slot:?}"), slot, "Second author").node(Node::Text {
+                id: "text".into(),
+                text: "B".into(),
+            }),
+        )
+        .await
+    });
+    let ready = std::sync::Arc::new(tokio::sync::Notify::new());
+    let signal = ready.clone();
+    let first = Package::new("author-a").service(AGENT_LOOP, move |_: RunInput, cx| {
+        let signal = signal.clone();
+        async move {
+            for slot in [
+                Slot::Panel,
+                Slot::ToolResult,
+                Slot::Header,
+                Slot::Footer,
+                Slot::Overlay,
+                Slot::Composer,
+            ] {
+                cx.present(
+                    View::new(format!("first-{slot:?}"), slot, "First author").node(Node::Text {
+                        id: "text".into(),
+                        text: "A".into(),
+                    }),
+                )
+                .await?;
+                let other = cx.call::<_, Revision>(SECOND, &slot).await;
+                if matches!(slot, Slot::Panel | Slot::ToolResult) {
+                    other?;
+                } else {
+                    assert_eq!(other.unwrap_err().code, "SlotConflict");
+                }
+            }
+            signal.notify_one();
+            std::future::pending::<Result<Value, Fault>>().await
+        }
+    });
+    let session = session_with_packages(first, vec![second]).await;
+    session.attach_presentation("tui").unwrap();
+    session.attach_presentation("web").unwrap();
+    let run = session.submit("both").unwrap();
+    ready.notified().await;
+    loop {
+        let snapshot = session.presentation_snapshot();
+        if snapshot
+            .views
+            .iter()
+            .any(|view| view.view.slot == Slot::Composer)
+        {
+            assert_eq!(
+                snapshot
+                    .views
+                    .iter()
+                    .filter(|view| view.view.slot == Slot::Panel)
+                    .map(|view| view.owner.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["author-a", "author-b"]
+            );
+            break;
+        }
+        session.presentation_changed(snapshot.sequence).await;
+    }
+    session.cancel(run).unwrap();
+    session.wait(run).await.unwrap();
+    assert!(
+        session
+            .presentation_snapshot()
+            .views
+            .iter()
+            .all(|view| !view.active)
+    );
+    session.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn headless_actions_are_unsupported_and_auth_stays_private_beside_public_views() {
+    use eden_protocol::models as m;
+    let package = Package::new("presenter")
+        .service(AGENT_LOOP, |_: RunInput, cx| async move {
+            cx.present(
+                View::new("v", Slot::Panel, "Public view").node(Node::Button {
+                    id: "b".into(),
+                    action: "do".into(),
+                    label: "Do".into(),
+                }),
+            )
+            .await?;
+            std::future::pending::<Result<Value, Fault>>().await
+        })
+        .service(m::AUTH, |_: m::AuthRequest, _| async {
+            Ok::<_, Fault>(m::AuthReply {
+                operation_id: Some("private-operation".into()),
+                provider: "fixture".into(),
+                status: "awaiting_authorization".into(),
+                challenge: None,
+                source: None,
+                interaction: Some(m::AuthInteraction {
+                    url: "https://fixture/private-url".into(),
+                    user_code: Some("private-code".into()),
+                    manual_input: true,
+                    expires_at: 0,
+                }),
+            })
+        });
+    let session = session(package).await;
+    let run = session.submit("headless").unwrap();
+    assert_eq!(
+        session
+            .wait(run)
+            .await
+            .unwrap()
+            .into_result()
+            .unwrap_err()
+            .code,
+        "Unsupported"
+    );
+    session.attach_presentation("tui").unwrap();
+    session.attach_presentation("web").unwrap();
+    let run = session.submit("public").unwrap();
+    loop {
+        let snapshot = session.presentation_snapshot();
+        if snapshot.views.iter().any(|view| view.active) {
+            break;
+        }
+        session.presentation_changed(snapshot.sequence).await;
+    }
+    let before = session.presentation_snapshot();
+    let auth = session.auth_status("private-operation").await.unwrap();
+    assert_eq!(
+        auth.interaction.unwrap().user_code.as_deref(),
+        Some("private-code")
+    );
+    let after = session.presentation_snapshot();
+    assert_eq!(before.views, after.views);
+    assert!(!json!(after).to_string().contains("private-"));
+    assert!(!json!(session.events()).to_string().contains("private-"));
     session.cancel(run).unwrap();
     session.wait(run).await.unwrap();
     session.shutdown().await.unwrap();

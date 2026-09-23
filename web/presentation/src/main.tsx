@@ -109,51 +109,88 @@ function App() {
   const [composer, setComposer] = useState(sessionStorage.getItem("eden-live-composer") ?? "");
   const [drafts, setDrafts] = useState<Record<string, Record<string, unknown>>>({});
   const [message, setMessage] = useState("");
+  const [connection, setConnection] = useState("Connecting to the shared session…");
+  const [connected, setConnected] = useState(false);
   const [pendingAttempt, setPendingAttempt] = useState<string | null>(
     () => Object.keys(attempts()).at(-1) ?? null,
   );
   const activityTimer = useRef<number | null>(null);
   const attachmentRef = useRef<number | null>(null);
   const activeTarget = useRef<ActivityTarget | null>(null);
+  const focusedView = useRef<string | null>(null);
+  const composerRef = useRef<React.ComponentRef<typeof TextField>>(null);
+  useEffect(() => {
+    const key = focusedView.current;
+    if (!key || !frame || frame.state.read_only) return;
+    if (
+      !frame.presentation.views.some((view) => `${view.owner}/${view.id}` === key && view.active)
+    ) {
+      focusedView.current = null;
+      composerRef.current?.focus();
+    }
+  }, [frame]);
   useEffect(() => {
     if (!token) {
-      setMessage("Open the explicit URL supplied by the live host.");
+      setConnection("Open the explicit URL supplied by the live host.");
       return;
     }
     const controller = new AbortController();
     let current: number | null = null;
+    let sequence: number | null = null;
+    let retryTimer: number | undefined;
     (async () => {
-      try {
-        const attached = await api<{ attachment: number }>(
-          "/attach",
-          { frontend: "web" },
-          controller.signal,
-        );
-        current = attached.attachment;
-        attachmentRef.current = current;
-        setAttachment(current);
-        const initial = await api<Frame>(
-          `/snapshot?attachment=${current}`,
-          undefined,
-          controller.signal,
-        );
-        setFrame(initial);
-        let sequence = initial.presentation.sequence;
-        while (!controller.signal.aborted) {
-          const next = await api<Frame>(
-            `/snapshot?after=${sequence}&attachment=${current}`,
+      while (!controller.signal.aborted) {
+        try {
+          if (current === null) {
+            const attached = await api<{ attachment: number }>(
+              "/attach",
+              { frontend: "web" },
+              AbortSignal.any([controller.signal, AbortSignal.timeout(10000)]),
+            );
+            current = attached.attachment;
+            // An aborted StrictMode mount must still detach an accepted attachment.
+            if (controller.signal.aborted) {
+              void api("/detach", { attachment: current }).catch(() => {});
+              return;
+            }
+            attachmentRef.current = current;
+            setAttachment(current);
+          }
+          const after: string = sequence === null ? "" : `&after=${sequence}`;
+          const next: Frame = await api<Frame>(
+            `/snapshot?attachment=${current}${after}`,
             undefined,
-            controller.signal,
+            AbortSignal.any([controller.signal, AbortSignal.timeout(10000)]),
           );
+          if (controller.signal.aborted) return;
           sequence = next.presentation.sequence;
           setFrame(next);
+          setConnected(true);
+          setConnection("");
+        } catch (error) {
+          if (controller.signal.aborted) return;
+          setConnected(false);
+          setConnection(`Connection interrupted; reconnecting… ${String(error)}`);
+          // Snapshot only validates the attachment; a rejected attachment has expired.
+          if (error instanceof ApiFault && error.code === "InvalidInput" && current !== null) {
+            current = null;
+            attachmentRef.current = null;
+            setAttachment(null);
+          }
+          await new Promise<void>((resolve) => {
+            const finish = () => {
+              controller.signal.removeEventListener("abort", finish);
+              resolve();
+            };
+            retryTimer = window.setTimeout(finish, 1000);
+            controller.signal.addEventListener("abort", finish, { once: true });
+          });
         }
-      } catch (error) {
-        if (!controller.signal.aborted) setMessage(String(error));
       }
     })();
     return () => {
       controller.abort();
+      window.clearTimeout(retryTimer);
       if (current !== null) {
         void api("/detach", { attachment: current }).catch(() => {});
       }
@@ -335,7 +372,7 @@ function App() {
           <Button
             key={node.id}
             variant="secondary"
-            isDisabled={!view.active || view.handled_actions?.includes(node.action)}
+            isDisabled={!connected || !view.active || view.handled_actions?.includes(node.action)}
             onPress={() => void act(view, node.action, null)}
           >
             {node.label}
@@ -369,7 +406,9 @@ function App() {
                     label={field.label}
                     value={String(value ?? "")}
                     isRequired={field.required}
-                    isDisabled={!view.active || view.handled_actions?.includes(node.action)}
+                    isDisabled={
+                      !connected || !view.active || view.handled_actions?.includes(node.action)
+                    }
                     onChange={(next) => changeField(view, node, field.id, next)}
                   />
                 );
@@ -380,7 +419,9 @@ function App() {
                     label={field.label}
                     selectedKey={String(value ?? "") || null}
                     isRequired={field.required}
-                    isDisabled={!view.active || view.handled_actions?.includes(node.action)}
+                    isDisabled={
+                      !connected || !view.active || view.handled_actions?.includes(node.action)
+                    }
                     onSelectionChange={(next) => changeField(view, node, field.id, String(next))}
                   >
                     {field.options.map((option) => (
@@ -395,7 +436,9 @@ function App() {
                     label={field.label}
                     value={Array.isArray(value) ? (value as string[]) : []}
                     isRequired={field.required}
-                    isDisabled={!view.active || view.handled_actions?.includes(node.action)}
+                    isDisabled={
+                      !connected || !view.active || view.handled_actions?.includes(node.action)
+                    }
                     onChange={(next) => changeField(view, node, field.id, next)}
                   >
                     {field.options.map((option) => (
@@ -409,7 +452,9 @@ function App() {
                 <Switch
                   key={field.id}
                   isSelected={Boolean(value)}
-                  isDisabled={!view.active || view.handled_actions?.includes(node.action)}
+                  isDisabled={
+                    !connected || !view.active || view.handled_actions?.includes(node.action)
+                  }
                   onChange={(next) => changeField(view, node, field.id, next)}
                 >
                   {field.label}
@@ -419,11 +464,21 @@ function App() {
             <Button
               type="submit"
               variant="cta"
-              isDisabled={!view.active || view.handled_actions?.includes(node.action)}
+              isDisabled={!connected || !view.active || view.handled_actions?.includes(node.action)}
             >
               {view.handled_actions?.includes(node.action) ? "Handled" : "Submit"}
             </Button>
           </form>
+        );
+      }
+      default: {
+        const unknown = node as { id: string; children?: Node[] };
+        return (
+          <section key={unknown.id}>
+            <p>{view.fallback} — Unsupported presentation node.</p>
+            {Array.isArray(unknown.children) &&
+              unknown.children.map((child) => renderNode(child, view))}
+          </section>
         );
       }
     }
@@ -432,27 +487,45 @@ function App() {
     frame?.presentation.activity.filter((item) => item.attachment !== attachment) ?? [];
   return (
     <Provider theme={defaultTheme} colorScheme="dark">
-      <main>
+      <main
+        onFocusCapture={(event) => {
+          if (!(event.target as HTMLElement).closest("[data-presentation-view], [data-cancel-run]"))
+            focusedView.current = null;
+        }}
+      >
         <header>
           <h1>{frame?.state.read_only ? "Eden saved presentation" : "Eden live"}</h1>
           <span>Session {frame?.presentation.session_id ?? "connecting"}</span>
         </header>
         <div className="status" role="status">
-          {others.map((item) => `${item.frontend} is typing in ${item.target.kind}`).join(" · ") ||
+          {connection ||
+            others.map((item) => `${item.frontend} is typing in ${item.target.kind}`).join(" · ") ||
             (frame?.state.read_only
               ? "Read-only saved history"
               : "Connected to the shared session")}
         </div>
         <section className="views" aria-label="Live presentation">
           {frame?.presentation.views.map((view) => (
-            <article key={`${view.owner}/${view.id}`}>
+            <article
+              key={`${view.owner}/${view.id}`}
+              data-presentation-view
+              onFocusCapture={() => {
+                focusedView.current = `${view.owner}/${view.id}`;
+              }}
+            >
               <div className="view-title">
                 <strong>{view.title}</strong>
                 <small>
                   {view.owner} · {view.slot} · revision {view.revision}
                 </small>
               </div>
-              {view.platforms.length > 0 && !view.platforms.includes("web") ? (
+              {frame.presentation.version !== 1 ? (
+                <p>{view.fallback} — Unsupported presentation version.</p>
+              ) : !["tool_result", "header", "footer", "panel", "overlay", "composer"].includes(
+                  view.slot,
+                ) ? (
+                <p>{view.fallback} — Unsupported presentation slot.</p>
+              ) : view.platforms.length > 0 && !view.platforms.includes("web") ? (
                 <p>{view.fallback} — unavailable on Web</p>
               ) : (
                 view.nodes.map((node) => renderNode(node, view))
@@ -465,6 +538,7 @@ function App() {
         {!frame?.state.read_only && (
           <footer>
             <TextField
+              ref={composerRef}
               label="Message"
               value={composer}
               onChange={changeComposer}
@@ -472,23 +546,36 @@ function App() {
               width="100%"
             />
             <div className="controls">
-              <Button variant="cta" onPress={() => void send("prompt")}>
+              <Button variant="cta" isDisabled={!connected} onPress={() => void send("prompt")}>
                 Send
               </Button>
-              <Button variant="secondary" onPress={() => void send("steering")}>
+              <Button
+                variant="secondary"
+                isDisabled={!connected}
+                onPress={() => void send("steering")}
+              >
                 Steer
               </Button>
-              <Button variant="secondary" onPress={() => void send("follow_up")}>
+              <Button
+                variant="secondary"
+                isDisabled={!connected}
+                onPress={() => void send("follow_up")}
+              >
                 Follow up
               </Button>
               {pendingAttempt && (
-                <Button variant="secondary" onPress={() => void retryPending()}>
+                <Button
+                  variant="secondary"
+                  isDisabled={!connected}
+                  onPress={() => void retryPending()}
+                >
                   Retry last request
                 </Button>
               )}
               <Button
                 variant="negative"
-                isDisabled={!frame?.state.active_run}
+                data-cancel-run
+                isDisabled={!connected || !frame?.state.active_run}
                 onPress={() => {
                   stopActivity();
                   void api("/cancel", { run_id: frame?.state.active_run })

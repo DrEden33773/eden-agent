@@ -18,6 +18,7 @@ struct HubState {
     attachments: BTreeMap<u64, (String, Instant)>,
     activity: BTreeMap<u64, (p::ActivityTarget, Instant)>,
     active_runs: BTreeSet<u64>,
+    draining_runs: BTreeSet<u64>,
     actions: BTreeMap<String, ActionState>,
     claimed_forms: BTreeMap<(String, String, u64, String), String>,
     done_order: VecDeque<String>,
@@ -26,6 +27,7 @@ struct HubState {
 }
 enum ActionState {
     Running {
+        run_id: u64,
         request: p::ActionRequest,
         listeners: Vec<oneshot::Sender<Result<Value, Fault>>>,
     },
@@ -168,6 +170,7 @@ impl Hub {
     pub(crate) fn end_run(&self, run_id: u64) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.active_runs.remove(&run_id);
+        state.draining_runs.remove(&run_id);
         let mut changed = false;
         for view in state.views.values_mut() {
             if view.run_id == run_id && view.active {
@@ -177,6 +180,27 @@ impl Hub {
         }
         if changed {
             self.bump(&mut state);
+        }
+    }
+    /// Close action admission before cancellation, then wait for SDK cleanup and cached results.
+    /// Views remain publishable during cleanup so the final static snapshot includes its updates.
+    pub(crate) async fn drain_actions(&self, run_id: u64, cancel: &Cancellation) {
+        let mut changed = self.changed.subscribe();
+        {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.draining_runs.insert(run_id);
+        }
+        cancel.cancel();
+        loop {
+            changed.borrow_and_update();
+            let running = self.state.lock().unwrap_or_else(|e| e.into_inner()).actions.values()
+                .any(|action| matches!(action, ActionState::Running { run_id: owner, .. } if *owner == run_id));
+            if !running {
+                return;
+            }
+            if changed.changed().await.is_err() {
+                return;
+            }
         }
     }
     fn expire_attachment(&self, attachment: u64, timestamp: Instant) {
@@ -653,6 +677,7 @@ impl Session {
                     ActionState::Running {
                         request: prior,
                         listeners,
+                        ..
                     } => {
                         if *prior != request {
                             return Err(Fault::new(
@@ -670,7 +695,7 @@ impl Session {
                 let view = state.views.get(&key).ok_or_else(|| {
                     Fault::new("Unavailable", "presentation", "view does not exist")
                 })?;
-                if !view.active {
+                if !view.active || state.closed || state.draining_runs.contains(&view.run_id) {
                     return Err(Fault::new(
                         "Unavailable",
                         "presentation",
@@ -713,6 +738,7 @@ impl Session {
                 state.actions.insert(
                     request.request_id.clone(),
                     ActionState::Running {
+                        run_id: admitted_run_id,
                         request: request.clone(),
                         listeners: vec![send],
                     },
@@ -837,6 +863,7 @@ impl Session {
             request.request_id.clone(),
             ActionState::Done { request, result },
         );
+        hub.bump(&mut state);
         while state.done_order.len() > 1024 {
             if let Some(old) = state.done_order.pop_front() {
                 state.actions.remove(&old);

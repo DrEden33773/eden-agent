@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise one external native presentation author through a separate live host process."""
 
+import concurrent.futures
 import json
 import os
 import pathlib
@@ -211,8 +212,18 @@ def main() -> None:
         binary = destination / "bin" / ("eden.exe" if sys.platform == "win32" else "eden")
         native = scratch / author_artifact("presentation-live").name
         shutil.copy2(author_artifact("presentation-live"), native)
+        peer = scratch / author_artifact("presentation-peer").name
+        shutil.copy2(author_artifact("presentation-peer"), peer)
+        peer_contract = "eden.test.presentation-peer.v1"
         composition = {
             "packages": [
+                package("presentation-peer", [peer_contract, ACTION], str(peer), target()),
+                package(
+                    "coding",
+                    ["eden.coding-control.v1", CODING, CODING_CONTEXT, QUEUE],
+                    str(build_target() / "debug" / library("eden_coding")),
+                    target(),
+                ),
                 package("presentation-live", PROVIDES, str(native), target()),
                 package(
                     "local-history",
@@ -227,7 +238,8 @@ def main() -> None:
                 CODING_CONTEXT: "presentation-live",
                 CODING_PROVIDER: "presentation-live",
                 CODING_TOOL: "presentation-live",
-                QUEUE: "presentation-live",
+                QUEUE: "coding",
+                peer_contract: "presentation-peer",
                 STORE: "local-history",
             },
             "resource_packages": [],
@@ -288,6 +300,27 @@ def main() -> None:
             assert next(
                 item for item in frame["presentation"]["views"] if item["id"] == "terminal-helper"
             )["platforms"] == ["tui"]
+
+            # Both attachments compete against the same admission gate; explicit queues
+            # use the shipped coding queue and local-history transaction, not the author stub.
+            def busy_prompt(index: int) -> None:
+                try:
+                    call(endpoint, "/prompt", {"request_id": f"busy-{index}", "text": "compete"})
+                except RuntimeError as error:
+                    assert "Unavailable" in str(error)
+                else:
+                    raise AssertionError("busy prompt was accepted")
+
+            queued = [
+                {"request_id": "queue-tui", "kind": "steering", "text": "terminal queued"},
+                {"request_id": "queue-web", "kind": "follow_up", "text": "browser queued"},
+            ]
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                list(pool.map(busy_prompt, range(2)))
+                accepted = list(pool.map(lambda body: call(endpoint, "/enqueue", body), queued))
+            assert accepted[0]["id"] != accepted[1]["id"], accepted
+            for body, result in zip(queued, accepted, strict=True):
+                assert call(endpoint, "/enqueue", body) == result
             call(
                 endpoint,
                 "/activity",
@@ -324,8 +357,23 @@ def main() -> None:
                 raise AssertionError("invalid form was accepted")
             except RuntimeError as error:
                 assert "InvalidInput" in str(error)
-            result = call(endpoint, "/action", action)
-            assert result["calls"] == 1
+
+            def answer_once(body: dict) -> dict:
+                try:
+                    return call(endpoint, "/action", body)
+                except RuntimeError as error:
+                    assert "AlreadyHandled" in str(error) or "Unavailable" in str(error)
+                    return {"rejected": True}
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(
+                    pool.map(answer_once, [action, {**action, "request_id": "review-2"}])
+                )
+            winners = [item for item in results if "calls" in item]
+            assert len(winners) == 1 and winners[0]["calls"] == 1, results
+            if "rejected" in results[0]:
+                action["request_id"] = "review-2"
+            result = winners[0]
             assert call(endpoint, "/action", action) == result
             try:
                 call(endpoint, "/action", {**action, "request_id": "stale", "revision": 0})
@@ -333,6 +381,58 @@ def main() -> None:
             except RuntimeError as error:
                 assert "StaleRevision" in str(error) or "Unavailable" in str(error)
             wait_for(endpoint, lambda frame: frame["state"]["active_run"] is None)
+            paired = call(endpoint, "/prompt", {"request_id": "peer-slots", "text": "peer-slots"})[
+                "run_id"
+            ]
+            paired_frame = wait_for(
+                endpoint,
+                lambda frame: any(
+                    item["id"] == "review"
+                    and item["run_id"] == paired
+                    and item["revision"] > view["revision"]
+                    for item in frame["presentation"]["views"]
+                ),
+            )
+            paired_views = [
+                item
+                for item in paired_frame["presentation"]["views"]
+                if item["run_id"] == paired and item["active"]
+            ]
+            assert {item["slot"] for item in paired_views} >= {
+                "header",
+                "footer",
+                "overlay",
+                "composer",
+                "panel",
+            }
+            panels = [item["owner"] for item in paired_views if item["slot"] == "panel"]
+            assert panels == sorted(panels) and set(panels) == {
+                "presentation-live",
+                "presentation-peer",
+            }, panels
+            peer_view = next(item for item in paired_views if item["owner"] == "presentation-peer")
+            peer_action = {
+                "session_id": endpoint["session_id"],
+                "owner": peer_view["owner"],
+                "view_id": peer_view["id"],
+                "revision": peer_view["revision"],
+                "action": "peer-action",
+                "request_id": "peer-route",
+                "values": None,
+            }
+            assert call(endpoint, "/action", peer_action) == {"owner": "presentation-peer"}
+            call(endpoint, "/cancel", {"run_id": paired})
+            paired_final = wait_for(endpoint, lambda frame: frame["state"]["active_run"] is None)
+            assert all(
+                not item["active"]
+                for item in paired_final["presentation"]["views"]
+                if item["run_id"] == paired
+            )
+            try:
+                call(endpoint, "/action", {**peer_action, "request_id": "peer-after-settlement"})
+                raise AssertionError("settled peer action was accepted")
+            except RuntimeError as error:
+                assert "Unavailable" in str(error)
             call(endpoint, "/detach", {"attachment": reconnected})
             run = call(endpoint, "/prompt", {"request_id": "cancel-run", "text": "again"})["run_id"]
             wait_for(
@@ -376,6 +476,12 @@ def main() -> None:
                 for line in history_file.read_text(encoding="utf-8").splitlines()
                 for record in json.loads(line).get("transaction", [json.loads(line)])
             ]
+            queue_records = [record for record in records if record["kind"] == "queue_accepted"]
+            assert len(queue_records) == 2, queue_records
+            assert {record["payload"]["kind"] for record in queue_records} == {
+                "steering",
+                "follow_up",
+            }
             saved = [record for record in records if record["kind"] == "presentation_static"]
             assert len(saved) >= 2, [record["kind"] for record in records]
             assert any(
@@ -385,6 +491,7 @@ def main() -> None:
                 for node in view["nodes"]
             )
             native.unlink()
+            peer.unlink()
             shutil.copy2(history_file, ROOT / "artifacts/presentation-history.jsonl")
             read_endpoint_file = scratch / "read-endpoint.json"
             read_command = [
@@ -431,6 +538,13 @@ def main() -> None:
                 if reader.poll() is None:
                     reader.kill()
                     reader.wait()
+            tui_regressions = os.name != "nt"
+            if tui_regressions:
+                subprocess.run(
+                    [sys.executable, ROOT / "scripts/live_tui_pty.py", binary],
+                    check=True,
+                    cwd=ROOT,
+                )
             evidence = {
                 "session_id": endpoint["session_id"],
                 "view_revision": view["revision"],
@@ -439,6 +553,10 @@ def main() -> None:
                 "late_dialog_run": late,
                 "host_exit": 0,
                 "tui_keyboard": tui_keyboard,
+                "tui_regressions": tui_regressions,
+                "real_queue_competition": True,
+                "two_native_owners_and_exclusive_slots": True,
+                "answer_competition": True,
                 "static_views": len(static["presentation"]["views"]),
                 "plugin_removed_read_only": True,
                 "saved_tui": saved_tui,

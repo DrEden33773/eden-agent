@@ -1,0 +1,13 @@
+[package]
+name = "author-presentation-peer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98.1"
+license = "Apache-2.0"
+[workspace]
+[lib]
+test = false
+doctest = false
+crate-type = ["cdylib"]
+[dependencies]
+eden-plugin-sdk = { path = "../../../crates/eden-plugin-sdk", version = "0.1.0" }

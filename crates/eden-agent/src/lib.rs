@@ -478,7 +478,8 @@ impl Session {
         );
         let session = self.clone();
         tokio::spawn(async move {
-            let mut terminal = operation(session.clone(), run_id, cancel).await;
+            let mut terminal = operation(session.clone(), run_id, cancel.clone()).await;
+            session.0.presentation.drain_actions(run_id, &cancel).await;
             let attempt_events = session.0.events.take_attempts(run_id);
             if session.0.coding && session.0.kernel.available() {
                 // Persistence runs in fresh admission after the cancelled invocation

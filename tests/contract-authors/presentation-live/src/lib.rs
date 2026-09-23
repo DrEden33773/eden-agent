@@ -181,6 +181,35 @@ fn create(_: Value) -> Result<Package, Fault> {
                         )
                         .await;
                 }
+                if prompt == "peer-slots" {
+                    cx.call::<_, Revision>("eden.test.presentation-peer.v1", &Slot::Panel)
+                        .await?;
+                    for slot in [Slot::Header, Slot::Footer, Slot::Overlay, Slot::Composer] {
+                        cx.present(
+                            View::new(format!("slot-{slot:?}"), slot, "Exclusive primary").node(
+                                Node::Button {
+                                    id: "slot-button".into(),
+                                    action: "approve".into(),
+                                    label: "Approve".into(),
+                                },
+                            ),
+                        )
+                        .await?;
+                        match cx
+                            .call::<_, Revision>("eden.test.presentation-peer.v1", &slot)
+                            .await
+                        {
+                            Err(error) if error.code == "SlotConflict" => {}
+                            _ => {
+                                return Err(Fault::new(
+                                    "AcceptanceFailure",
+                                    "presentation-live",
+                                    "exclusive slot did not reject peer",
+                                ));
+                            }
+                        }
+                    }
+                }
                 let receipt: c::StoreReply = cx
                     .call(
                         c::STORE,

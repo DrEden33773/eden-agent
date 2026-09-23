@@ -31,6 +31,7 @@ AUTHORS = (
     "entrypoint-extension",
     "delivery-services",
     "presentation-live",
+    "presentation-peer",
 )
 INVALID = ("wrong-abi", "wrong-sdk", "short-table", "metadata-panic", "init-panic")
 EXAMPLES = (

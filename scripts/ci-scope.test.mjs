@@ -7,6 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   changedPaths,
+  checksMatrix,
   FAMILIES,
   hooksPass,
   qualityPass,
@@ -199,54 +200,68 @@ for (const source of ["build.rs", "scripts/verify-pi-reference.mjs"]) {
   });
 }
 
-test("Quality requires successful scope and every selected result", () => {
-  const valid = {
-    event: "pull_request",
-    scope: "success",
-    selected: scopeFor("pull_request", ["README.md"]),
-    lint: "success",
-    native: "skipped",
-  };
-  assert.equal(qualityPass(valid), true);
-  for (const status of ["failure", "cancelled", "skipped", undefined]) {
-    assert.equal(qualityPass({ ...valid, scope: status }), false);
-    assert.equal(qualityPass({ ...valid, lint: status }), false);
-    assert.equal(
-      qualityPass({ ...valid, selected: { ...valid.selected, native: true }, native: status }),
-      false,
-    );
+test("matrix selects one static row and exactly the required native platforms", () => {
+  const docs = scopeFor("pull_request", ["README.md"]);
+  assert.deepEqual(checksMatrix(docs), { include: [{ kind: "static", os: "ubuntu-24.04" }] });
+  for (const event of ["pull_request", "push", "workflow_dispatch"]) {
+    const selected = scopeFor(event, ["package.json"]);
+    assert.deepEqual(checksMatrix(selected), {
+      include: [
+        { kind: "static", os: "ubuntu-24.04" },
+        ...["ubuntu-24.04", "windows-2022", "macos-14"].map((os) => ({ kind: "native", os })),
+      ],
+    });
   }
-  assert.equal(qualityPass({ ...valid, selected: { native: false } }), false);
-  assert.equal(qualityPass({ ...valid, selected: { ...valid.selected, hooks: true } }), false);
-  for (const hooks of [undefined, null, "false"])
-    assert.equal(qualityPass({ ...valid, selected: { ...valid.selected, hooks } }), false);
-  assert.equal(qualityPass({ ...valid, native: "success" }), false);
+  for (const invalid of [null, {}, { ...docs, native: "true" }, { ...docs, hooks: true }])
+    assert.throws(() => checksMatrix(invalid), /Invalid selected/);
 });
 
-test("main proof reuses selected coverage independently of cache availability", () => {
-  const selected = scopeFor("push", ["README.md"]);
+test("Quality rejects failed, cancelled, missing and unexpectedly skipped check groups", () => {
+  for (const event of ["pull_request", "push", "workflow_dispatch"]) {
+    for (const paths of [["README.md"], ["package.json"]]) {
+      const active = event === "pull_request" ? "checksPr" : "checksMain";
+      const inactive = event === "pull_request" ? "checksMain" : "checksPr";
+      const valid = {
+        event,
+        scope: "success",
+        selected: scopeFor(event, paths),
+        [active]: "success",
+        [inactive]: "skipped",
+      };
+      assert.equal(qualityPass(valid), true);
+      for (const status of ["failure", "cancelled", "skipped", undefined]) {
+        assert.equal(qualityPass({ ...valid, scope: status }), false);
+        assert.equal(qualityPass({ ...valid, [active]: status }), false);
+      }
+      for (const status of ["failure", "cancelled", "success", undefined])
+        assert.equal(qualityPass({ ...valid, [inactive]: status }), false);
+      for (const selected of [null, {}, { ...valid.selected, native: false, hooks: true }])
+        assert.equal(qualityPass({ ...valid, selected }), false);
+    }
+  }
+});
+
+test("only successful push proof permits skipped checks; unavailable proof falls back", () => {
   const proven = {
     event: "push",
     scope: "success",
-    selected,
+    selected: scopeFor("push", ["package.json"]),
     proof: "success",
     verified: "true",
-    lint: "skipped",
-    native: "skipped",
+    checksPr: "skipped",
+    checksMain: "skipped",
   };
   assert.equal(qualityPass(proven), true);
   for (const proof of ["failure", "cancelled", "skipped", undefined]) {
     assert.equal(qualityPass({ ...proven, proof }), false);
-    assert.equal(qualityPass({ ...proven, proof, lint: "success" }), true);
+    assert.equal(qualityPass({ ...proven, proof, checksMain: "success" }), true);
   }
   assert.equal(qualityPass({ ...proven, verified: "false" }), false);
-  assert.equal(qualityPass({ ...proven, lint: "success" }), false);
+  assert.equal(qualityPass({ ...proven, verified: "false", checksMain: "success" }), true);
+  assert.equal(qualityPass({ ...proven, checksMain: "success" }), false);
   assert.equal(qualityPass({ ...proven, scope: "failure" }), false);
-  for (const hooks of [true, false]) {
-    const coverage = { ...selected, native: true, hooks };
-    assert.equal(qualityPass({ ...proven, selected: coverage }), true);
-    assert.equal(qualityPass({ ...proven, selected: coverage, verified: "false" }), false);
-  }
+  for (const event of ["pull_request", "workflow_dispatch", undefined])
+    assert.equal(qualityPass({ ...proven, event }), false);
 });
 
 test("static gate rejects missing, skipped, failed or cancelled selected steps", () => {

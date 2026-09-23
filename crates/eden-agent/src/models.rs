@@ -273,6 +273,7 @@ mod tests {
             offline_records: Mutex::new(vec![]),
             events,
             interactions: Arc::new(interaction::Interactions::default()),
+            presentation: Arc::new(presentation::Hub::default()),
             input_cancel: Cancellation::default(),
             state: Mutex::new(State {
                 closed: false,

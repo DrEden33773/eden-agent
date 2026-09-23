@@ -147,7 +147,11 @@ impl Session {
         // Once the old generation stops, finish initialization/cleanup even if
         // the requester cancels; no abandoned initializer can escape ownership.
         let embedded = embedded::Embedded::new(selected, PathBuf::from("."))
-            .package(self.0.interactions.package(), "eden-host-interaction-v1")?;
+            .package(
+                self.0.interactions.package(self.0.presentation.clone()),
+                "eden-host-interaction-v1",
+            )?
+            .package(self.0.presentation.package(), "eden-host-presentation-v1")?;
         let kernel = Kernel::load_embedded(
             embedded.composition,
             Path::new("."),

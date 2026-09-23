@@ -4,12 +4,13 @@ use serde_json::Value;
 pub mod delivery;
 pub mod interaction;
 pub mod models;
+pub mod presentation;
 pub mod resources;
 pub mod shell;
 pub mod updates;
 
 /// Exact host/SDK pairing for this development release.
-pub const CONTRACT: &str = "eden-native-0.5.0";
+pub const CONTRACT: &str = "eden-native-0.6.0";
 /// Agent loop role.
 pub const AGENT_LOOP: &str = "eden.agent-loop.v1";
 /// Context projection role.

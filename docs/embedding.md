@@ -45,3 +45,5 @@ A non-TTY print stdin is UTF-8 text, preserved exactly and separated from the fi
 The full-screen TUI and its terminal renderer remain separate frontend work. Reading export, sharing and update services are not part of this entrypoint contract; no permanently failing placeholder methods are advertised for them.
 
 See [export, explicit sharing and startup maintenance](delivery.md) for reading snapshots and delivery services, and [updates](updates.md) for complete-installation transactions.
+
+For owner-scoped live views, form actions, snapshot/reconnect and the explicit shared process, see [live plugin presentation](presentation.md). The S6 interaction API above remains available through its event path.

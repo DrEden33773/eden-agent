@@ -68,3 +68,5 @@ Local model discovery, search, server-side download, load/unload and cancellatio
 Rust consumers can use the [embedding API](docs/embedding.md); subprocess clients use the [stdio RPC protocol](docs/rpc.md).
 
 See [export, explicit sharing and startup maintenance](docs/delivery.md) for reading snapshots and delivery services, and [updates](docs/updates.md) for complete-installation transactions.
+
+The [live presentation contract](docs/presentation.md) provides one semantic Rust plugin view for minimal Ratatui and React/Spectrum adapters through an explicit local shared host; static history projection is a later slice.

@@ -7,6 +7,9 @@ pub mod cli;
 pub mod delivery;
 /// Explicit environment-file parsing for CLI startup.
 pub mod environment;
+/// Explicit local process hosting multiple live frontend attachments.
+pub mod live;
+mod live_tui;
 /// Model and API-key operations through the shared session services.
 pub mod model_commands;
 /// Structured stdout presentation and machine record framing.

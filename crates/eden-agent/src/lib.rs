@@ -6,6 +6,7 @@ mod control;
 pub mod delivery;
 pub mod embedded;
 mod interaction;
+mod presentation;
 mod startup;
 mod user_shell;
 pub use control::SessionState;
@@ -47,6 +48,7 @@ struct Inner {
     offline_records: Mutex<Vec<c::Record>>,
     events: Arc<Events>,
     interactions: Arc<interaction::Interactions>,
+    presentation: Arc<presentation::Hub>,
     input_cancel: Cancellation,
     state: Mutex<State>,
     settled: tokio::sync::Notify,
@@ -188,12 +190,17 @@ impl Session {
             )
         };
         let interactions = Arc::new(interaction::Interactions::default());
+        let presentation = Arc::new(presentation::Hub::default());
         let mut embedded = embedded::Embedded {
             composition: selected,
             base: std::path::PathBuf::from("."),
             packages: local,
         };
-        embedded = embedded.package(interactions.package(), "eden-host-interaction-v1")?;
+        embedded = embedded.package(
+            interactions.package(presentation.clone()),
+            "eden-host-interaction-v1",
+        )?;
+        embedded = embedded.package(presentation.package(), "eden-host-presentation-v1")?;
         let selected = embedded.composition;
         let local = embedded.packages;
         let desired = composition::binding(&selected, &cwd)?;
@@ -242,6 +249,7 @@ impl Session {
             offline_records: Mutex::new(previous.clone()),
             events,
             interactions,
+            presentation,
             input_cancel: Cancellation::default(),
             state: Mutex::new(State {
                 closed: false,
@@ -445,6 +453,9 @@ impl Session {
             .ok_or_else(|| Fault::new("Unavailable", "session", "run identity exhausted"))?;
         let cancel = Cancellation::default();
         state.active = Some((run_id, cancel.clone()));
+        if !management {
+            self.0.presentation.begin_run(run_id);
+        }
         state.management = management;
         self.0.events.push(
             run_id,
@@ -503,6 +514,7 @@ impl Session {
                 serde_json::json!(public_result(&terminal)),
             );
             state.active = None;
+            session.0.presentation.end_run(run_id);
             state.management = false;
             session.0.settled.notify_waiters();
         });
@@ -621,6 +633,7 @@ impl Session {
                 *id
             })
         };
+        self.0.presentation.close();
         self.0.maintenance.stop().await;
         if let Some(run_id) = active {
             self.wait(run_id).await?;

@@ -1,6 +1,6 @@
 # Author a native plugin
 
-Use the SDK source from the same eden-agent release and Rust 1.98.1. Host and plugin must match `eden-native-0.5.0`, ABI version 1 and the target triple. There is no cross-release ABI compatibility promise.
+Use the SDK source from the same eden-agent release and Rust 1.98.1. Host and plugin must match `eden-native-0.6.0`, ABI version 1 and the target triple. There is no cross-release ABI compatibility promise.
 
 ## Independent build
 
@@ -36,8 +36,8 @@ Copy the compiled `.dll`, `.so` or `.dylib` into a new version directory in the 
     "version": "0.1.0",
     "provides": ["eden.agent-loop.v1"]
   },
-  "host": "eden-native-0.5.0",
-  "sdk": "eden-native-0.5.0",
+  "host": "eden-native-0.6.0",
+  "sdk": "eden-native-0.6.0",
   "target": "x86_64-unknown-linux-gnu",
   "library": "plugins/loop-a/0.1.0/libauthor_loop_a.so",
   "config": null
@@ -61,3 +61,7 @@ The SDK runs the operation on a plugin-owned Tokio runtime, so native async I/O 
 SessionStore implements `Open`, `Append`, `AppendBatch`, `Navigate`, `Create`, `Read` and `Close`. An `AppendBatch` receipt certifies all entries together; a response and consumption cannot be partially acknowledged. Even alternative backends retain a local public v2 transaction log usable without their library. The public history module provides schema validation and transaction encoding, not a second host-owned writer. `Create` publishes a new independent history and refuses existing destinations.
 
 Interpreter and migrator roles receive versioned `ExtensionState` records. Only current required state is a continuing dependency. A migrator must report preserved/lost information and return one converted state for each source record, in order, preserving branch ownership; preview and apply must agree. Target interpretation validates required converted state before destination creation. See the independent `coding-replacements` author for actual alternate store, context, interpreter and migrator implementations.
+
+## Live presentation
+
+Use the versioned semantic view and form builder in [`presentation`](presentation.md) when a plugin needs the same interaction in the minimal TUI and Web adapters. The independent `presentation-live` author shows `CallContext::present` plus an owner-routed action service. Platform-only contributions declare their frontend and a portable fallback.

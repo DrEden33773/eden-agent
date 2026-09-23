@@ -21,7 +21,7 @@
     "python:lint": "node scripts/checks.mjs python-lint",
     "python:types": "node scripts/checks.mjs python-types",
     "python:check": "node scripts/checks.mjs python",
-    "js:check": "node scripts/checks.mjs javascript",
+    "js:check": "node scripts/checks.mjs javascript && pnpm --filter eden-live-presentation build",
     "js:fix": "node scripts/checks.mjs javascript-fix"
   },
   "devDependencies": {

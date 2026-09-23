@@ -362,10 +362,10 @@ impl Router {
     }
 }
 // HostApi tokens use a process registry, so retained author contexts cannot dereference freed hosts.
-static ROUTERS: std::sync::OnceLock<Mutex<BTreeMap<usize, std::sync::Weak<Router>>>> =
-    std::sync::OnceLock::new();
+type RouterRegistry = Mutex<BTreeMap<usize, (std::sync::Weak<Router>, String)>>;
+static ROUTERS: std::sync::OnceLock<RouterRegistry> = std::sync::OnceLock::new();
 static NEXT_ROUTER: AtomicU64 = AtomicU64::new(1);
-fn routers() -> &'static Mutex<BTreeMap<usize, std::sync::Weak<Router>>> {
+fn routers() -> &'static RouterRegistry {
     ROUTERS.get_or_init(Mutex::default)
 }
 fn router(id: usize) -> Option<Arc<Router>> {
@@ -373,7 +373,14 @@ fn router(id: usize) -> Option<Arc<Router>> {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(&id)
-        .and_then(std::sync::Weak::upgrade)
+        .and_then(|(router, _)| router.upgrade())
+}
+fn origin(id: usize) -> Option<String> {
+    routers()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&id)
+        .map(|(_, owner)| owner.clone())
 }
 unsafe extern "C" fn request(context: usize, bytes: Bytes, reply: Reply) -> u64 {
     let Some(router) = router(context) else {
@@ -383,7 +390,17 @@ unsafe extern "C" fn request(context: usize, bytes: Bytes, reply: Reply) -> u64 
         return 0;
     }
     // SAFETY: SDK request bytes are kept live during the call and copied by decode.
-    let input = unsafe { bytes.decode::<Request>() };
+    let input = unsafe { bytes.decode::<Request>() }.map(|mut request| {
+        if request.contract == eden_protocol::presentation::HOST
+            && let Some(payload) = request.payload.as_object_mut()
+        {
+            payload.insert(
+                "owner".into(),
+                serde_json::Value::String(origin(context).unwrap_or_default()),
+            );
+        }
+        request
+    });
     let id = router.next.fetch_add(1, Ordering::Relaxed);
     let cancel = Cancellation::default();
     router
@@ -441,9 +458,10 @@ unsafe extern "C" fn event(context: usize, bytes: Bytes) {
 /// One explicitly mounted native composition and its Cordis disposal barrier.
 pub struct Kernel {
     router: Arc<Router>,
-    token: usize,
+    tokens: Vec<usize>,
     fiber: FiberHandle,
     instances: Vec<Arc<Instance>>,
+    packages: BTreeMap<String, Arc<Instance>>,
     composition: Composition,
 }
 async fn rollback_initialization(mut error: Fault, instances: &[Arc<Instance>]) -> Fault {
@@ -560,21 +578,23 @@ impl Kernel {
             workers: Mutex::new(vec![]),
             runtime: tokio::runtime::Handle::current(),
         });
-        let token = NEXT_ROUTER.fetch_add(1, Ordering::Relaxed) as usize;
-        routers()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(token, Arc::downgrade(&router));
-        let host = HostApi {
-            context: token,
-            request,
-            cancel,
-            event,
-        };
+        let mut tokens = Vec::new();
         let mut packages: BTreeMap<String, Arc<Instance>> = BTreeMap::new();
         for (manifest, path) in composition.packages.iter().zip(paths) {
             let manifest = manifest.clone();
             let name = manifest.descriptor.package.clone();
+            let token = NEXT_ROUTER.fetch_add(1, Ordering::Relaxed) as usize;
+            routers()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(token, (Arc::downgrade(&router), name.clone()));
+            tokens.push(token);
+            let host = HostApi {
+                context: token,
+                request,
+                cancel,
+                event,
+            };
             if let Some(package) = local.remove(&name) {
                 // SAFETY: Router registry callbacks remain live until every instance stops.
                 let instance = unsafe { eden_plugin_sdk::local::LocalInstance::new(package, host) };
@@ -594,15 +614,16 @@ impl Kernel {
                     router.open.store(false, Ordering::Release);
                     let instances: Vec<_> = packages.values().cloned().collect();
                     let error = rollback_initialization(error, &instances).await;
-                    routers()
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .remove(&token);
+                    let mut registry = routers().lock().unwrap_or_else(|e| e.into_inner());
+                    for token in &tokens {
+                        registry.remove(token);
+                    }
                     return Err(error);
                 }
             }
         }
         let instances: Vec<_> = packages.values().cloned().collect();
+        let package_instances = packages.clone();
         let roles = composition
             .roles
             .clone()
@@ -624,18 +645,19 @@ impl Kernel {
                     &instances,
                 )
                 .await;
-                routers()
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&token);
+                let mut registry = routers().lock().unwrap_or_else(|e| e.into_inner());
+                for token in &tokens {
+                    registry.remove(token);
+                }
                 return Err(error);
             }
         };
         Ok(Self {
             router,
-            token,
+            tokens,
             fiber,
             instances,
+            packages: package_instances,
             composition,
         })
     }
@@ -647,6 +669,45 @@ impl Kernel {
     /// with its cleanup. Cancellation is the caller's decision, passed in.
     pub async fn invoke(&self, request: Request, cancel: Cancellation) -> Terminal {
         self.router.invoke(request, cancel).await
+    }
+    /// Invoke a declared service on its owning package. Presentation actions use this
+    /// route so two authors can expose the same action contract without selecting one
+    /// global role winner. The package and role must both be installed in this generation.
+    pub async fn invoke_package(
+        &self,
+        package: &str,
+        request: Request,
+        cancel: Cancellation,
+    ) -> Terminal {
+        if request.session_id != self.router.session_id {
+            return Terminal::failed(Fault::new("SessionMismatch", "router", "foreign session"));
+        }
+        let declared = self.composition.packages.iter().any(|manifest| {
+            manifest.descriptor.package == package
+                && manifest
+                    .descriptor
+                    .provides
+                    .iter()
+                    .any(|role| role == &request.contract)
+        });
+        if !declared {
+            return Terminal::failed(Fault::new(
+                "MissingDependency",
+                "router",
+                "owner does not provide action contract",
+            ));
+        }
+        let Some(instance) = self.packages.get(package) else {
+            return Terminal::failed(Fault::new(
+                "MissingDependency",
+                "router",
+                "owner is not installed",
+            ));
+        };
+        self.router
+            .events
+            .push(request.run_id, "service_called", request.public_trace());
+        instance.call(request, cancel).await
     }
     /// Whether this generation has a selected role, including caller-runtime contributions.
     pub fn has_role(&self, contract: &str) -> bool {
@@ -709,10 +770,11 @@ impl Kernel {
         for worker in workers {
             let _ = worker.await;
         }
-        routers()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&self.token);
+        let mut registry = routers().lock().unwrap_or_else(|e| e.into_inner());
+        for token in &self.tokens {
+            registry.remove(token);
+        }
+        drop(registry);
         if let Some(mut error) = cleanup {
             if let Err(disposal) = disposed {
                 error

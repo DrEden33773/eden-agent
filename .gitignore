@@ -14,3 +14,5 @@ __pycache__/
 .venv/
 .ruff_cache/
 __pycache__/
+/web/presentation/node_modules/
+/web/presentation/dist/

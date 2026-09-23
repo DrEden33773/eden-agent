@@ -72,6 +72,7 @@ for (const [extension, bad, good] of [
 
 test("pre-push rejects non-HEAD TypeScript errors; pre-commit checks formatting only", (t) => {
   const root = webFixture(t);
+  git(root, "config", "core.autocrlf", "true");
   const base = git(root, "rev-parse", "HEAD").trim();
   const path = "web/presentation/src/value.ts";
   const bad = 'export const value: number = "wrong";\n';

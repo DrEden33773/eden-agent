@@ -34,7 +34,8 @@ pub struct Source {
 #[serde(rename_all = "snake_case")]
 #[allow(missing_docs)]
 pub enum ContentClass {
-    Ordinary,
+    Message,
+    Tool,
     Thinking,
     FullOutput,
     Attachment,

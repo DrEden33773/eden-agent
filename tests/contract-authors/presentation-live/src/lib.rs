@@ -73,7 +73,7 @@ fn view(status: &str) -> View {
         });
     view.source = Some(Source {
         record_sequence: None,
-        class: ContentClass::Ordinary,
+        class: ContentClass::Tool,
     });
     view
 }

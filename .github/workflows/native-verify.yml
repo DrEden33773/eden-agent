@@ -7,6 +7,10 @@ name: Native verification
 on:
   workflow_call:
     inputs:
+      os:
+        description: One platform for the outer checks matrix; empty keeps all cache platforms
+        type: string
+        default: ''
       selected:
         description: Associated checks selected from the complete change comparison
         required: true
@@ -32,7 +36,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-2022, macos-14]
+        os: ${{ inputs.os != '' && fromJSON(format('["{0}"]', inputs.os)) || fromJSON('["ubuntu-24.04","windows-2022","macos-14"]') }}
     runs-on: ${{ matrix.os }}
     # Windows cold builds plus installed acceptance reached 20 minutes before post-job cleanup.
     timeout-minutes: ${{ matrix.os == 'windows-2022' && 30 || 20 }}
@@ -181,11 +185,11 @@ jobs:
         if: ${{ !inputs.cache-only }}
         run: node scripts/ci-run.mjs licenses python scripts/license_bundle.py --check --all-platforms
       - name: Clippy including independent authors
-        if: ${{ !inputs.cache-only && !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        if: ${{ !inputs.cache-only && success() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: node scripts/ci-run.mjs clippy pnpm clippy:check
       - name: Git hook behavior
         id: hooks
-        if: ${{ !inputs.cache-only && fromJSON(inputs.selected).hooks == true && !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        if: ${{ !inputs.cache-only && fromJSON(inputs.selected).hooks == true && success() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: node scripts/ci-run.mjs hooks pnpm hooks:test
       # Platform sensitivity, not the crate list, decides what each runner
       # executes. These targets own the branches that really differ per OS:
@@ -201,7 +205,7 @@ jobs:
       # scripts/test_ci_cache.py checks that this command and that declaration
       # still agree.
       - name: Platform-sensitive suites
-        if: ${{ !inputs.cache-only && !cancelled() && runner.os != 'Linux' && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        if: ${{ !inputs.cache-only && success() && runner.os != 'Linux' && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: node scripts/ci-run.mjs platform-suites cargo test --locked --no-fail-fast -p eden-process -p eden-coding-tools -p eden-search -p eden-local-history -p eden-workspace -p eden-model-access -p eden-fmt
       # Linux keeps the exact workspace command it always ran: it is the runner
       # that still executes what the other two no longer do, and a newly added
@@ -209,13 +213,13 @@ jobs:
       # so Linux's own selection is part of its cache identity as well, and the
       # entry it restores is the workspace graph it builds.
       - name: Workspace suites
-        if: ${{ !inputs.cache-only && !cancelled() && runner.os == 'Linux' && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        if: ${{ !inputs.cache-only && success() && runner.os == 'Linux' && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: node scripts/ci-run.mjs workspace-suites cargo test --workspace --locked --no-fail-fast
       - name: Independent author tests
-        if: ${{ !inputs.cache-only && !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        if: ${{ !inputs.cache-only && success() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: node scripts/ci-run.mjs authors pnpm rust:test:authors
       - name: Installed suites, independent authors and distribution
-        if: ${{ !inputs.cache-only && !cancelled() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        if: ${{ !inputs.cache-only && success() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: node scripts/ci-run.mjs installed python scripts/verify-all.py --output artifacts/verification
       - name: Build missing main cache graphs without running tests
         id: warm

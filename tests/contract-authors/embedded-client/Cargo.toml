@@ -13,3 +13,6 @@ eden-plugin-sdk = { path = "../../../crates/eden-plugin-sdk", version = "0.1.0" 
 name = "author-embedded-client"
 path = "src/main.rs"
 test = false
+
+[profile.dev.package.sha2]
+opt-level = 3

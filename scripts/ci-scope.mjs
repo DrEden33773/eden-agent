@@ -123,14 +123,36 @@ export function changedPaths(base, head, root = process.cwd(), event = "pull_req
   return result.stdout.split("\0").filter(Boolean);
 }
 
+export function checksMatrix(selected) {
+  if (
+    !FAMILIES.every((key) => typeof selected?.[key] === "boolean") ||
+    (selected.hooks && !selected.native)
+  )
+    throw new Error("Invalid selected check families");
+  return {
+    include: [
+      { kind: "static", os: "ubuntu-24.04" },
+      ...(selected.native
+        ? ["ubuntu-24.04", "windows-2022", "macos-14"].map((os) => ({ kind: "native", os }))
+        : []),
+    ],
+  };
+}
+
 // Reuse inherits the PR's selected coverage. Cache warmth is not test evidence.
-export function qualityPass({ event, scope, proof, verified, lint, native, selected }) {
-  if (scope !== "success" || !FAMILIES.every((key) => typeof selected?.[key] === "boolean"))
+export function qualityPass({ event, scope, proof, verified, checksPr, checksMain, selected }) {
+  if (scope !== "success") return false;
+  try {
+    checksMatrix(selected);
+  } catch {
     return false;
-  if (selected.hooks && !selected.native) return false;
+  }
   if (event === "push" && proof === "success" && verified === "true")
-    return lint === "skipped" && native === "skipped";
-  return lint === "success" && native === (selected.native ? "success" : "skipped");
+    return checksPr === "skipped" && checksMain === "skipped";
+  if (event === "pull_request") return checksPr === "success" && checksMain === "skipped";
+  if (["push", "workflow_dispatch"].includes(event))
+    return checksMain === "success" && checksPr === "skipped";
+  return false;
 }
 
 // Hooks verify contributor tooling only when its inputs change.
@@ -163,8 +185,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       scope: process.env.SCOPE_RESULT,
       proof: process.env.PROOF_RESULT,
       verified: process.env.PROOF_VERIFIED,
-      lint: process.env.LINT_RESULT,
-      native: process.env.NATIVE_RESULT,
+      checksPr: process.env.CHECKS_PR_RESULT,
+      checksMain: process.env.CHECKS_MAIN_RESULT,
       selected: JSON.parse(process.env.CI_SELECTED || "null"),
     };
     console.log(JSON.stringify(result));
@@ -201,9 +223,12 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       base: process.env.CI_BASE_SHA,
       head: process.env.CI_HEAD_SHA,
     };
+    const matrix = checksMatrix(scope);
+    scope.matrix = matrix;
     mkdirSync("artifacts/ci", { recursive: true });
     writeFileSync("artifacts/ci/scope.json", `${JSON.stringify(scope, null, 2)}\n`);
     if (process.env.GITHUB_OUTPUT) {
+      appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify(matrix)}\n`);
       for (const key of FAMILIES)
         appendFileSync(process.env.GITHUB_OUTPUT, `${key}=${scope[key]}\n`);
       appendFileSync(process.env.GITHUB_OUTPUT, `selected=${JSON.stringify(scope)}\n`);

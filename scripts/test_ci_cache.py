@@ -1,6 +1,7 @@
 """Build cache identity, one rolling key per context, and legacy migration."""
 
 import importlib
+import json
 import pathlib
 import re
 import subprocess
@@ -86,11 +87,17 @@ def step_env(text: str, marker: str) -> dict[str, str]:
 
 
 def matrix_oses(text: str) -> set[str]:
-    """The runner labels of the single runner matrix the workflow declares."""
-    matches = re.findall(r"^\s+os: \[([^\]]*)\]$", text, re.MULTILINE)
-    if len(matches) != 1:
-        raise AssertionError(f"expected exactly one runner matrix, found {len(matches)}")
-    return {label.strip() for label in matches[0].split(",")}
+    """Default cache-maintenance platforms when no single runner is requested."""
+    matches = re.findall(r"^\s+os: (.+)$", text, re.MULTILINE)
+    expressions = [value for value in matches if value.startswith("${{")]
+    if len(expressions) != 1:
+        raise AssertionError(f"expected exactly one runner matrix, found {len(expressions)}")
+    expression = expressions[0]
+    prefix = "${{ inputs.os != '' && fromJSON(format('[\"{0}\"]', inputs.os)) || fromJSON('"
+    suffix = "') }}"
+    if not expression.startswith(prefix) or not expression.endswith(suffix):
+        raise AssertionError("expected a single-runner override and default platform list")
+    return set(json.loads(expression[len(prefix) : -len(suffix)]))
 
 
 class CacheKeyCase(unittest.TestCase):

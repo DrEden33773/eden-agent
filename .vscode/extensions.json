@@ -3,6 +3,7 @@
     "charliermarsh.ruff",
     "detachhead.basedpyright",
     "biomejs.biome",
-    "rust-lang.rust-analyzer"
+    "rust-lang.rust-analyzer",
+    "TypeScriptTeam.native-preview"
   ]
 }

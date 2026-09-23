@@ -20,11 +20,16 @@ const rust = (path) =>
   path === "rustfmt-toolchain";
 const python = (path) => /\.py$/.test(path) || ["pyproject.toml", "uv.lock"].includes(path);
 const javascript = (path) =>
-  /\.mjs$/.test(path) ||
-  ["biome.json", "biome.jsonc", "package.json", "pnpm-lock.yaml"].includes(path);
+  /\.(?:m?js|jsx|tsx?|css|html)$/.test(path) ||
+  /(^|\/)(?:biome\.jsonc?|package\.json|tsconfig[^/]*\.json)$/.test(path) ||
+  ["pnpm-lock.yaml", "pnpm-workspace.yaml", ".gitignore"].includes(path);
 // A change to the hook implementation, the checks it runs, or a scenario that
 // exercises them makes every family relevant: those tests exist to pin how each
 // check behaves, so a commit that edits them has to run what they assert.
+const web = (path) =>
+  path.startsWith("web/presentation/") ||
+  ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"].includes(path) ||
+  /(^|\/)tsconfig[^/]*\.json$/.test(path);
 const infrastructure = (path) =>
   path.startsWith(".githooks/") ||
   path.startsWith("tests/development-hooks-") ||
@@ -39,6 +44,7 @@ function kindsFor(changed, push = false) {
     ...(all || (push && changed.some(rust)) ? ["doc"] : []),
     ...(all || changed.some(python) ? ["python"] : []),
     ...(all || changed.some(javascript) ? ["javascript"] : []),
+    ...(push && (all || changed.some(web)) ? ["web-types"] : []),
   ];
 }
 function environment() {

@@ -1,7 +1,14 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.5.3/schema.json",
   "files": {
-    "includes": ["**/*.mjs", "!node_modules", "!target", "!artifacts"]
+    "includes": [
+      "**/*.{js,jsx,mjs,ts,tsx,css,html}",
+      "!**/node_modules",
+      "!**/target",
+      "!**/artifacts",
+      "!**/dist",
+      "!**/.venv"
+    ]
   },
   "formatter": {
     "indentStyle": "space",
@@ -17,6 +24,11 @@
   "javascript": {
     "formatter": {
       "quoteStyle": "double"
+    }
+  },
+  "html": {
+    "formatter": {
+      "enabled": true
     }
   }
 }

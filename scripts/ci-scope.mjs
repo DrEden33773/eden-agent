@@ -63,15 +63,16 @@ export function scopeFor(event, paths) {
       selected.add("javascript");
       selected.add("native");
       selected.add("hooks");
-    } else if (["biome.json", "biome.jsonc"].includes(path)) {
+    } else if (/(^|\/)(?:biome\.jsonc?|package\.json|tsconfig[^/]*\.json)$/.test(path)) {
       selected.add("javascript");
       selected.add("native");
+      selected.add("hooks");
     } else if (/\.py$/.test(path) || ["pyproject.toml", "uv.lock"].includes(path)) {
       selected.add("python");
       selected.add("native");
     } else if (path.startsWith("web/presentation/")) {
       selected.add("javascript");
-    } else if (/\.mjs$/.test(path)) {
+    } else if (/\.(?:m?js|jsx|tsx?|css|html)$/.test(path)) {
       selected.add("javascript");
       selected.add("native");
     } else if (
@@ -145,7 +146,7 @@ export function staticPass(selected, steps) {
   const checks = {
     markdown: ["markdown"],
     python: ["python"],
-    javascript: ["javascript"],
+    javascript: ["javascript", "web_types", "web_build"],
     rust: ["formatter", "format", "doc"],
   };
   return Object.entries(checks).every(

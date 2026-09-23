@@ -7,7 +7,7 @@
   },
   "scripts": {
     "hooks:install": "node scripts/install-hooks.mjs",
-    "hooks:test": "node --test --test-concurrency=2 tests/development-hooks.test.mjs tests/development-hooks-push.test.mjs",
+    "hooks:test": "node --test --test-concurrency=2 tests/development-hooks.test.mjs tests/development-hooks-push.test.mjs tests/development-hooks-web.test.mjs",
     "markdown:check": "node scripts/checks.mjs markdown",
     "markdown:fix": "node scripts/checks.mjs markdown-fix",
     "rust:check": "node scripts/checks.mjs fmt",
@@ -21,8 +21,13 @@
     "python:lint": "node scripts/checks.mjs python-lint",
     "python:types": "node scripts/checks.mjs python-types",
     "python:check": "node scripts/checks.mjs python",
-    "js:check": "node scripts/checks.mjs javascript && pnpm --filter eden-live-presentation build",
-    "js:fix": "node scripts/checks.mjs javascript-fix"
+    "js:check": "pnpm biome:check && pnpm web:check",
+    "js:fix": "pnpm biome:fix",
+    "biome:check": "node scripts/checks.mjs javascript",
+    "biome:fix": "node scripts/checks.mjs javascript-fix",
+    "web:types": "node scripts/checks.mjs web-types",
+    "web:build": "pnpm --filter eden-live-presentation build",
+    "web:check": "pnpm web:types && pnpm web:build"
   },
   "devDependencies": {
     "markdownlint-cli2": "0.23.2",

@@ -157,10 +157,18 @@ jobs:
         id: python
         if: needs.scope.outputs.python == 'true'
         run: node scripts/ci-run.mjs python node scripts/checks.mjs python
-      - name: JavaScript formatting and lint
+      - name: Biome formatting and lint
         id: javascript
         if: needs.scope.outputs.javascript == 'true'
-        run: node scripts/ci-run.mjs javascript pnpm js:check
+        run: node scripts/ci-run.mjs javascript pnpm biome:check
+      - name: Web TypeScript types
+        id: web_types
+        if: needs.scope.outputs.javascript == 'true'
+        run: node scripts/ci-run.mjs web-types pnpm web:types
+      - name: Web production build
+        id: web_build
+        if: needs.scope.outputs.javascript == 'true'
+        run: node scripts/ci-run.mjs web-build pnpm web:build
       - name: Markdown
         id: markdown
         if: needs.scope.outputs.markdown == 'true'

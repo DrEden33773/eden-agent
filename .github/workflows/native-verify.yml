@@ -146,6 +146,11 @@ jobs:
           planned = json.loads((root / "cache-inputs.json").read_text(encoding="utf-8"))
           receipt["legacy_build_cache_reused"] = bool(planned["legacy_candidate"] and receipt["TARGET_MATCHED_KEY"] == planned["legacy_candidate"])
           (root / "cache.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+      # setup-node saves a new pnpm key after the job. Cache-only runs do not
+      # install dependencies, so a cold key still needs a populated store.
+      - name: Populate pnpm store for cache maintenance
+        if: ${{ inputs.cache-only }}
+        run: node scripts/ci-run.mjs pnpm-fetch pnpm fetch --frozen-lockfile
       - name: Node development dependencies
         if: ${{ !inputs.cache-only }}
         id: node-deps

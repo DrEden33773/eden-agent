@@ -118,6 +118,32 @@ impl CallContext {
             .map_err(|_| Fault::new("Unavailable", "bridge", "bridge lost"))??;
         serde_json::from_value(value).map_err(serialization)
     }
+    /// Publish or replace an owner-scoped semantic view. The host derives the owner from
+    /// the installed package callback, so a caller cannot claim another package's slot.
+    pub async fn present(
+        &self,
+        view: p::presentation::View,
+    ) -> Result<p::presentation::Revision, Fault> {
+        self.call(
+            p::presentation::HOST,
+            &p::presentation::HostRequest::Publish {
+                owner: String::new(),
+                view,
+            },
+        )
+        .await
+    }
+    /// Remove a live view belonging to this package.
+    pub async fn remove_view(&self, id: impl Into<String>) -> Result<(), Fault> {
+        self.call(
+            p::presentation::HOST,
+            &p::presentation::HostRequest::Remove {
+                owner: String::new(),
+                id: id.into(),
+            },
+        )
+        .await
+    }
     /// Call the context role for this loop's projected model input.
     pub async fn context(&self, input: &RunInput) -> Result<ModelInput, Fault> {
         self.call(p::CONTEXT, input).await

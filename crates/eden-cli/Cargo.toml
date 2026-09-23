@@ -8,6 +8,9 @@ repository.workspace = true
 [dependencies]
 clap.workspace = true
 dotenvy = "0.15.7"
+getrandom = "0.3.4"
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
+crossterm = "0.29.0"
 eden-kernel.workspace = true
 eden-plugin-sdk.workspace = true
 base64 = "0.23.1"

@@ -6,6 +6,7 @@ mod control;
 pub mod delivery;
 pub mod embedded;
 mod interaction;
+mod presentation;
 mod startup;
 mod user_shell;
 pub use control::SessionState;
@@ -47,6 +48,7 @@ struct Inner {
     offline_records: Mutex<Vec<c::Record>>,
     events: Arc<Events>,
     interactions: Arc<interaction::Interactions>,
+    presentation: Arc<presentation::Hub>,
     input_cancel: Cancellation,
     state: Mutex<State>,
     settled: tokio::sync::Notify,
@@ -188,12 +190,17 @@ impl Session {
             )
         };
         let interactions = Arc::new(interaction::Interactions::default());
+        let presentation = Arc::new(presentation::Hub::default());
         let mut embedded = embedded::Embedded {
             composition: selected,
             base: std::path::PathBuf::from("."),
             packages: local,
         };
-        embedded = embedded.package(interactions.package(), "eden-host-interaction-v1")?;
+        embedded = embedded.package(
+            interactions.package(presentation.clone()),
+            "eden-host-interaction-v1",
+        )?;
+        embedded = embedded.package(presentation.package(), "eden-host-presentation-v1")?;
         let selected = embedded.composition;
         let local = embedded.packages;
         let desired = composition::binding(&selected, &cwd)?;
@@ -242,6 +249,7 @@ impl Session {
             offline_records: Mutex::new(previous.clone()),
             events,
             interactions,
+            presentation,
             input_cancel: Cancellation::default(),
             state: Mutex::new(State {
                 closed: false,
@@ -278,14 +286,28 @@ impl Session {
                     .unwrap_or_else(|e| e.into_inner())
                     .next = reply.records.iter().map(|r| r.run_id).max().unwrap_or(0) + 1;
                 let binding = session.0.kernel.composition();
+                let user_roles: BTreeMap<_, _> = binding
+                    .roles
+                    .iter()
+                    .filter(|(role, _)| {
+                        !matches!(
+                            role.as_str(),
+                            eden_protocol::interaction::HOST | eden_protocol::presentation::HOST
+                        )
+                    })
+                    .collect();
+                let user_packages: Vec<_> = binding
+                    .packages
+                    .iter()
+                    .filter(|package| {
+                        !composition::internal_host_package(&package.descriptor.package)
+                    })
+                    .map(|package| &package.descriptor)
+                    .collect();
                 let identity = serde_json::json!({
                     "cwd": cwd,
-                    "roles": binding.roles,
-                    "packages": binding
-                        .packages
-                        .iter()
-                        .map(|p| &p.descriptor)
-                        .collect::<Vec<_>>(),
+                    "roles": user_roles,
+                    "packages": user_packages,
                 });
                 let locked = desired;
                 let saved_lock = reply
@@ -445,6 +467,9 @@ impl Session {
             .ok_or_else(|| Fault::new("Unavailable", "session", "run identity exhausted"))?;
         let cancel = Cancellation::default();
         state.active = Some((run_id, cancel.clone()));
+        if !management {
+            self.0.presentation.begin_run(run_id);
+        }
         state.management = management;
         self.0.events.push(
             run_id,
@@ -503,6 +528,7 @@ impl Session {
                 serde_json::json!(public_result(&terminal)),
             );
             state.active = None;
+            session.0.presentation.end_run(run_id);
             state.management = false;
             session.0.settled.notify_waiters();
         });
@@ -621,6 +647,7 @@ impl Session {
                 *id
             })
         };
+        self.0.presentation.close();
         self.0.maintenance.stop().await;
         if let Some(run_id) = active {
             self.wait(run_id).await?;
@@ -817,12 +844,20 @@ fn new_session_id() -> u64 {
     hasher.finish()
 }
 fn compatible_binding(saved: &serde_json::Value, current: &serde_json::Value) -> bool {
-    if saved["cwd"] != current["cwd"] || saved["roles"] != current["roles"] {
-        return false;
+    fn user_roles(value: &serde_json::Value) -> Option<BTreeMap<String, String>> {
+        let mut roles: BTreeMap<String, String> =
+            serde_json::from_value(value["roles"].clone()).ok()?;
+        roles.retain(|role, _| {
+            !matches!(
+                role.as_str(),
+                eden_protocol::interaction::HOST | eden_protocol::presentation::HOST
+            )
+        });
+        Some(roles)
     }
-    // Selected role identities define the binding; unused package inventories and
-    // compatible package-version changes are not historical state dependencies.
-    true
+    // Host-owned services can change between releases without rebinding saved user packages.
+    saved["cwd"] == current["cwd"]
+        && user_roles(saved).is_some_and(|roles| Some(roles) == user_roles(current))
 }
 
 struct InputOwner(Session);
@@ -831,5 +866,36 @@ impl Drop for InputOwner {
         let mut state = self.0.0.state.lock().unwrap_or_else(|e| e.into_inner());
         state.pending_inputs -= 1;
         self.0.0.settled.notify_waiters();
+    }
+}
+
+#[cfg(test)]
+mod session_binding_tests {
+    use super::*;
+    #[test]
+    fn old_session_header_ignores_host_owned_service_inventory() {
+        let saved = serde_json::json!({
+            "cwd": "/project",
+            "roles": {
+                "eden.coding-loop.v1": "coding",
+                "eden.interaction.v1": "eden-host-interaction",
+            },
+            "packages": ["old"],
+        });
+        let current = serde_json::json!({
+            "cwd": "/project",
+            "roles": {
+                "eden.coding-loop.v1": "coding",
+                "eden.interaction.v1": "eden-host-interaction",
+                "eden.presentation.host.v1": "eden-host-presentation",
+            },
+            "packages": ["new"],
+        });
+        assert!(compatible_binding(&saved, &current));
+        let changed = serde_json::json!({
+            "cwd": "/project",
+            "roles": { "eden.coding-loop.v1": "other" },
+        });
+        assert!(!compatible_binding(&saved, &changed));
     }
 }

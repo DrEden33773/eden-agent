@@ -190,6 +190,21 @@ pub enum Family {
     InstallationCheck,
     /// Serve version 1 JSONL requests over stdin/stdout until disconnect or shutdown
     Rpc,
+    /// Host one live Session for explicitly attached local terminal and browser clients
+    Live {
+        /// Credential-bearing endpoint description written for local clients
+        #[arg(long, value_name = "PATH")]
+        endpoint: PathBuf,
+        /// Built React/Spectrum adapter directory served by the local host
+        #[arg(long, value_name = "DIR")]
+        web_root: Option<PathBuf>,
+    },
+    /// Attach the minimal Ratatui adapter to an explicitly selected live host
+    LiveTui {
+        /// Endpoint description issued by `eden live`
+        #[arg(long, value_name = "PATH")]
+        endpoint: PathBuf,
+    },
     /// Inspect and manage a llama.cpp router
     Router {
         #[command(subcommand)]

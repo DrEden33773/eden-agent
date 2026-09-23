@@ -53,6 +53,10 @@ async fn run(parsed: Parsed, shell: &Shell) -> Result<i32, Box<dyn std::error::E
             | Family::InstallationCheck,
         ) => eden_cli::delivery::run(&parsed.cli).await,
         Some(Family::Rpc) => eden_cli::rpc::run(&parsed.cli).await,
+        Some(Family::Live { endpoint, web_root }) => {
+            eden_cli::live::run_host(&parsed.cli, endpoint, web_root.as_deref()).await
+        }
+        Some(Family::LiveTui { endpoint }) => eden_cli::live::run_tui(endpoint).await,
         Some(Family::Models { .. } | Family::Auth { .. } | Family::Router { .. }) => {
             eden_cli::model_commands::run(&parsed.cli).await
         }

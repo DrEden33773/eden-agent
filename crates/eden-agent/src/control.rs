@@ -130,6 +130,7 @@ impl Session {
                 .ok_or_else(|| Fault::new("Unavailable", "command", "run identity exhausted"))?;
             let cancel = Cancellation::default();
             state.commands.insert(id, cancel.clone());
+            self.0.presentation.begin_run(id);
             (id, cancel)
         };
         self.0.events.push(run_id, "accepted", accepted);
@@ -163,6 +164,7 @@ impl Session {
             }
             let mut state = session.0.state.lock().unwrap_or_else(|e| e.into_inner());
             state.commands.remove(&run_id);
+            session.0.presentation.end_run(run_id);
             state.terminals.insert(run_id, terminal.clone());
             session
                 .0

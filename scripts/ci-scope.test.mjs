@@ -54,6 +54,7 @@ test("associated inputs select hooks only for tooling and configuration", () => 
     ".githooks/pre-commit",
     ".github/workflows/quality.yml",
     "package.json",
+    "pnpm-workspace.yaml",
     ".gitignore",
     "LICENSE",
     "new-fixture.json",
@@ -61,6 +62,8 @@ test("associated inputs select hooks only for tooling and configuration", () => 
   ])
     assert.deepEqual(selected([path]), FAMILIES, path);
   assert.deepEqual(selected(["pnpm-lock.yaml"]), ["markdown", "javascript", "native", "hooks"]);
+  assert.deepEqual(selected(["web/presentation/src/main.tsx"]), ["javascript"]);
+  assert.deepEqual(selected(["web/presentation/package.json"]), ["javascript"]);
   for (const path of ["pyproject.toml", "uv.lock"])
     assert.deepEqual(selected([path]), ["python", "native", "hooks"]);
   assert.deepEqual(selected(["crates/a/src/lib.rs", "uv.lock"]), [

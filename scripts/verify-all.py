@@ -24,6 +24,7 @@ from verification import (
 SUITES = {
     "delivery": ("verify-delivery.py", "delivery-verification.json"),
     "native": ("verify.py", "verification.json"),
+    "presentation": ("verify-presentation.py", "presentation-verification.json"),
     "coding": ("verify-coding.py", "coding-verification.json"),
     "sessions": ("verify-sessions.py", "session-verification.json"),
     "context": ("verify-context.py", "context-verification.json"),

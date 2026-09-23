@@ -1,6 +1,7 @@
 //! Pending dialogs are scoped to their invoking plugin operation, never to a transport reader.
 use super::*;
 use eden_protocol::interaction::{HOST, Interaction};
+use eden_protocol::presentation as p;
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
 struct Pending {
@@ -18,6 +19,8 @@ struct PendingOwner {
     hub: Arc<Interactions>,
     id: u64,
     cx: eden_plugin_sdk::CallContext,
+    presentation: Arc<super::presentation::Hub>,
+    view_id: Option<String>,
 }
 impl Drop for PendingOwner {
     fn drop(&mut self) {
@@ -26,18 +29,27 @@ impl Drop for PendingOwner {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&self.id);
+        if let Some(view_id) = &self.view_id {
+            let _ = self
+                .presentation
+                .remove("eden-host-interaction", self.cx.run_id(), view_id);
+        }
         let _ = self
             .cx
             .emit("interaction_finished", json!({ "interaction_id": self.id }));
     }
 }
 impl Interactions {
-    pub(crate) fn package(self: &Arc<Self>) -> eden_plugin_sdk::Package {
+    pub(crate) fn package(
+        self: &Arc<Self>,
+        presentation: Arc<super::presentation::Hub>,
+    ) -> eden_plugin_sdk::Package {
         let hub = self.clone();
         eden_plugin_sdk::Package::new("eden-host-interaction").service(
             HOST,
             move |input: Interaction, cx| {
                 let hub = hub.clone();
+                let presentation = presentation.clone();
                 async move {
                     if !hub.enabled.load(Ordering::Acquire) {
                         return Err(Fault::new(
@@ -61,6 +73,27 @@ impl Interactions {
                                 "interaction_notification",
                                 json!({ "kind": kind, "value": value }),
                             )?;
+                            let slot = match kind.as_str() {
+                                "title" => p::Slot::Header,
+                                "status" => p::Slot::Footer,
+                                "editor_text" => p::Slot::Composer,
+                                _ => p::Slot::Panel,
+                            };
+                            let text = value
+                                .as_str()
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| value.to_string());
+                            let view = p::View::new(
+                                format!("notification-{kind}"),
+                                slot,
+                                format!("Plugin {kind}"),
+                            )
+                            .node(p::Node::Status {
+                                id: "value".into(),
+                                text,
+                            });
+                            let _ =
+                                presentation.publish("eden-host-interaction", cx.run_id(), view);
                             Ok(Value::Null)
                         }
                         Interaction::Request {
@@ -100,10 +133,53 @@ impl Interactions {
                                     },
                                 );
                             }
+                            let view_id = format!("dialog-{id}");
+                            let field = match kind.as_str() {
+                                "select" => p::Field {
+                                    id: "value".into(),
+                                    label: title.clone(),
+                                    kind: p::FieldKind::Choice,
+                                    required: true,
+                                    initial: Some(json!(initial)),
+                                    options: options.clone(),
+                                },
+                                "confirm" => p::Field {
+                                    id: "value".into(),
+                                    label: title.clone(),
+                                    kind: p::FieldKind::Boolean,
+                                    required: true,
+                                    initial: None,
+                                    options: vec![],
+                                },
+                                _ => p::Field {
+                                    id: "value".into(),
+                                    label: title.clone(),
+                                    kind: p::FieldKind::Text,
+                                    required: false,
+                                    initial: Some(json!(initial)),
+                                    options: vec![],
+                                },
+                            };
+                            let view = p::View::new(view_id.clone(), p::Slot::Panel, title.clone())
+                                .node(p::Node::Form {
+                                    id: "reply".into(),
+                                    action: "respond".into(),
+                                    fields: vec![field],
+                                })
+                                .node(p::Node::Button {
+                                    id: "dismiss".into(),
+                                    action: "dismiss".into(),
+                                    label: "Dismiss".into(),
+                                });
+                            let published = presentation
+                                .publish("eden-host-interaction", cx.run_id(), view)
+                                .is_ok();
                             let _owner = PendingOwner {
                                 hub: hub.clone(),
                                 id,
                                 cx: cx.clone(),
+                                presentation: presentation.clone(),
+                                view_id: published.then_some(view_id),
                             };
                             cx.emit(
                                 "interaction_requested",

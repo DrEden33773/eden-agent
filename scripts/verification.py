@@ -30,6 +30,7 @@ AUTHORS = (
     "embedded-client",
     "entrypoint-extension",
     "delivery-services",
+    "presentation-live",
 )
 INVALID = ("wrong-abi", "wrong-sdk", "short-table", "metadata-panic", "init-panic")
 EXAMPLES = (

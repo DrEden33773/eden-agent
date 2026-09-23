@@ -29,6 +29,7 @@ export function scopeFor(event, paths) {
         "scripts/format-editor.mjs",
         "scripts/install-formatter.mjs",
         "package.json",
+        "pnpm-workspace.yaml",
         ".gitignore",
       ].includes(path)
     ) {
@@ -68,6 +69,8 @@ export function scopeFor(event, paths) {
     } else if (/\.py$/.test(path) || ["pyproject.toml", "uv.lock"].includes(path)) {
       selected.add("python");
       selected.add("native");
+    } else if (path.startsWith("web/presentation/")) {
+      selected.add("javascript");
     } else if (/\.mjs$/.test(path)) {
       selected.add("javascript");
       selected.add("native");

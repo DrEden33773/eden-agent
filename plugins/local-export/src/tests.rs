@@ -223,10 +223,7 @@ fn static_presentation_obeys_selection_without_leaking_title_or_fallback() {
     ];
     let artifact = export(ExportRequest {
         records: records.clone(),
-        selection: Selection {
-            full_outputs: true,
-            ..Selection::default()
-        },
+        selection: Selection::default(),
         format: Format::Jsonl,
     })
     .unwrap();
@@ -238,7 +235,6 @@ fn static_presentation_obeys_selection_without_leaking_title_or_fallback() {
         selection: Selection {
             messages: false,
             attachments: true,
-            full_outputs: true,
             ..Selection::default()
         },
         format: Format::Jsonl,

@@ -380,7 +380,6 @@ pub fn static_views(records: &[Record], selection: &Selection) -> Vec<LiveView> 
             };
             let run_id = raw.get("run_id").and_then(Value::as_u64);
             if !class_selected(source.class, selection)
-                || (source.class == ContentClass::Tool && !selection.full_outputs)
                 || run_id != Some(record.run_id)
                 || run_id != Some(origin.run_id)
                 || !source_record_matches(source.class, origin)
@@ -419,7 +418,9 @@ pub fn static_views(records: &[Record], selection: &Selection) -> Vec<LiveView> 
                     .map(|nodes| {
                         nodes
                             .iter()
-                            .filter_map(|node| static_node(node, &attachments, selection))
+                            .filter_map(|node| {
+                                static_node(node, &attachments, selection, has_excluded_attachment)
+                            })
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default()
@@ -597,17 +598,22 @@ fn excluded_attachment(node: &Value, allowed: &BTreeSet<u64>) -> bool {
                     .any(|child| excluded_attachment(child, allowed))
             })
 }
-fn static_node(raw: &Value, attachments: &BTreeSet<u64>, selection: &Selection) -> Option<Node> {
+fn static_node(
+    raw: &Value,
+    attachments: &BTreeSet<u64>,
+    selection: &Selection,
+    scrub_group_titles: bool,
+) -> Option<Node> {
     if raw.get("kind").and_then(Value::as_str) == Some("group") {
         let children = raw
             .get("children")?
             .as_array()?
             .iter()
-            .filter_map(|child| static_node(child, attachments, selection))
+            .filter_map(|child| static_node(child, attachments, selection, scrub_group_titles))
             .collect();
         return Some(Node::Group {
             id: raw.get("id")?.as_str()?.into(),
-            title: if excluded_attachment(raw, attachments) {
+            title: if scrub_group_titles || excluded_attachment(raw, attachments) {
                 "Saved group".into()
             } else {
                 raw.get("title")?.as_str()?.into()
@@ -618,7 +624,7 @@ fn static_node(raw: &Value, attachments: &BTreeSet<u64>, selection: &Selection) 
     if let Some(children) = raw.get("children").and_then(Value::as_array) {
         let children: Vec<Node> = children
             .iter()
-            .filter_map(|child| static_node(child, attachments, selection))
+            .filter_map(|child| static_node(child, attachments, selection, scrub_group_titles))
             .collect();
         if !children.is_empty() {
             return Some(Node::Group {
@@ -739,12 +745,7 @@ mod static_tests {
     #[test]
     fn selection_drops_actions_and_attachment_metadata_without_losing_the_diff() {
         let records = history();
-        assert!(static_views(&records, &Selection::default()).is_empty());
-        let selection = Selection {
-            full_outputs: true,
-            ..Selection::default()
-        };
-        let views = static_views(&records, &selection);
+        let views = static_views(&records, &Selection::default());
         assert_eq!(views.len(), 1);
         assert!(!views[0].active);
         assert_eq!(views[0].view.title, "Saved presentation");
@@ -796,6 +797,72 @@ mod static_tests {
             matches!(&views[0].view.nodes[0], Node::Group { title, children, .. }
             if title == "Saved group" && matches!(children.as_slice(), [Node::Text { .. }]))
         );
+    }
+    #[test]
+    fn summary_and_complete_output_views_have_separate_selection() {
+        let summary = LiveView {
+            owner: "author".into(),
+            run_id: 1,
+            revision: 1,
+            active: false,
+            handled_actions: vec![],
+            view: View::new("summary", Slot::ToolResult, "Safe summary")
+                .source(Source {
+                    record_sequence: Some(3),
+                    class: ContentClass::Tool,
+                })
+                .node(Node::Table {
+                    id: "table".into(),
+                    columns: vec!["Result".into()],
+                    rows: vec![vec!["ready".into()]],
+                }),
+        };
+        let complete = LiveView {
+            owner: "author".into(),
+            run_id: 1,
+            revision: 2,
+            active: false,
+            handled_actions: vec![],
+            view: View::new("complete", Slot::ToolResult, "Full output")
+                .source(Source {
+                    record_sequence: Some(2),
+                    class: ContentClass::FullOutput,
+                })
+                .node(Node::Code {
+                    id: "raw".into(),
+                    language: None,
+                    text: "FULL_OUTPUT_CANARY".into(),
+                }),
+        };
+        let records = vec![
+            record(1, "session", json!({})),
+            record(2, "tool_result", json!({})),
+            record(3, "terminal", json!({ "status": "completed" })),
+            record(
+                4,
+                "presentation_static",
+                json!(StaticRecord {
+                    version: VERSION,
+                    views: vec![json!(summary), json!(complete)],
+                }),
+            ),
+        ];
+        let default = static_views(&records, &Selection::default());
+        assert_eq!(default.len(), 1);
+        assert_eq!(default[0].view.id, "summary");
+        assert!(
+            !serde_json::to_string(&default)
+                .unwrap()
+                .contains("FULL_OUTPUT_CANARY")
+        );
+        let selected = static_views(
+            &records,
+            &Selection {
+                full_outputs: true,
+                ..Selection::default()
+            },
+        );
+        assert_eq!(selected.len(), 2);
     }
     #[test]
     fn copy_rebases_source_and_attachment_and_drops_missing_references() {

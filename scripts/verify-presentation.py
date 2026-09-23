@@ -212,8 +212,12 @@ def main() -> None:
         binary = destination / "bin" / ("eden.exe" if sys.platform == "win32" else "eden")
         native = scratch / author_artifact("presentation-live").name
         shutil.copy2(author_artifact("presentation-live"), native)
+        peer = scratch / author_artifact("presentation-peer").name
+        shutil.copy2(author_artifact("presentation-peer"), peer)
+        peer_contract = "eden.test.presentation-peer.v1"
         composition = {
             "packages": [
+                package("presentation-peer", [peer_contract, ACTION], str(peer), target()),
                 package(
                     "coding",
                     ["eden.coding-control.v1", CODING, CODING_CONTEXT, QUEUE],
@@ -235,6 +239,7 @@ def main() -> None:
                 CODING_PROVIDER: "presentation-live",
                 CODING_TOOL: "presentation-live",
                 QUEUE: "coding",
+                peer_contract: "presentation-peer",
                 STORE: "local-history",
             },
             "resource_packages": [],
@@ -376,6 +381,58 @@ def main() -> None:
             except RuntimeError as error:
                 assert "StaleRevision" in str(error) or "Unavailable" in str(error)
             wait_for(endpoint, lambda frame: frame["state"]["active_run"] is None)
+            paired = call(endpoint, "/prompt", {"request_id": "peer-slots", "text": "peer-slots"})[
+                "run_id"
+            ]
+            paired_frame = wait_for(
+                endpoint,
+                lambda frame: any(
+                    item["id"] == "review"
+                    and item["run_id"] == paired
+                    and item["revision"] > view["revision"]
+                    for item in frame["presentation"]["views"]
+                ),
+            )
+            paired_views = [
+                item
+                for item in paired_frame["presentation"]["views"]
+                if item["run_id"] == paired and item["active"]
+            ]
+            assert {item["slot"] for item in paired_views} >= {
+                "header",
+                "footer",
+                "overlay",
+                "composer",
+                "panel",
+            }
+            panels = [item["owner"] for item in paired_views if item["slot"] == "panel"]
+            assert panels == sorted(panels) and set(panels) == {
+                "presentation-live",
+                "presentation-peer",
+            }, panels
+            peer_view = next(item for item in paired_views if item["owner"] == "presentation-peer")
+            peer_action = {
+                "session_id": endpoint["session_id"],
+                "owner": peer_view["owner"],
+                "view_id": peer_view["id"],
+                "revision": peer_view["revision"],
+                "action": "peer-action",
+                "request_id": "peer-route",
+                "values": None,
+            }
+            assert call(endpoint, "/action", peer_action) == {"owner": "presentation-peer"}
+            call(endpoint, "/cancel", {"run_id": paired})
+            paired_final = wait_for(endpoint, lambda frame: frame["state"]["active_run"] is None)
+            assert all(
+                not item["active"]
+                for item in paired_final["presentation"]["views"]
+                if item["run_id"] == paired
+            )
+            try:
+                call(endpoint, "/action", {**peer_action, "request_id": "peer-after-settlement"})
+                raise AssertionError("settled peer action was accepted")
+            except RuntimeError as error:
+                assert "Unavailable" in str(error)
             call(endpoint, "/detach", {"attachment": reconnected})
             run = call(endpoint, "/prompt", {"request_id": "cancel-run", "text": "again"})["run_id"]
             wait_for(
@@ -434,6 +491,7 @@ def main() -> None:
                 for node in view["nodes"]
             )
             native.unlink()
+            peer.unlink()
             shutil.copy2(history_file, ROOT / "artifacts/presentation-history.jsonl")
             read_endpoint_file = scratch / "read-endpoint.json"
             read_command = [
@@ -497,6 +555,7 @@ def main() -> None:
                 "tui_keyboard": tui_keyboard,
                 "tui_regressions": tui_regressions,
                 "real_queue_competition": True,
+                "two_native_owners_and_exclusive_slots": True,
                 "answer_competition": True,
                 "static_views": len(static["presentation"]["views"]),
                 "plugin_removed_read_only": True,

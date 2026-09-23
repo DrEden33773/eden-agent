@@ -117,6 +117,18 @@ function App() {
   const activityTimer = useRef<number | null>(null);
   const attachmentRef = useRef<number | null>(null);
   const activeTarget = useRef<ActivityTarget | null>(null);
+  const focusedView = useRef<string | null>(null);
+  const composerRef = useRef<React.ComponentRef<typeof TextField>>(null);
+  useEffect(() => {
+    const key = focusedView.current;
+    if (!key || !frame || frame.state.read_only) return;
+    if (
+      !frame.presentation.views.some((view) => `${view.owner}/${view.id}` === key && view.active)
+    ) {
+      focusedView.current = null;
+      composerRef.current?.focus();
+    }
+  }, [frame]);
   useEffect(() => {
     if (!token) {
       setConnection("Open the explicit URL supplied by the live host.");
@@ -475,7 +487,12 @@ function App() {
     frame?.presentation.activity.filter((item) => item.attachment !== attachment) ?? [];
   return (
     <Provider theme={defaultTheme} colorScheme="dark">
-      <main>
+      <main
+        onFocusCapture={(event) => {
+          if (!(event.target as HTMLElement).closest("[data-presentation-view], [data-cancel-run]"))
+            focusedView.current = null;
+        }}
+      >
         <header>
           <h1>{frame?.state.read_only ? "Eden saved presentation" : "Eden live"}</h1>
           <span>Session {frame?.presentation.session_id ?? "connecting"}</span>
@@ -489,7 +506,13 @@ function App() {
         </div>
         <section className="views" aria-label="Live presentation">
           {frame?.presentation.views.map((view) => (
-            <article key={`${view.owner}/${view.id}`}>
+            <article
+              key={`${view.owner}/${view.id}`}
+              data-presentation-view
+              onFocusCapture={() => {
+                focusedView.current = `${view.owner}/${view.id}`;
+              }}
+            >
               <div className="view-title">
                 <strong>{view.title}</strong>
                 <small>
@@ -515,6 +538,7 @@ function App() {
         {!frame?.state.read_only && (
           <footer>
             <TextField
+              ref={composerRef}
               label="Message"
               value={composer}
               onChange={changeComposer}
@@ -550,6 +574,7 @@ function App() {
               )}
               <Button
                 variant="negative"
+                data-cancel-run
                 isDisabled={!connected || !frame?.state.active_run}
                 onPress={() => {
                   stopActivity();

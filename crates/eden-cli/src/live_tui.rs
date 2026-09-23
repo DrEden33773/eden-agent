@@ -668,11 +668,14 @@ async fn run_attached(
                     updates.send_replace((None, Some(format!("Disconnected · retrying: {error}"))));
                     if error.source == "presentation"
                         && error.code == "InvalidInput"
-                        && let Ok(attached) = call(
-                            &endpoint_owned,
-                            "POST",
-                            "/attach",
-                            Some(&json!({ "frontend": "tui" })),
+                        && let Ok(Ok(attached)) = tokio::time::timeout(
+                            Duration::from_secs(6),
+                            call(
+                                &endpoint_owned,
+                                "POST",
+                                "/attach",
+                                Some(&json!({ "frontend": "tui" })),
+                            ),
                         )
                         .await
                         && let Some(attachment) = attached["attachment"].as_u64()

@@ -16,6 +16,7 @@ let slot = "panel";
 let version = 1;
 let unknownNode = false;
 let cancellations = 0;
+let contributionVisible = true;
 let nextAttachment = 0;
 const attachments = new Set();
 const snapshots = [];
@@ -55,52 +56,54 @@ function frame() {
       session_id: "explicit-fixture-session",
       sequence,
       activity: [],
-      views: [
-        {
-          owner: "fixture",
-          run_id: 1,
-          revision: sequence,
-          active: active && !readOnly,
-          handled_actions: [],
-          id: "review",
-          slot,
-          title: "Recovery fixture",
-          fallback: "Review",
-          platforms: [],
-          nodes: [
-            ...(unknownNode
-              ? [
-                  {
-                    kind: "future-widget",
-                    id: "future",
-                    children: [
-                      {
-                        kind: "text",
-                        id: "known-child",
-                        text: "Known child survives unknown node",
-                      },
-                    ],
-                  },
-                ]
-              : []),
+      views: contributionVisible
+        ? [
             {
-              kind: "form",
-              id: "form",
-              action: "submit",
-              fields: [
+              owner: "fixture",
+              run_id: 1,
+              revision: sequence,
+              active: active && !readOnly,
+              handled_actions: [],
+              id: "review",
+              slot,
+              title: "Recovery fixture",
+              fallback: "Review",
+              platforms: [],
+              nodes: [
+                ...(unknownNode
+                  ? [
+                      {
+                        kind: "future-widget",
+                        id: "future",
+                        children: [
+                          {
+                            kind: "text",
+                            id: "known-child",
+                            text: "Known child survives unknown node",
+                          },
+                        ],
+                      },
+                    ]
+                  : []),
                 {
-                  id: "reason",
-                  label: "Reason",
-                  kind: "text",
-                  required: false,
-                  initial: "base",
-                  options: [],
+                  kind: "form",
+                  id: "form",
+                  action: "submit",
+                  fields: [
+                    {
+                      id: "reason",
+                      label: "Reason",
+                      kind: "text",
+                      required: false,
+                      initial: "base",
+                      options: [],
+                    },
+                  ],
                 },
               ],
             },
-          ],
-        },
-      ],
+          ]
+        : [],
     },
     state: { active_run: active ? 1 : null, closed: false, read_only: readOnly },
   };
@@ -260,6 +263,26 @@ try {
       `draft in ${exclusiveSlot}`,
     );
     assert.equal(await evaluate('document.querySelector("article input").disabled'), true);
+    assert.equal(
+      await evaluate('document.activeElement === document.querySelector("footer input")'),
+      true,
+      `${exclusiveSlot}: cancellation returns focus to composer`,
+    );
+    assert.equal(await evaluate('document.querySelector("footer input").value'), "composer draft");
+    active = true;
+    sequence++;
+    await waitFor(`document.body.innerText.includes("revision ${sequence}")`);
+    await browser("find", "label", "Reason", "fill", `closing ${exclusiveSlot}`);
+    contributionVisible = false;
+    sequence++;
+    await waitFor('document.querySelector("article") === null');
+    assert.equal(
+      await evaluate('document.activeElement === document.querySelector("footer input")'),
+      true,
+      `${exclusiveSlot}: closed contribution returns focus to composer`,
+    );
+    assert.equal(await evaluate('document.querySelector("footer input").value'), "composer draft");
+    contributionVisible = true;
   }
   assert.equal(cancellations, 4);
   unknownNode = true;
@@ -277,7 +300,7 @@ try {
   await waitFor('document.body.innerText.includes("Review — Unsupported presentation slot.")');
   assert.equal(await evaluate('document.querySelector("article button") === null'), true);
   console.log(
-    "PASS: real Chromium recovery, expired attachment, retained target/watermark/drafts/attempt ID, settled controls, read-only errors, four exclusive slots focus/draft/cancel, unknown node/version/slot fallback",
+    "PASS: real Chromium recovery, expired attachment, retained target/watermark/drafts/attempt ID, settled controls, read-only errors, four exclusive slots focus/draft/cancel/close/composer restoration, unknown node/version/slot fallback",
   );
 } finally {
   await browser("close");

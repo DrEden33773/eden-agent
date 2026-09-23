@@ -29,9 +29,14 @@ class Fixture(http.server.ThreadingHTTPServer):
         self.fail = False
         self.expired = False
         self.attachment = 0
+        self.stall_attach = False
+        self.attach_started = threading.Event()
+        self.attach_release = threading.Event()
         self.sequence = 1
         self.read_only = False
         self.active = True
+        self.hide_view = False
+        self.remove_on_cancel = False
         self.mode = "ok"
         self.slot = "panel"
         self.version = 1
@@ -62,7 +67,9 @@ class Fixture(http.server.ThreadingHTTPServer):
                 "sequence": self.sequence,
                 "activity": [],
                 "pending_interactions": [],
-                "views": [
+                "views": []
+                if self.hide_view
+                else [
                     {
                         "owner": "fixture",
                         "run_id": 1,
@@ -149,6 +156,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         if self.path == "/attach":
+            if self.fixture.stall_attach:
+                self.fixture.stall_attach = False
+                self.fixture.attach_started.set()
+                self.fixture.attach_release.wait()
+                self.respond({"attachment": 999})
+                return
             self.fixture.attachment += 1
             self.fixture.expired = False
             self.respond({"attachment": self.fixture.attachment})
@@ -161,6 +174,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 self.respond({"accepted": True})
         elif self.path == "/cancel":
+            if self.fixture.remove_on_cancel:
+                self.fixture.hide_view = True
+                self.fixture.active = False
+                self.fixture.sequence += 1
             self.fixture.cancelled.set()
             self.respond({})
         elif self.path == "/activity":
@@ -170,8 +187,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.respond({})
 
 
-def wait_for(predicate, message):
-    until = time.monotonic() + 5
+def wait_for(predicate, message, seconds=5):
+    until = time.monotonic() + seconds
     while time.monotonic() < until:
         if predicate():
             return
@@ -245,8 +262,54 @@ class Terminal:
         os.close(self.slave)
 
 
+def stalled_attach_recovery(binary):
+    server = Fixture()
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with tempfile.TemporaryDirectory(prefix="eden-tui-reattach-") as directory:
+            endpoint = Path(directory) / "endpoint.json"
+            endpoint.write_text(
+                json.dumps(
+                    {
+                        "address": f"127.0.0.1:{server.server_port}",
+                        "token": "test",
+                        "session_id": 123,
+                    }
+                )
+            )
+            terminal = Terminal(binary, endpoint)
+            try:
+                terminal.send(b"\tX")
+                server.stall_attach = True
+                server.expired = True
+                assert server.attach_started.wait(3), "recovery attach never started"
+                terminal.read(0.5)
+                assert "Disconnected" in terminal.display, terminal.display
+                wait_for(
+                    lambda: server.attachment == 2, "stalled attach blocked recovery", seconds=9
+                )
+                terminal.read(0.5)
+                assert "Connected" in terminal.display, terminal.display
+                terminal.send(b"\r")
+                wait_for(lambda: server.actions, "recovered form never submitted")
+                assert server.actions[-1]["values"]["text"] == "baseX"
+                assert not server.attach_release.is_set(), (
+                    "original attach released before recovery"
+                )
+                print("stalled reattach timeout, automatic recovery and draft retention: passed")
+            finally:
+                terminal.close()
+    finally:
+        server.attach_release.set()
+        server.shutdown()
+        server.server_close()
+
+
 def main():
     binary = str(Path(sys.argv[1]).resolve())
+    stalled_attach_recovery(binary)
+    if sys.argv[2:] == ["--attach-recovery-only"]:
+        return
     server = Fixture()
     threading.Thread(target=server.serve_forever, daemon=True).start()
     with tempfile.TemporaryDirectory(prefix="eden-tui-pty-") as directory:
@@ -337,13 +400,16 @@ def main():
         server.active = True
         server.mode = "ok"
         for slot in ("header", "footer", "overlay", "composer"):
+            server.active = True
+            server.hide_view = False
+            server.remove_on_cancel = True
             server.slot = slot
             server.fields[0]["initial"] = "base"
             server.cancelled.clear()
             terminal = Terminal(binary, endpoint)
             try:
                 count = len(server.actions)
-                terminal.send(b"\tX")
+                terminal.send(b"kept\tX")
                 assert "text:" in terminal.display, terminal.display
                 server.sequence += 1
                 terminal.read()
@@ -354,9 +420,22 @@ def main():
                 assert server.actions[-1]["values"]["text"] == "baseX"
                 terminal.send(b"\x18")
                 assert server.cancelled.wait(2), f"{slot} cancel unreachable"
+                terminal.read(0.5)
+                assert "Composer: kept" in terminal.display, terminal.display
+                activity_count = len(server.activities)
+                terminal.send(b"Y")
+                assert "Composer: keptY" in terminal.display, terminal.display
+                assert any(
+                    item["active"] and item["target"] == {"kind": "composer"}
+                    for item in server.activities[activity_count:]
+                ), f"{slot} did not restore editable composer focus"
             finally:
                 terminal.close()
-            print(f"{slot} focus, revision draft preservation and cancel: passed")
+            print(
+                f"{slot} focus, revision draft preservation, cancel and composer focus restoration: passed"
+            )
+        server.hide_view = False
+        server.active = True
         server.unknown = True
         for version in (1, 999):
             server.version = version

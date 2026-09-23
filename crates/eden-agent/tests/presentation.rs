@@ -516,10 +516,12 @@ async fn run_settlement_waits_for_admitted_action_cleanup() {
 async fn two_authors_have_ordered_panels_and_exclusive_slot_conflicts() {
     const SECOND: &str = "test.second-presenter.v1";
     let second = Package::new("author-b").service(SECOND, |slot: Slot, cx| async move {
-        cx.present(View::new("second", slot, "Second author").node(Node::Text {
-            id: "text".into(),
-            text: "B".into(),
-        }))
+        cx.present(
+            View::new(format!("second-{slot:?}"), slot, "Second author").node(Node::Text {
+                id: "text".into(),
+                text: "B".into(),
+            }),
+        )
         .await
     });
     let ready = std::sync::Arc::new(tokio::sync::Notify::new());
@@ -535,10 +537,12 @@ async fn two_authors_have_ordered_panels_and_exclusive_slot_conflicts() {
                 Slot::Overlay,
                 Slot::Composer,
             ] {
-                cx.present(View::new("first", slot, "First author").node(Node::Text {
-                    id: "text".into(),
-                    text: "A".into(),
-                }))
+                cx.present(
+                    View::new(format!("first-{slot:?}"), slot, "First author").node(Node::Text {
+                        id: "text".into(),
+                        text: "A".into(),
+                    }),
+                )
                 .await?;
                 let other = cx.call::<_, Revision>(SECOND, &slot).await;
                 if matches!(slot, Slot::Panel | Slot::ToolResult) {
@@ -567,6 +571,7 @@ async fn two_authors_have_ordered_panels_and_exclusive_slot_conflicts() {
                 snapshot
                     .views
                     .iter()
+                    .filter(|view| view.view.slot == Slot::Panel)
                     .map(|view| view.owner.as_str())
                     .collect::<Vec<_>>(),
                 vec!["author-a", "author-b"]

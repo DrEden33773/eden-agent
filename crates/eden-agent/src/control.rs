@@ -146,9 +146,10 @@ impl Session {
                         contract,
                         payload,
                     },
-                    cancel,
+                    cancel.clone(),
                 )
                 .await;
+            session.0.presentation.drain_actions(run_id, &cancel).await;
             if let Outcome::Completed(value) = &mut terminal.outcome {
                 terminal.outcome = match project(std::mem::take(value)) {
                     Ok(value) => Outcome::Completed(value),

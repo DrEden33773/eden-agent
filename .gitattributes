@@ -1,5 +1,11 @@
 .githooks/* text eol=lf
+*.js text eol=lf
+*.jsx text eol=lf
 *.mjs text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.css text eol=lf
+*.html text eol=lf
 biome.json text eol=lf
 # These include_str! fixtures carry exact protocol/source bytes on every platform.
 crates/eden-cli/tests/fixtures/*.txt -text

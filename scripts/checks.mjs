@@ -1,6 +1,6 @@
 // Shared check commands for contributors, hooks and CI.
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, symlinkSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -88,10 +88,62 @@ function edenFmt(toolRoot, env) {
   return found;
 }
 
+// TypeScript resolves imports beside the snapshot sources. Reuse only a matching
+// installed graph; linking dependencies must never redirect the project source.
+function webTypes(root, toolRoot, env) {
+  const web = "web/presentation";
+  if (!existsSync(join(root, web, "package.json"))) return;
+  const setup =
+    "Web snapshot dependencies do not match. In a separate checkout of the pushed commit, run pnpm install --frozen-lockfile, then push from that checkout.";
+  const contents = (base, path) => {
+    const file = join(base, path);
+    if (!existsSync(file)) throw new Error(setup);
+    return readFileSync(file, "utf8").replace(/\r\n/g, "\n");
+  };
+  for (const path of [
+    "package.json",
+    "pnpm-workspace.yaml",
+    "pnpm-lock.yaml",
+    `${web}/package.json`,
+  ]) {
+    if (contents(root, path) !== contents(toolRoot, path)) throw new Error(setup);
+  }
+  if (contents(root, "pnpm-lock.yaml") !== contents(toolRoot, "node_modules/.pnpm/lock.yaml"))
+    throw new Error(setup);
+  const manifest = JSON.parse(contents(root, `${web}/package.json`));
+  for (const [name, version] of Object.entries({
+    ...manifest.dependencies,
+    ...manifest.devDependencies,
+  })) {
+    const installed = JSON.parse(contents(toolRoot, `${web}/node_modules/${name}/package.json`));
+    if (installed.version !== version) throw new Error(`${setup} Version mismatch: ${name}.`);
+  }
+  if (resolve(root) !== resolve(toolRoot)) {
+    for (const path of ["node_modules", `${web}/node_modules`]) {
+      symlinkSync(
+        join(toolRoot, path),
+        join(root, path),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    }
+  }
+  const compiler = join(toolRoot, web, "node_modules/typescript/bin/tsc");
+  run(
+    process.execPath,
+    [compiler, "--noEmit", "--project", join(root, web, "tsconfig.json")],
+    root,
+    env,
+  );
+}
+
 export function check(
   kind,
   { root = project, toolRoot = project, env = process.env, extra = [] } = {},
 ) {
+  if (kind === "web-types") {
+    webTypes(root, toolRoot, env);
+    return;
+  }
   if (kind === "markdown" || kind === "markdown-fix") {
     const cli = join(toolRoot, "node_modules", "markdownlint-cli2", "markdownlint-cli2-bin.mjs");
     if (!existsSync(cli))

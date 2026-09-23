@@ -4,8 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "build": "tsc --noEmit && vite build",
-    "dev": "vite"
+    "build": "vite build",
+    "dev": "vite",
+    "types": "tsc --noEmit"
   },
   "dependencies": {
     "@adobe/react-spectrum": "3.47.5",
@@ -15,7 +16,7 @@
   "devDependencies": {
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
-    "typescript": "5.9.3",
+    "typescript": "7.0.2",
     "vite": "8.3.0"
   }
 }

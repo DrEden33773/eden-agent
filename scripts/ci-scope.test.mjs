@@ -63,7 +63,7 @@ test("associated inputs select hooks only for tooling and configuration", () => 
     assert.deepEqual(selected([path]), FAMILIES, path);
   assert.deepEqual(selected(["pnpm-lock.yaml"]), ["markdown", "javascript", "native", "hooks"]);
   assert.deepEqual(selected(["web/presentation/src/main.tsx"]), ["javascript"]);
-  assert.deepEqual(selected(["web/presentation/package.json"]), ["javascript"]);
+  assert.deepEqual(selected(["web/presentation/package.json"]), ["javascript", "native", "hooks"]);
   for (const path of ["pyproject.toml", "uv.lock"])
     assert.deepEqual(selected([path]), ["python", "native", "hooks"]);
   assert.deepEqual(selected(["crates/a/src/lib.rs", "uv.lock"]), [
@@ -252,10 +252,16 @@ test("main proof reuses selected coverage independently of cache availability", 
 test("static gate rejects missing, skipped, failed or cancelled selected steps", () => {
   const selected = scopeFor("pull_request", ["README.md"]);
   const steps = Object.fromEntries(
-    ["markdown", "python", "javascript", "formatter", "format", "doc"].map((id) => [
-      id,
-      { outcome: id === "markdown" ? "success" : "skipped" },
-    ]),
+    [
+      "markdown",
+      "python",
+      "javascript",
+      "web_types",
+      "web_build",
+      "formatter",
+      "format",
+      "doc",
+    ].map((id) => [id, { outcome: id === "markdown" ? "success" : "skipped" }]),
   );
   assert.equal(staticPass(selected, steps), true);
   for (const outcome of ["failure", "cancelled", "skipped", undefined])
@@ -267,4 +273,24 @@ test("static gate rejects missing, skipped, failed or cancelled selected steps",
   assert.equal(staticPass(all, success), true);
   for (const id of Object.keys(success))
     assert.equal(staticPass(all, { ...success, [id]: { outcome: "skipped" } }), false);
+});
+
+test("front-end extensions and nested configuration have explicit coverage", () => {
+  for (const extension of ["js", "jsx", "mjs", "ts", "tsx", "css", "html"]) {
+    const web = scopeFor("pull_request", [`web/presentation/src/sample.${extension}`]);
+    assert.equal(web.javascript, true);
+    assert.equal(web.native, false);
+    assert.equal(web.hooks, false);
+    assert.equal(scopeFor("push", [`scripts/sample.${extension}`]).javascript, true);
+  }
+  for (const path of [
+    "web/presentation/tsconfig.json",
+    "web/presentation/biome.json",
+    "web/presentation/package.json",
+  ]) {
+    const selection = scopeFor("pull_request", [path]);
+    assert.equal(selection.javascript, true);
+    assert.equal(selection.native, true);
+    assert.equal(selection.hooks, true);
+  }
 });

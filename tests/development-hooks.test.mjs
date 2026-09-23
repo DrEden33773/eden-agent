@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -218,8 +218,21 @@ test("private-style submodule boundaries are not traversed by snapshot checks", 
 
 test("autocrlf checkout preserves Biome source and configuration line endings", (t) => {
   const root = fixture(t);
+  const frontend = ["js", "jsx", "mjs", "ts", "tsx"].map((extension) => [
+    `sample.${extension}`,
+    "// frontend source\n",
+  ]);
+  frontend.push(["sample.css", "body {\n  color: red;\n}\n"], ["sample.html", "<div></div>\n"]);
+  for (const [path, content] of frontend) writeFileSync(join(root, path), content);
+  git(root, "add", ...frontend.map(([path]) => path));
+  for (const [path] of frontend) rmSync(join(root, path));
   git(root, "-c", "core.autocrlf=true", "checkout-index", "--force", "--all");
-  for (const name of ["biome.json", "scripts/checks.mjs", "scripts/hooks.mjs"]) {
+  for (const name of [
+    "biome.json",
+    "scripts/checks.mjs",
+    "scripts/hooks.mjs",
+    ...frontend.map(([path]) => path),
+  ]) {
     assert.doesNotMatch(readFileSync(join(root, name), "utf8"), /\r/);
   }
   const result = command(root, process.execPath, ["scripts/checks.mjs", "javascript"]);

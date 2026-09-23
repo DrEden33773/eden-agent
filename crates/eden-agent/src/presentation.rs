@@ -12,6 +12,7 @@ type ViewKey = (String, String);
 #[derive(Default)]
 struct HubState {
     sequence: u64,
+    next_revision: u64,
     next_attachment: u64,
     views: BTreeMap<ViewKey, p::LiveView>,
     attachments: BTreeMap<u64, (String, Instant)>,
@@ -58,12 +59,12 @@ impl Hub {
                 let hub = hub.clone();
                 async move {
                     match request {
-                        p::HostRequest::Publish { owner, view } => {
-                            hub.publish(&owner, cx.run_id(), view)
-                        }
+                        p::HostRequest::Publish { owner, view } => hub
+                            .publish(&owner, cx.run_id(), view)
+                            .map(|revision| json!(revision)),
                         p::HostRequest::Remove { owner, id } => {
                             hub.remove(&owner, cx.run_id(), &id)?;
-                            Ok(p::Revision { value: 0 })
+                            Ok(Value::Null)
                         }
                     }
                 }
@@ -114,7 +115,11 @@ impl Hub {
             ));
         }
         let key = (owner.to_owned(), view.id.clone());
-        let revision = state.views.get(&key).map_or(1, |old| old.revision + 1);
+        let revision = state
+            .next_revision
+            .checked_add(1)
+            .ok_or_else(|| Fault::new("Unavailable", "presentation", "revision space exhausted"))?;
+        state.next_revision = revision;
         state
             .claimed_forms
             .retain(|(owner, id, _, _), _| owner != &key.0 || id != &key.1);
@@ -600,7 +605,7 @@ impl Session {
                             ));
                         }
                         listeners.push(send);
-                        false
+                        None
                     }
                 }
             } else {
@@ -622,6 +627,7 @@ impl Session {
                         "view changed; refresh before submitting",
                     ));
                 }
+                let admitted_run_id = view.run_id;
                 let node = find_action(&view.view.nodes, &request.action)
                     .ok_or_else(|| Fault::new("InvalidInput", "presentation", "unknown action"))?;
                 validate_action(node, &request.values)?;
@@ -654,20 +660,22 @@ impl Session {
                         listeners: vec![send],
                     },
                 );
-                true
+                Some(admitted_run_id)
             }
         };
-        if start {
+        if let Some(admitted_run_id) = start {
             let session = self.clone();
             tokio::spawn(async move {
-                session.complete_presentation_action(request).await;
+                session
+                    .complete_presentation_action(request, admitted_run_id)
+                    .await;
             });
         }
         receive
             .await
             .map_err(|_| Fault::new("Unavailable", "presentation", "action result lost"))?
     }
-    async fn complete_presentation_action(&self, request: p::ActionRequest) {
+    async fn complete_presentation_action(&self, request: p::ActionRequest, admitted_run_id: u64) {
         let hub = &self.0.presentation;
         let owner = {
             let state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -679,7 +687,12 @@ impl Session {
                 .get(&(request.owner.clone(), request.view_id.clone()))
                 .cloned();
             match view {
-                Some(view) if !state.closed && view.active => {
+                Some(view)
+                    if !state.closed
+                        && view.active
+                        && view.run_id == admitted_run_id
+                        && view.revision == request.revision =>
+                {
                     let cancel = state
                         .active
                         .as_ref()

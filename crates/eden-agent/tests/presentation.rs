@@ -287,3 +287,85 @@ async fn a_disconnected_action_caller_can_retry_without_executing_twice() {
     session.wait(run).await.unwrap();
     session.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn removing_and_republishing_a_view_never_reuses_an_action_revision() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let calls = Arc::new(AtomicUsize::new(0));
+    let action_calls = calls.clone();
+    let package =
+        Package::new("presenter")
+            .service(AGENT_LOOP, |_: RunInput, cx| async move {
+                cx.present(View::new("same", Slot::Panel, "Old").node(Node::Button {
+                    id: "button".into(),
+                    action: "do".into(),
+                    label: "Old action".into(),
+                }))
+                .await?;
+                cx.remove_view("same").await?;
+                cx.present(View::new("same", Slot::Panel, "New").node(Node::Button {
+                    id: "button".into(),
+                    action: "do".into(),
+                    label: "New action".into(),
+                }))
+                .await?;
+                std::future::pending::<Result<Value, Fault>>().await
+            })
+            .service(ACTION, move |_: ActionRequest, _| {
+                let calls = action_calls.clone();
+                async move {
+                    Ok::<_, Fault>(json!({ "calls": calls.fetch_add(1, Ordering::SeqCst) + 1 }))
+                }
+            });
+    let session = session(package).await;
+    let attachment = session.attach_presentation("web").unwrap();
+    let run = session.submit("replace").unwrap();
+    let view = loop {
+        let snapshot = session.presentation_snapshot();
+        if snapshot
+            .views
+            .first()
+            .is_some_and(|view| view.view.title == "New")
+        {
+            break snapshot.views[0].clone();
+        }
+        session.presentation_changed(snapshot.sequence).await;
+    };
+    assert!(view.revision > 1);
+    let request = ActionRequest {
+        session_id: session.id(),
+        owner: "presenter".into(),
+        view_id: "same".into(),
+        revision: 1,
+        action: "do".into(),
+        request_id: "old".into(),
+        values: Value::Null,
+    };
+    assert_eq!(
+        session
+            .presentation_action(request.clone())
+            .await
+            .unwrap_err()
+            .code,
+        "StaleRevision"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        session
+            .presentation_action(ActionRequest {
+                revision: view.revision,
+                request_id: "new".into(),
+                ..request
+            })
+            .await
+            .unwrap(),
+        json!({ "calls": 1 })
+    );
+    session.detach_presentation(attachment).unwrap();
+    session.cancel(run).unwrap();
+    session.wait(run).await.unwrap();
+    session.shutdown().await.unwrap();
+}

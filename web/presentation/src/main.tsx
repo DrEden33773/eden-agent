@@ -25,7 +25,28 @@ type Frame = { presentation: Snapshot; state: State };
 type Fault = { code: string; message: string };
 const token = new URLSearchParams(location.search).get('token') ?? '';
 let requestCounter = 0;
-const requestId = () => `web-${Date.now()}-${++requestCounter}`;
+const attemptStore = 'eden-live-attempts';
+function attempts(): Record<string, string> {
+  try { return JSON.parse(sessionStorage.getItem(attemptStore) ?? '{}') as Record<string, string>; }
+  catch { return {}; }
+}
+function attemptId(kind: string, payload: unknown): string {
+  const key = `${kind}:${JSON.stringify(payload)}`;
+  const known = attempts();
+  if (known[key]) return known[key];
+  const id = `web-${Date.now()}-${++requestCounter}`;
+  sessionStorage.setItem(attemptStore, JSON.stringify({ ...known, [key]: id }));
+  return id;
+}
+function forgetAttempt(kind: string, payload: unknown) {
+  const key = `${kind}:${JSON.stringify(payload)}`;
+  const known = attempts();
+  delete known[key];
+  sessionStorage.setItem(attemptStore, JSON.stringify(known));
+}
+class ApiFault extends Error {
+  constructor(readonly code: string, message: string) { super(`${code}: ${message}`); }
+}
 async function api<T>(route: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const response = await fetch(route, {
     method: body === undefined ? 'GET' : 'POST',
@@ -35,7 +56,7 @@ async function api<T>(route: string, body?: unknown, signal?: AbortSignal): Prom
   const data = await response.json();
   if (!data.ok) {
     const error = data.error as Fault;
-    throw new Error(`${error.code}: ${error.message}`);
+    throw new ApiFault(error.code, error.message);
   }
   return data.result as T;
 }
@@ -45,6 +66,7 @@ function App() {
   const [composer, setComposer] = useState(sessionStorage.getItem('eden-live-composer') ?? '');
   const [drafts, setDrafts] = useState<Record<string, Record<string, unknown>>>({});
   const [message, setMessage] = useState('');
+  const [pendingAttempt, setPendingAttempt] = useState<string | null>(() => Object.keys(attempts()).at(-1) ?? null);
   const activityTimer = useRef<number | null>(null);
   const attachmentRef = useRef<number | null>(null);
   const activeTarget = useRef<ActivityTarget | null>(null);
@@ -95,13 +117,22 @@ function App() {
   };
   const send = async (mode: 'prompt' | 'steering' | 'follow_up') => {
     if (!composer.trim()) return;
+    stopActivity();
+    const attempt = { mode, text: composer };
+    const request_id = attemptId('send', attempt);
     try {
       const result = mode === 'prompt'
-        ? await api<{ run_id: number }>('/prompt', { request_id: requestId(), text: composer })
-        : await api('/enqueue', { request_id: requestId(), kind: mode, text: composer });
+        ? await api<{ run_id: number }>('/prompt', { request_id, text: composer })
+        : await api('/enqueue', { request_id, kind: mode, text: composer });
+      forgetAttempt('send', attempt);
+      setPendingAttempt(null);
       setMessage(`Accepted: ${JSON.stringify(result)}`);
-      setComposer(''); sessionStorage.removeItem('eden-live-composer'); stopActivity();
-    } catch (error) { setMessage(String(error)); }
+      setComposer(''); sessionStorage.removeItem('eden-live-composer');
+    } catch (error) {
+      if (error instanceof ApiFault) { forgetAttempt('send', attempt); setPendingAttempt(null); }
+      else setPendingAttempt(`send:${JSON.stringify(attempt)}`);
+      setMessage(String(error));
+    }
   };
   const draftKey = (view: View, node: Node) => `${view.owner}/${view.id}/${node.id}`;
   const changeField = (view: View, node: Node, field: string, value: unknown) => {
@@ -110,13 +141,45 @@ function App() {
     typing({ kind: 'form', owner: view.owner, view_id: view.id, node_id: node.id });
   };
   const act = async (view: View, action: string, values: unknown) => {
+    stopActivity();
+    const attempt = {
+      session_id: frame?.presentation.session_id, owner: view.owner, view_id: view.id,
+      revision: view.revision, action, values,
+    };
+    const request_id = attemptId('action', attempt);
     try {
-      const result = await api('/action', {
-        session_id: frame?.presentation.session_id, owner: view.owner, view_id: view.id,
-        revision: view.revision, action, request_id: requestId(), values,
-      });
-      setMessage(`Action: ${JSON.stringify(result)}`); stopActivity();
-    } catch (error) { setMessage(String(error)); }
+      const result = await api('/action', { ...attempt, request_id });
+      forgetAttempt('action', attempt);
+      setPendingAttempt(null);
+      setMessage(`Action: ${JSON.stringify(result)}`);
+    } catch (error) {
+      if (error instanceof ApiFault) { forgetAttempt('action', attempt); setPendingAttempt(null); }
+      else setPendingAttempt(`action:${JSON.stringify(attempt)}`);
+      setMessage(String(error));
+    }
+  };
+  const retryPending = async () => {
+    if (!pendingAttempt) return;
+    const kind = pendingAttempt.startsWith('action:') ? 'action' : 'send';
+    const body = JSON.parse(pendingAttempt.slice(kind.length + 1)) as Record<string, unknown>;
+    const request_id = attempts()[pendingAttempt];
+    if (!request_id) { setPendingAttempt(null); return; }
+    const route = kind === 'action' ? '/action' : body.mode === 'prompt' ? '/prompt' : '/enqueue';
+    const payload = kind === 'action' ? { ...body, request_id }
+      : body.mode === 'prompt' ? { request_id, text: body.text }
+      : { request_id, kind: body.mode, text: body.text };
+    try {
+      const result = await api(route, payload);
+      forgetAttempt(kind, body);
+      setPendingAttempt(null);
+      setMessage(`Retry resolved: ${JSON.stringify(result)}`);
+      if (kind === 'send' && composer === body.text) {
+        setComposer(''); sessionStorage.removeItem('eden-live-composer');
+      }
+    } catch (error) {
+      if (error instanceof ApiFault) { forgetAttempt(kind, body); setPendingAttempt(null); }
+      setMessage(String(error));
+    }
   };
   const renderNode = (node: Node, view: View): React.ReactNode => {
     switch (node.kind) {
@@ -135,7 +198,7 @@ function App() {
           if (field.kind === 'boolean') return [[field.id, false]];
           return [];
         }));
-        return <form key={node.id} onSubmit={event => { event.preventDefault(); void act(view, node.action, { ...defaults, ...values }); }}>
+        return <form key={node.id} onBlurCapture={stopActivity} onSubmit={event => { event.preventDefault(); void act(view, node.action, { ...defaults, ...values }); }}>
           {node.fields.map(field => {
             const value = values[field.id] ?? field.initial;
             if (field.kind === 'text') return <TextField key={field.id} label={field.label} value={String(value ?? '')} isRequired={field.required} isDisabled={!view.active || view.handled_actions?.includes(node.action)} onChange={next => changeField(view, node, field.id, next)} />;
@@ -160,11 +223,12 @@ function App() {
       </article>)}
       {frame?.presentation.views.length === 0 && <p>Waiting for a live view.</p>}
     </section>
-    <footer><TextField label="Message" value={composer} onChange={changeComposer} width="100%" /><div className="controls">
+    <footer><TextField label="Message" value={composer} onChange={changeComposer} onBlur={stopActivity} width="100%" /><div className="controls">
       <Button variant="cta" onPress={() => void send('prompt')}>Send</Button>
       <Button variant="secondary" onPress={() => void send('steering')}>Steer</Button>
       <Button variant="secondary" onPress={() => void send('follow_up')}>Follow up</Button>
-      <Button variant="negative" isDisabled={!frame?.state.active_run} onPress={() => void api('/cancel', { run_id: frame?.state.active_run }).then(() => setMessage('Cancellation requested')).catch(error => setMessage(String(error)))}>Cancel run</Button>
+      {pendingAttempt && <Button variant="secondary" onPress={() => void retryPending()}>Retry last request</Button>}
+      <Button variant="negative" isDisabled={!frame?.state.active_run} onPress={() => { stopActivity(); void api('/cancel', { run_id: frame?.state.active_run }).then(() => setMessage('Cancellation requested')).catch(error => setMessage(String(error))); }}>Cancel run</Button>
     </div><p role="status">{message}</p></footer>
   </main></Provider>;
 }

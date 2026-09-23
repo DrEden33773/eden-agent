@@ -2,6 +2,7 @@
 """Exercise one external native presentation author through a separate live host process."""
 
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -43,6 +44,66 @@ def wait_for(endpoint: dict, predicate, seconds: float = 10.0) -> dict:
         if predicate(frame):
             return frame
     raise AssertionError("live snapshot did not reach the expected state")
+
+
+def tui_keyboard_probe(binary: pathlib.Path, endpoint_file: pathlib.Path, endpoint: dict) -> bool:
+    """Drive the installed Ratatui adapter through a real Unix PTY, including option ten."""
+    if os.name == "nt":
+        return False
+    import fcntl
+    import pty
+    import select
+    import struct
+    import termios
+
+    run = call(endpoint, "/prompt", {"request_id": "tui-keyboard", "text": "terminal review"})[
+        "run_id"
+    ]
+    wait_for(
+        endpoint,
+        lambda frame: any(
+            view["id"] == "review" and view["active"] for view in frame["presentation"]["views"]
+        ),
+    )
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 110, 0, 0))
+    client = subprocess.Popen(
+        [binary, "live-tui", "--endpoint", endpoint_file],
+        cwd=endpoint_file.parent,
+        stdin=slave,
+        stdout=slave,
+        stderr=subprocess.PIPE,
+        env={**os.environ, "TERM": "xterm-256color"},
+    )
+    os.close(slave)
+    try:
+        frame = bytearray()
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and b"Reason" not in frame:
+            ready, _, _ = select.select([master], [], [], 0.2)
+            if ready:
+                frame.extend(os.read(master, 65536))
+        assert b"External tool review" in frame and b"fn old()" in frame and b"Reason" in frame
+        os.write(master, b"\t")
+        time.sleep(0.15)
+        os.write(master, b"terminal confirmed")
+        time.sleep(0.15)
+        os.write(master, b"\t")
+        time.sleep(0.15)
+        assert call(endpoint, "/snapshot")["presentation"]["activity"] == []
+        os.write(master, b"\x1b[C" * 9)
+        time.sleep(0.15)
+        os.write(master, b" \r")
+        wait_for(endpoint, lambda current: current["state"]["active_run"] is None)
+        os.write(master, b"\x1b")
+        assert client.wait(timeout=5) == 0
+        assert run > 0
+        return True
+    finally:
+        if client.poll() is None:
+            client.kill()
+            client.wait()
+        os.close(master)
 
 
 def main() -> None:
@@ -189,6 +250,7 @@ def main() -> None:
             assert call(endpoint, "/action", answer) == {"delivered": True}
             wait_for(endpoint, lambda frame: frame["state"]["active_run"] is None)
             call(endpoint, "/detach", {"attachment": joined})
+            tui_keyboard = tui_keyboard_probe(binary, endpoint_file, endpoint)
             call(endpoint, "/shutdown", {})
             assert host.wait(timeout=15) == 0
             assert not endpoint_file.exists()
@@ -199,6 +261,7 @@ def main() -> None:
                 "cancelled_run": run,
                 "late_dialog_run": late,
                 "host_exit": 0,
+                "tui_keyboard": tui_keyboard,
             }
             artifact = ROOT / "artifacts/presentation-verification.json"
             artifact.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")

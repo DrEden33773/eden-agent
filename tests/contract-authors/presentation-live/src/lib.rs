@@ -53,14 +53,18 @@ fn view(status: &str) -> View {
             action: "approve".into(),
             fields: vec![
                 Field::text("reason", "Reason", true),
-                Field {
-                    id: "checks".into(),
-                    label: "Checks".into(),
-                    kind: FieldKind::MultiChoice,
-                    required: true,
-                    initial: None,
-                    options: vec!["tests".into(), "docs".into()],
-                },
+                Field::multi_choice(
+                    "checks",
+                    "Checks",
+                    [
+                        "tests", "docs", "lint", "format", "license", "windows", "macos", "linux",
+                        "security", "release",
+                    ]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+                    true,
+                ),
             ],
         })
         .node(Node::Status {

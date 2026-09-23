@@ -5,6 +5,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use eden_protocol::Fault;
 use eden_protocol::presentation::{
     ActionRequest, ActivityTarget, Field, FieldKind, LiveView, Node, Snapshot,
 };
@@ -48,16 +49,22 @@ struct Screen {
     active_run: Option<u64>,
     composer: String,
     drafts: BTreeMap<DraftKey, Value>,
+    option_cursor: BTreeMap<DraftKey, usize>,
     focus: usize,
     message: String,
     request_number: u64,
+    attempts: BTreeMap<String, String>,
+    last_uncertain: Option<(String, Value, String)>,
     last_activity: Option<(ActivityTarget, Instant)>,
 }
 impl Screen {
     fn focusables(&self) -> Vec<Focus> {
         let mut items = vec![Focus::Composer];
         for view in &self.snapshot.views {
-            if view.active {
+            if view.active
+                && (view.view.platforms.is_empty()
+                    || view.view.platforms.iter().any(|platform| platform == "tui"))
+            {
                 collect_focus(&view.view.nodes, view, &mut items);
             }
         }
@@ -170,8 +177,16 @@ fn lines(nodes: &[Node], out: &mut Vec<Line<'static>>, depth: usize) {
                     Style::default().fg(Color::Cyan),
                 ));
                 for field in fields {
+                    let hint = match field.kind {
+                        FieldKind::Choice => format!(" ←/→: {}", field.options.join(", ")),
+                        FieldKind::MultiChoice => {
+                            format!(" ←/→ choose, Space toggle: {}", field.options.join(", "))
+                        }
+                        FieldKind::Boolean => " Space toggles".into(),
+                        FieldKind::Text => String::new(),
+                    };
                     out.push(Line::raw(format!(
-                        "{prefix}  {} [{}]",
+                        "{prefix}  {} [{}]{hint}",
                         field.label, field.id
                     )));
                 }
@@ -270,20 +285,32 @@ fn draw(terminal: &mut RawTerminal, screen: &Screen) -> io::Result<()> {
                 ..
             } => {
                 let key = (owner, view_id, node_id, field.id.clone());
-                format!(
-                    "{}: {}",
-                    field.label,
-                    screen
-                        .drafts
-                        .get(&key)
-                        .map_or(String::new(), Value::to_string)
-                )
+                let value = screen
+                    .drafts
+                    .get(&key)
+                    .cloned()
+                    .or(field.initial.clone())
+                    .map_or(String::new(), |value| value.to_string());
+                let option = if field.kind == FieldKind::MultiChoice && !field.options.is_empty() {
+                    let index =
+                        screen.option_cursor.get(&key).copied().unwrap_or(0) % field.options.len();
+                    format!(
+                        " · option {}/{}: {} (←/→, Space)",
+                        index + 1,
+                        field.options.len(),
+                        field.options[index]
+                    )
+                } else {
+                    String::new()
+                };
+                format!("{}: {}{}", field.label, value, option)
             }
             Focus::Button { action, .. } => format!("Action: {action}"),
         };
         frame.render_widget(
             Paragraph::new(format!(
-                "{focused}\n{}\nTab focus · Enter submit · x cancel run · q detach",
+                "{focused}\n{}\nTab focus · Enter submit · Ctrl+x cancel · Ctrl+r retry · Esc \
+                 detach",
                 screen.message
             ))
             .block(Block::default().title("Input").borders(Borders::ALL)),
@@ -291,6 +318,37 @@ fn draw(terminal: &mut RawTerminal, screen: &Screen) -> io::Result<()> {
         );
     })?;
     Ok(())
+}
+fn definite_reply(error: &Fault) -> bool {
+    !(error.source == "live"
+        && ["Unavailable", "InputFailure", "OutputFailure"].contains(&error.code.as_str()))
+}
+async fn submit(
+    screen: &mut Screen,
+    endpoint: &Path,
+    route: &str,
+    mut body: Value,
+) -> Result<Value, Fault> {
+    if let Some(object) = body.as_object_mut() {
+        object.remove("request_id");
+    }
+    let key = format!("{route}:{body}");
+    let id = if let Some(known) = screen.attempts.get(&key) {
+        known.clone()
+    } else {
+        let id = screen.request_id();
+        screen.attempts.insert(key.clone(), id.clone());
+        id
+    };
+    body["request_id"] = json!(id);
+    let result = call(endpoint, "POST", route, Some(&body)).await;
+    if result.is_ok() || result.as_ref().err().is_some_and(definite_reply) {
+        screen.attempts.remove(&key);
+        screen.last_uncertain = None;
+    } else {
+        screen.last_uncertain = Some((route.to_owned(), body, key));
+    }
+    result
 }
 fn draft_key(owner: &str, view_id: &str, node_id: &str, field_id: &str) -> DraftKey {
     (
@@ -385,9 +443,12 @@ async fn run_attached(endpoint: &Path, attachment: u64) -> Result<i32, Box<dyn s
         active_run: initial["state"]["active_run"].as_u64(),
         composer: String::new(),
         drafts: BTreeMap::new(),
+        option_cursor: BTreeMap::new(),
         focus: 0,
         message: String::new(),
         request_number: 0,
+        attempts: BTreeMap::new(),
+        last_uncertain: None,
         last_activity: None,
     };
     let mut terminal = RawTerminal::open()?;
@@ -445,6 +506,9 @@ async fn run_attached(endpoint: &Path, attachment: u64) -> Result<i32, Box<dyn s
             break;
         }
         if key.code == KeyCode::Tab || key.code == KeyCode::BackTab {
+            if let Some((target, _)) = screen.last_activity.take() {
+                report(endpoint, attachment, target, false).await;
+            }
             let count = screen.focusables().len();
             screen.focus = if key.code == KeyCode::BackTab {
                 (screen.focus + count - 1) % count
@@ -454,6 +518,9 @@ async fn run_attached(endpoint: &Path, attachment: u64) -> Result<i32, Box<dyn s
             continue;
         }
         if key.code == KeyCode::Char('x') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if let Some((target, _)) = screen.last_activity.take() {
+                report(endpoint, attachment, target, false).await;
+            }
             if let Some(run_id) = screen.active_run {
                 screen.message = format!(
                     "{:?}",
@@ -465,6 +532,23 @@ async fn run_attached(endpoint: &Path, attachment: u64) -> Result<i32, Box<dyn s
                     )
                     .await
                 );
+            }
+            continue;
+        }
+        if key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if let Some((route, body, attempt)) = screen.last_uncertain.clone() {
+                let result = call(endpoint, "POST", &route, Some(&body)).await;
+                if result.is_ok() || result.as_ref().err().is_some_and(definite_reply) {
+                    screen.attempts.remove(&attempt);
+                    screen.last_uncertain = None;
+                }
+                if result.is_ok() && route == "/prompt" && body["text"] == screen.composer {
+                    screen.composer.clear();
+                }
+                screen.message = match result {
+                    Ok(value) => format!("retry resolved: {value}"),
+                    Err(error) => error.to_string(),
+                };
             }
             continue;
         }
@@ -480,17 +564,16 @@ async fn run_attached(endpoint: &Path, attachment: u64) -> Result<i32, Box<dyn s
                     screen.composer.pop();
                 }
                 KeyCode::Enter if !screen.composer.trim().is_empty() => {
-                    let body =
-                        json!({ "request_id": screen.request_id(), "text": screen.composer });
-                    match call(endpoint, "POST", "/prompt", Some(&body)).await {
+                    report(endpoint, attachment, ActivityTarget::Composer, false).await;
+                    screen.last_activity = None;
+                    let body = json!({ "text": screen.composer });
+                    match submit(&mut screen, endpoint, "/prompt", body).await {
                         Ok(value) => {
                             screen.message = format!("accepted run {}", value["run_id"]);
                             screen.composer.clear();
                         }
                         Err(error) => screen.message = error.to_string(),
                     }
-                    report(endpoint, attachment, ActivityTarget::Composer, false).await;
-                    screen.last_activity = None;
                 }
                 _ => {}
             },
@@ -516,16 +599,16 @@ async fn run_attached(endpoint: &Path, attachment: u64) -> Result<i32, Box<dyn s
                             view_id: view_id.clone(),
                             revision,
                             action,
-                            request_id: screen.request_id(),
+                            request_id: String::new(),
                             values: form_values(&screen, &owner, &view_id, &node_id),
                         };
+                        report(endpoint, attachment, target, false).await;
+                        screen.last_activity = None;
                         screen.message =
-                            match call(endpoint, "POST", "/action", Some(&json!(request))).await {
+                            match submit(&mut screen, endpoint, "/action", json!(request)).await {
                                 Ok(value) => format!("action: {value}"),
                                 Err(error) => error.to_string(),
                             };
-                        report(endpoint, attachment, target, false).await;
-                        screen.last_activity = None;
                     }
                     KeyCode::Char(character) if field.kind == FieldKind::Text => {
                         let draft = screen.drafts.entry(key_name).or_insert(json!(""));
@@ -573,6 +656,34 @@ async fn run_attached(endpoint: &Path, attachment: u64) -> Result<i32, Box<dyn s
                         report(endpoint, attachment, target.clone(), true).await;
                         screen.last_activity = Some((target, Instant::now()));
                     }
+                    KeyCode::Left | KeyCode::Right
+                        if field.kind == FieldKind::MultiChoice && !field.options.is_empty() =>
+                    {
+                        let index = screen.option_cursor.get(&key_name).copied().unwrap_or(0);
+                        let next = if key.code == KeyCode::Left {
+                            (index + field.options.len() - 1) % field.options.len()
+                        } else {
+                            (index + 1) % field.options.len()
+                        };
+                        screen.option_cursor.insert(key_name, next);
+                    }
+                    KeyCode::Char(' ') if field.kind == FieldKind::MultiChoice => {
+                        let index = screen.option_cursor.get(&key_name).copied().unwrap_or(0);
+                        if let Some(option) = field.options.get(index) {
+                            let draft = screen.drafts.entry(key_name).or_insert(json!([]));
+                            let mut selected: Vec<String> =
+                                serde_json::from_value(draft.clone()).unwrap_or_default();
+                            if let Some(position) = selected.iter().position(|item| item == option)
+                            {
+                                selected.remove(position);
+                            } else {
+                                selected.push(option.clone());
+                            }
+                            *draft = json!(selected);
+                            report(endpoint, attachment, target.clone(), true).await;
+                            screen.last_activity = Some((target, Instant::now()));
+                        }
+                    }
                     KeyCode::Char(number @ '1'..='9') if field.kind == FieldKind::MultiChoice => {
                         let index = number as usize - '1' as usize;
                         if let Some(option) = field.options.get(index) {
@@ -605,11 +716,11 @@ async fn run_attached(endpoint: &Path, attachment: u64) -> Result<i32, Box<dyn s
                     view_id,
                     revision,
                     action,
-                    request_id: screen.request_id(),
+                    request_id: String::new(),
                     values: Value::Null,
                 };
                 screen.message =
-                    match call(endpoint, "POST", "/action", Some(&json!(request))).await {
+                    match submit(&mut screen, endpoint, "/action", json!(request)).await {
                         Ok(value) => format!("action: {value}"),
                         Err(error) => error.to_string(),
                     };

@@ -6,10 +6,13 @@ use std::{io::Read, path::PathBuf};
 fn failure(message: impl Into<String>) -> Fault {
     Fault::new("Unavailable", "composition", message)
 }
+pub(crate) fn internal_host_package(name: &str) -> bool {
+    matches!(name, "eden-host-interaction" | "eden-host-presentation")
+}
 pub(crate) fn binding(composition: &eden_protocol::Composition, cwd: &str) -> Result<Value, Fault> {
     let mut packages = BTreeMap::new();
     for package in &composition.packages {
-        if package.descriptor.package == "eden-host-interaction" {
+        if internal_host_package(&package.descriptor.package) {
             continue;
         }
         if package.library.starts_with("embedded:") {
@@ -46,7 +49,12 @@ pub(crate) fn binding(composition: &eden_protocol::Composition, cwd: &str) -> Re
     let roles: BTreeMap<_, _> = composition
         .roles
         .iter()
-        .filter(|(role, _)| role.as_str() != eden_protocol::interaction::HOST)
+        .filter(|(role, _)| {
+            !matches!(
+                role.as_str(),
+                eden_protocol::interaction::HOST | eden_protocol::presentation::HOST
+            )
+        })
         .collect();
     let mut binding = json!({
         "cwd": cwd,
@@ -55,7 +63,7 @@ pub(crate) fn binding(composition: &eden_protocol::Composition, cwd: &str) -> Re
         "library_locations": composition
             .packages
             .iter()
-            .filter(|p| p.descriptor.package != "eden-host-interaction")
+            .filter(|p| !internal_host_package(&p.descriptor.package))
             .map(|p| &p.library)
             .chain(composition.resource_packages.iter().map(|p| &p.root))
             .collect::<Vec<_>>(),
@@ -259,6 +267,35 @@ mod tests {
         assert_eq!(moved["library_locations"], json!(["/new/package"]));
         composition.resource_packages[0].digest = "different-content".into();
         assert!(!equivalent(
+            &original,
+            &binding(&composition, "/project").unwrap()
+        ));
+    }
+
+    #[test]
+    fn host_owned_presentation_does_not_change_a_saved_user_composition_binding() {
+        let mut composition: eden_protocol::Composition =
+            serde_json::from_value(json!({ "packages": [], "roles": {}, "resource_packages": [] }))
+                .unwrap();
+        let original = binding(&composition, "/project").unwrap();
+        for (name, role) in [
+            ("eden-host-interaction", eden_protocol::interaction::HOST),
+            ("eden-host-presentation", eden_protocol::presentation::HOST),
+        ] {
+            composition.packages.push(
+                serde_json::from_value(json!({
+                    "descriptor": { "package": name, "version": "0.1.0", "provides": [role] },
+                    "host": eden_protocol::CONTRACT,
+                    "sdk": eden_protocol::CONTRACT,
+                    "target": "local",
+                    "library": format!("embedded:{name}"),
+                    "config": {},
+                }))
+                .unwrap(),
+            );
+            composition.roles.insert(role.into(), name.into());
+        }
+        assert!(equivalent(
             &original,
             &binding(&composition, "/project").unwrap()
         ));

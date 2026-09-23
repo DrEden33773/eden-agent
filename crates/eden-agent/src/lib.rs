@@ -286,14 +286,28 @@ impl Session {
                     .unwrap_or_else(|e| e.into_inner())
                     .next = reply.records.iter().map(|r| r.run_id).max().unwrap_or(0) + 1;
                 let binding = session.0.kernel.composition();
+                let user_roles: BTreeMap<_, _> = binding
+                    .roles
+                    .iter()
+                    .filter(|(role, _)| {
+                        !matches!(
+                            role.as_str(),
+                            eden_protocol::interaction::HOST | eden_protocol::presentation::HOST
+                        )
+                    })
+                    .collect();
+                let user_packages: Vec<_> = binding
+                    .packages
+                    .iter()
+                    .filter(|package| {
+                        !composition::internal_host_package(&package.descriptor.package)
+                    })
+                    .map(|package| &package.descriptor)
+                    .collect();
                 let identity = serde_json::json!({
                     "cwd": cwd,
-                    "roles": binding.roles,
-                    "packages": binding
-                        .packages
-                        .iter()
-                        .map(|p| &p.descriptor)
-                        .collect::<Vec<_>>(),
+                    "roles": user_roles,
+                    "packages": user_packages,
                 });
                 let locked = desired;
                 let saved_lock = reply
@@ -830,12 +844,20 @@ fn new_session_id() -> u64 {
     hasher.finish()
 }
 fn compatible_binding(saved: &serde_json::Value, current: &serde_json::Value) -> bool {
-    if saved["cwd"] != current["cwd"] || saved["roles"] != current["roles"] {
-        return false;
+    fn user_roles(value: &serde_json::Value) -> Option<BTreeMap<String, String>> {
+        let mut roles: BTreeMap<String, String> =
+            serde_json::from_value(value["roles"].clone()).ok()?;
+        roles.retain(|role, _| {
+            !matches!(
+                role.as_str(),
+                eden_protocol::interaction::HOST | eden_protocol::presentation::HOST
+            )
+        });
+        Some(roles)
     }
-    // Selected role identities define the binding; unused package inventories and
-    // compatible package-version changes are not historical state dependencies.
-    true
+    // Host-owned services can change between releases without rebinding saved user packages.
+    saved["cwd"] == current["cwd"]
+        && user_roles(saved).is_some_and(|roles| Some(roles) == user_roles(current))
 }
 
 struct InputOwner(Session);
@@ -844,5 +866,36 @@ impl Drop for InputOwner {
         let mut state = self.0.0.state.lock().unwrap_or_else(|e| e.into_inner());
         state.pending_inputs -= 1;
         self.0.0.settled.notify_waiters();
+    }
+}
+
+#[cfg(test)]
+mod session_binding_tests {
+    use super::*;
+    #[test]
+    fn old_session_header_ignores_host_owned_service_inventory() {
+        let saved = serde_json::json!({
+            "cwd": "/project",
+            "roles": {
+                "eden.coding-loop.v1": "coding",
+                "eden.interaction.v1": "eden-host-interaction",
+            },
+            "packages": ["old"],
+        });
+        let current = serde_json::json!({
+            "cwd": "/project",
+            "roles": {
+                "eden.coding-loop.v1": "coding",
+                "eden.interaction.v1": "eden-host-interaction",
+                "eden.presentation.host.v1": "eden-host-presentation",
+            },
+            "packages": ["new"],
+        });
+        assert!(compatible_binding(&saved, &current));
+        let changed = serde_json::json!({
+            "cwd": "/project",
+            "roles": { "eden.coding-loop.v1": "other" },
+        });
+        assert!(!compatible_binding(&saved, &changed));
     }
 }

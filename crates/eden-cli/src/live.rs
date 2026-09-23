@@ -471,6 +471,10 @@ async fn dispatch(
             session.respond_interaction(field(&body, "interaction_id")?, field(&body, "value")?)?;
             Ok(json!({ "delivered": true }))
         }
+        ("POST", "/terminal") => {
+            let run_id: u64 = field(&body, "run_id")?;
+            Ok(json!(session.wait(run_id).await?))
+        }
         ("POST", "/cancel") => {
             session.cancel(field(&body, "run_id")?)?;
             Ok(json!({ "cancel_requested": true }))

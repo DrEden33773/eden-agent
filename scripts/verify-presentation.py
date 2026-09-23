@@ -91,10 +91,24 @@ def tui_keyboard_probe(binary: pathlib.Path, endpoint_file: pathlib.Path, endpoi
         os.write(master, b"\t")
         time.sleep(0.15)
         assert call(endpoint, "/snapshot")["presentation"]["activity"] == []
-        os.write(master, b"\x1b[C" * 9)
-        time.sleep(0.15)
-        os.write(master, b" \r")
+        os.write(master, b"." * 9)
+        os.write(master, b" ")
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([master], [], [], 0.1)
+            if ready:
+                frame.extend(os.read(master, 65536))
+            if call(endpoint, "/snapshot")["presentation"]["activity"]:
+                break
+        else:
+            raise AssertionError(("PTY did not toggle the multi-choice field", client.poll()))
+        os.write(master, b"\r")
         wait_for(endpoint, lambda current: current["state"]["active_run"] is None)
+        terminal = call(endpoint, "/terminal", {"run_id": run})
+        assert terminal["outcome"] == {
+            "status": "completed",
+            "value": {"reason": "terminal confirmed", "checks": ["release"]},
+        }, terminal
         os.write(master, b"\x1b")
         assert client.wait(timeout=5) == 0
         assert run > 0

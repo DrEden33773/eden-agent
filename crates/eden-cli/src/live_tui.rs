@@ -656,11 +656,11 @@ async fn run_attached(endpoint: &Path, attachment: u64) -> Result<i32, Box<dyn s
                         report(endpoint, attachment, target.clone(), true).await;
                         screen.last_activity = Some((target, Instant::now()));
                     }
-                    KeyCode::Left | KeyCode::Right
+                    KeyCode::Left | KeyCode::Right | KeyCode::Char(',') | KeyCode::Char('.')
                         if field.kind == FieldKind::MultiChoice && !field.options.is_empty() =>
                     {
                         let index = screen.option_cursor.get(&key_name).copied().unwrap_or(0);
-                        let next = if key.code == KeyCode::Left {
+                        let next = if matches!(key.code, KeyCode::Left | KeyCode::Char(',')) {
                             (index + field.options.len() - 1) % field.options.len()
                         } else {
                             (index + 1) % field.options.len()

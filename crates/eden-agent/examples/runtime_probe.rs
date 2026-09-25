@@ -211,10 +211,11 @@ async fn run(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         )
         .await
         .into_result()?;
-    // Workspace discovery resolves Windows short names and verbatim path prefixes.
-    assert_eq!(environment["cwd"], json!(std::fs::canonicalize(&cwd)?));
-    assert_eq!(environment["global_dir"], json!(global_dir));
-    assert_eq!(environment["project_trusted"], false);
+    let environment: p::environment::HostEnvironment = serde_json::from_value(environment)?;
+    // Compare paths, not JSON spellings: Windows accepts both separators and short names.
+    assert_eq!(environment.cwd, std::fs::canonicalize(&cwd)?);
+    assert_eq!(environment.global_dir, global_dir);
+    assert!(!environment.project_trusted);
     session.shutdown().await?;
     println!(
         "{}",

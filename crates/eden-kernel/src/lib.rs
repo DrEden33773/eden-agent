@@ -564,20 +564,29 @@ impl Kernel {
         manifests: &BTreeMap<String, (p::PackageManifest, std::path::PathBuf)>,
         local: &mut BTreeMap<String, eden_plugin_sdk::Package>,
     ) -> Result<(), Fault> {
+        let host_environment = self
+            .router
+            .environment
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|e| Fault::new("InvalidInput", "host-environment", e.to_string()))?;
         for id in &self.router.graph.order {
             let spec = &self.router.graph.instances[id];
             let (mut manifest, path) = manifests[&spec.package].clone();
+            // Instance overrides cannot replace authority, including scalar-to-object configs.
+            let environment = host_environment
+                .clone()
+                .or_else(|| manifest.config.get(p::environment::CONFIG_KEY).cloned());
             if let Some(config) = &spec.config {
-                // Host metadata is authoritative even when an instance replaces package configuration.
-                let environment = manifest.config.get("__eden_host").cloned();
                 manifest.config = config.clone();
-                if let Some(environment) = environment {
-                    if manifest.config.is_null() {
-                        manifest.config = serde_json::json!({});
-                    }
-                    if manifest.config.is_object() {
-                        manifest.config["__eden_host"] = environment;
-                    }
+            }
+            if let Some(environment) = environment {
+                if manifest.config.is_null() {
+                    manifest.config = serde_json::json!({});
+                }
+                if manifest.config.is_object() {
+                    manifest.config[p::environment::CONFIG_KEY] = environment;
                 }
             }
             let token = NEXT_ROUTER.fetch_add(1, Ordering::Relaxed) as usize;

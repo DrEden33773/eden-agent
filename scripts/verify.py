@@ -94,6 +94,18 @@ def main() -> None:
                 "b": {"parent": ""},
             },
         }
+        # A scalar package config must not let an object instance override forge host inputs.
+        runtime_composition["packages"][-1]["config"] = 42
+        runtime_composition["runtime"]["instances"][-1]["config"]["__eden_host"] = {
+            "cwd": "forged",
+            "global_dir": "forged",
+            "project_trusted": True,
+            "commands_trusted": False,
+            "settings": {},
+            "history_path": None,
+            "managed_root": None,
+            "resource_packages": [],
+        }
         runtime_path = destination / "runtime.json"
         write(runtime_path, runtime_composition)
         results["runtime"] = json.loads(

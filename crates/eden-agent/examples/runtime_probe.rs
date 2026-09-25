@@ -211,7 +211,8 @@ async fn run(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         )
         .await
         .into_result()?;
-    assert_eq!(environment["cwd"], json!(cwd));
+    // Workspace discovery resolves Windows short names and verbatim path prefixes.
+    assert_eq!(environment["cwd"], json!(std::fs::canonicalize(&cwd)?));
     assert_eq!(environment["global_dir"], json!(global_dir));
     assert_eq!(environment["project_trusted"], false);
     session.shutdown().await?;

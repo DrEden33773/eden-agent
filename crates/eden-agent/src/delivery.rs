@@ -92,6 +92,7 @@ impl Delivery {
             .kernel
             .invoke(
                 Request {
+                    execution: None,
                     session_id: 0,
                     run_id: self.next.fetch_add(1, Ordering::Relaxed),
                     contract: role.into(),
@@ -303,6 +304,7 @@ impl Session {
                 .kernel
                 .invoke(
                     Request {
+                        execution: None,
                         session_id: session.id(),
                         run_id,
                         contract: role.into(),

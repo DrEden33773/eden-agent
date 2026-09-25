@@ -1,7 +1,9 @@
 //! Composition preflight, native loading, explicit role selection, the event
 //! ledger, and host-owned lifecycle.
+mod graph;
 pub mod history;
 mod native;
+mod routing;
 use cordis_core::{Context, FiberHandle, Plugin, PreparedPlugin, Service};
 use eden_plugin_sdk::{
     Cancellation,
@@ -9,6 +11,7 @@ use eden_plugin_sdk::{
 };
 use eden_protocol::{self as p, Composition, Event, Fault, Request, Terminal};
 pub use native::NativeInstance;
+use routing::Router;
 use std::{
     collections::BTreeMap,
     path::Path,
@@ -89,29 +92,7 @@ pub fn preflight(composition: &Composition) -> Result<(), Fault> {
             return Err(Fault::new("MissingDependency", "composition", role));
         }
     }
-    for (role, package) in &composition.roles {
-        if !packages
-            .get(package)
-            .is_some_and(|descriptor| descriptor.provides.contains(role))
-        {
-            return Err(Fault::new(
-                "MissingDependency",
-                "composition",
-                format!("{package} does not provide {role}"),
-            ));
-        }
-    }
-    for package in &composition.packages {
-        for required in &package.requires {
-            if !composition.roles.contains_key(required) {
-                return Err(Fault::new(
-                    "MissingDependency",
-                    &package.descriptor.package,
-                    format!("required contract is not selected: {required}"),
-                ));
-            }
-        }
-    }
+    graph::Graph::build(composition)?;
     Ok(())
 }
 /// In-memory ordered event ledger, shared by native routes and session callers.
@@ -290,6 +271,12 @@ impl Instance {
             Self::Local(i) => i.stop().await,
         }
     }
+    async fn finalize(&self, request: Request) -> Result<(), Fault> {
+        match self {
+            Self::Native(i) => i.stop_with_request(request).await,
+            Self::Local(i) => i.stop_with_request(request).await,
+        }
+    }
     async fn call(&self, request: Request, cancel: Cancellation) -> Terminal {
         match self {
             Self::Native(i) => i.call(request, cancel).await,
@@ -297,14 +284,14 @@ impl Instance {
         }
     }
 }
-struct Services(BTreeMap<String, Arc<Instance>>);
-impl Service for Services {
-    const NAME: &'static str = "eden.composition-services.v1";
+struct Publication(Arc<Instance>);
+impl Service for Publication {
+    const NAME: &'static str = "eden.instance-publication.v1";
 }
 struct Adapter;
 impl Plugin for Adapter {
-    type Config = Arc<Services>;
-    type Input = Arc<Services>;
+    type Config = Arc<Publication>;
+    type Input = Arc<Publication>;
     type PrepareError = std::convert::Infallible;
     type ApplyError = std::io::Error;
     fn prepare(&self, config: Self::Config) -> Result<Self::Input, Self::PrepareError> {
@@ -313,53 +300,29 @@ impl Plugin for Adapter {
     async fn apply(
         &self,
         context: Context,
-        services: &Self::Input,
+        publication: &Self::Input,
     ) -> Result<(), Self::ApplyError> {
-        let cleanup = services.clone();
+        let cleanup = publication.clone();
         context
             .effect(move || async move {
-                for instance in cleanup.0.values() {
-                    instance.close();
-                }
-                for instance in cleanup.0.values() {
-                    let _ = instance.stop().await;
-                }
+                let _ = cleanup.0.stop().await;
             })
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         let _publication = context
-            .provide(services.clone())
+            .provide(publication.clone())
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         Ok(())
     }
 }
-struct Router {
-    context: Context,
-    session_id: u64,
-    events: Arc<Events>,
+struct Managed {
+    identity: p::runtime::InstanceIdentity,
+    instance: Arc<Instance>,
+    provides: Vec<String>,
+    token: usize,
     open: AtomicBool,
-    next: AtomicU64,
-    requests: Mutex<BTreeMap<u64, Cancellation>>,
-    workers: Mutex<Vec<tokio::task::JoinHandle<()>>>,
-    runtime: tokio::runtime::Handle,
-}
-impl Router {
-    async fn invoke(&self, request: Request, cancel: Cancellation) -> Terminal {
-        if request.session_id != self.session_id {
-            return Terminal::failed(Fault::new("InvalidInput", "router", "foreign session"));
-        }
-        let services = match self.context.try_service::<Services>() {
-            Ok(services) => services,
-            Err(e) => {
-                return Terminal::failed(Fault::new("Unavailable", "services", e.to_string()));
-            }
-        };
-        let Some(instance) = services.0.get(&request.contract) else {
-            return Terminal::failed(Fault::new("MissingDependency", "router", &request.contract));
-        };
-        self.events
-            .push(request.run_id, "service_called", request.public_trace());
-        instance.call(request, cancel).await
-    }
+    fiber: FiberHandle,
+    _context: Context,
+    stop_lock: tokio::sync::Mutex<()>,
 }
 // HostApi tokens use a process registry, so retained author contexts cannot dereference freed hosts.
 type RouterRegistry = Mutex<BTreeMap<usize, (std::sync::Weak<Router>, String)>>;
@@ -386,9 +349,6 @@ unsafe extern "C" fn request(context: usize, bytes: Bytes, reply: Reply) -> u64 
     let Some(router) = router(context) else {
         return 0;
     };
-    if !router.open.load(Ordering::Acquire) {
-        return 0;
-    }
     // SAFETY: SDK request bytes are kept live during the call and copied by decode.
     let input = unsafe { bytes.decode::<Request>() }.map(|mut request| {
         if request.contract == eden_protocol::presentation::HOST
@@ -411,7 +371,11 @@ unsafe extern "C" fn request(context: usize, bytes: Bytes, reply: Reply) -> u64 
     let worker_router = router.clone();
     let worker = router.runtime.spawn(async move {
         let terminal = match input {
-            Ok(request) => worker_router.invoke(request, cancel).await,
+            Ok(request) => {
+                worker_router
+                    .from_author(origin(context).unwrap_or_default(), request, cancel)
+                    .await
+            }
             Err(error) => Terminal::failed(error),
         };
         // SAFETY: An accepted request owns this reply token until its single completion.
@@ -424,11 +388,9 @@ unsafe extern "C" fn request(context: usize, bytes: Bytes, reply: Reply) -> u64 
             .unwrap_or_else(|e| e.into_inner())
             .remove(&id);
     });
-    router
-        .workers
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push(worker);
+    let mut workers = router.workers.lock().unwrap_or_else(|e| e.into_inner());
+    workers.retain(|task| !task.is_finished());
+    workers.push(worker);
     id
 }
 unsafe extern "C" fn cancel(context: usize, id: u64) {
@@ -450,18 +412,12 @@ unsafe extern "C" fn event(context: usize, bytes: Bytes) {
     if let Ok(event) = unsafe { bytes.decode::<Request>() }
         && event.session_id == router.session_id
     {
-        router
-            .events
-            .push(event.run_id, &event.contract, event.payload);
+        router.accept_event(&origin(context).unwrap_or_default(), event);
     }
 }
-/// One explicitly mounted native composition and its Cordis disposal barrier.
+/// A composition of independently disposable native instance publications.
 pub struct Kernel {
     router: Arc<Router>,
-    tokens: Vec<usize>,
-    fiber: FiberHandle,
-    instances: Vec<Arc<Instance>>,
-    packages: BTreeMap<String, Arc<Instance>>,
     composition: Composition,
 }
 async fn rollback_initialization(mut error: Fault, instances: &[Arc<Instance>]) -> Fault {
@@ -478,12 +434,11 @@ async fn rollback_initialization(mut error: Fault, instances: &[Arc<Instance>]) 
     error
 }
 impl Kernel {
-    /// Read and parse a composition file, then mount it with its own directory
-    /// as the base for relative library paths.
+    /// Resolve relative native paths against the composition file, never the caller's cwd.
     pub async fn load(path: &Path, session_id: u64, events: Arc<Events>) -> Result<Self, Fault> {
         let bytes = std::fs::read(path)
             .map_err(|e| Fault::new("InvalidInput", "composition", e.to_string()))?;
-        let composition: Composition = serde_json::from_slice(&bytes)
+        let composition = serde_json::from_slice(&bytes)
             .map_err(|e| Fault::new("InvalidInput", "composition", e.to_string()))?;
         Self::load_resolved(
             composition,
@@ -493,7 +448,7 @@ impl Kernel {
         )
         .await
     }
-    /// Load an explicitly resolved and authorized composition; this never discovers or installs code.
+    /// Mount only explicitly resolved and authorized native packages.
     pub async fn load_resolved(
         composition: Composition,
         base: &Path,
@@ -502,9 +457,8 @@ impl Kernel {
     ) -> Result<Self, Fault> {
         Self::load_embedded(composition, base, session_id, events, BTreeMap::new()).await
     }
-    /// Mount explicit caller-owned packages alongside native libraries, with the same role routing.
-    /// A local package must exactly match its manifest descriptor; its library field is an identity
-    /// marker and is never opened. No Rust value crosses a dynamic-library boundary.
+    /// Caller-owned packages use the same routing and lifecycle contract as native authors.
+    /// Each local contribution supplies one already-created instance.
     pub async fn load_embedded(
         composition: Composition,
         base: &Path,
@@ -516,7 +470,6 @@ impl Kernel {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let result = Self::load_owned(composition, &base, session_id, events, local).await;
-            // Delivery's Drop rolls back if the caller leaves at any point before taking ownership.
             let _ = sender.send(Delivery(Some(result)));
         });
         let mut delivery = receiver
@@ -535,41 +488,49 @@ impl Kernel {
         mut local: BTreeMap<String, eden_plugin_sdk::Package>,
     ) -> Result<Self, Fault> {
         preflight(&composition)?;
+        let graph = graph::Graph::build(&composition)?;
         for (name, package) in &local {
-            if !composition.packages.iter().any(|manifest| {
-                manifest.descriptor.package == *name && &manifest.descriptor == package.descriptor()
-            }) {
+            if !composition
+                .packages
+                .iter()
+                .any(|m| m.descriptor.package == *name && &m.descriptor == package.descriptor())
+                || graph
+                    .instances
+                    .values()
+                    .filter(|i| &i.package == name)
+                    .count()
+                    != 1
+            {
                 return Err(Fault::new(
                     "IncompatibleContract",
                     "embedded",
-                    "local package descriptor differs from manifest",
+                    "local descriptor differs or contribution has multiple instances",
                 ));
             }
         }
-        // Resolve all paths before executing the first native library.
-        let paths: Vec<_> = composition
-            .packages
-            .iter()
-            .map(|p| {
-                if local.contains_key(&p.descriptor.package) {
-                    return Ok(std::path::PathBuf::new());
-                }
-                std::fs::canonicalize(base.join(&p.library)).map_err(|e| {
+        let mut manifests = BTreeMap::new();
+        for manifest in &composition.packages {
+            let path = if local.contains_key(&manifest.descriptor.package) {
+                std::path::PathBuf::new()
+            } else {
+                std::fs::canonicalize(base.join(&manifest.library)).map_err(|e| {
                     Fault::new(
                         "MissingDependency",
-                        &p.descriptor.package,
+                        &manifest.descriptor.package,
                         format!(
                             "cannot resolve native library {}: {e}; restore the plugin file or \
                              select a composition with installed libraries",
-                            base.join(&p.library).display()
+                            base.join(&manifest.library).display()
                         ),
                     )
-                })
-            })
-            .collect::<Result<_, _>>()?;
-        let context = Context::new();
+                })?
+            };
+            manifests.insert(
+                manifest.descriptor.package.clone(),
+                (manifest.clone(), path),
+            );
+        }
         let router = Arc::new(Router {
-            context: context.clone(),
             session_id,
             events,
             open: AtomicBool::new(true),
@@ -577,216 +538,404 @@ impl Kernel {
             requests: Mutex::new(BTreeMap::new()),
             workers: Mutex::new(vec![]),
             runtime: tokio::runtime::Handle::current(),
+            graph,
+            environment: composition.host_environment.clone(),
+            instances: Mutex::new(BTreeMap::new()),
+            calls: Mutex::new(BTreeMap::new()),
+            jobs: Mutex::new(BTreeMap::new()),
         });
-        let mut tokens = Vec::new();
-        let mut packages: BTreeMap<String, Arc<Instance>> = BTreeMap::new();
-        for (manifest, path) in composition.packages.iter().zip(paths) {
-            let manifest = manifest.clone();
-            let name = manifest.descriptor.package.clone();
+        let kernel = Self {
+            router,
+            composition,
+        };
+        let result = kernel.initialize(&manifests, &mut local).await;
+        if let Err(mut error) = result {
+            if let Err(cleanup) = kernel.shutdown().await {
+                error
+                    .message
+                    .push_str(&format!("; rollback cleanup: {cleanup}"));
+            }
+            return Err(error);
+        }
+        Ok(kernel)
+    }
+    async fn initialize(
+        &self,
+        manifests: &BTreeMap<String, (p::PackageManifest, std::path::PathBuf)>,
+        local: &mut BTreeMap<String, eden_plugin_sdk::Package>,
+    ) -> Result<(), Fault> {
+        for id in &self.router.graph.order {
+            let spec = &self.router.graph.instances[id];
+            let (mut manifest, path) = manifests[&spec.package].clone();
+            if let Some(config) = &spec.config {
+                // Host metadata is authoritative even when an instance replaces package configuration.
+                let environment = manifest.config.get("__eden_host").cloned();
+                manifest.config = config.clone();
+                if let Some(environment) = environment {
+                    if manifest.config.is_null() {
+                        manifest.config = serde_json::json!({});
+                    }
+                    if manifest.config.is_object() {
+                        manifest.config["__eden_host"] = environment;
+                    }
+                }
+            }
             let token = NEXT_ROUTER.fetch_add(1, Ordering::Relaxed) as usize;
             routers()
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .insert(token, (Arc::downgrade(&router), name.clone()));
-            tokens.push(token);
+                .insert(token, (Arc::downgrade(&self.router), id.clone()));
             let host = HostApi {
                 context: token,
                 request,
                 cancel,
                 event,
             };
-            if let Some(package) = local.remove(&name) {
-                // SAFETY: Router registry callbacks remain live until every instance stops.
-                let instance = unsafe { eden_plugin_sdk::local::LocalInstance::new(package, host) };
-                packages.insert(name, Arc::new(Instance::Local(instance)));
-                continue;
-            }
-            let result =
-                tokio::task::spawn_blocking(move || NativeInstance::load(&path, &manifest, host))
+            let loaded = if let Some(package) = local.remove(&spec.package) {
+                // SAFETY: Registry callbacks remain callable until the instance disposal barrier.
+                Ok(Arc::new(Instance::Local(unsafe {
+                    eden_plugin_sdk::local::LocalInstance::new(package, host)
+                })))
+            } else {
+                let input = manifest.clone();
+                tokio::task::spawn_blocking(move || NativeInstance::load(&path, &input, host))
                     .await
                     .map_err(|e| Fault::new("Unavailable", "initialize", e.to_string()))
-                    .and_then(|r| r);
-            match result {
-                Ok(instance) => {
-                    packages.insert(name, Arc::new(Instance::Native(instance)));
+                    .and_then(|r| r)
+                    .map(|i| Arc::new(Instance::Native(i)))
+            };
+            let instance = match loaded {
+                Ok(i) => i,
+                Err(e) => {
+                    routers()
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&token);
+                    return Err(e);
                 }
-                Err(error) => {
-                    router.open.store(false, Ordering::Release);
-                    let instances: Vec<_> = packages.values().cloned().collect();
-                    let error = rollback_initialization(error, &instances).await;
-                    let mut registry = routers().lock().unwrap_or_else(|e| e.into_inner());
-                    for token in &tokens {
-                        registry.remove(token);
-                    }
+            };
+            let context = Context::new();
+            let fiber = match context
+                .spawn(PreparedPlugin::from_input(
+                    Adapter,
+                    Arc::new(Publication(instance.clone())),
+                ))
+                .await
+            {
+                Ok(fiber) => fiber,
+                Err(e) => {
+                    let error = rollback_initialization(
+                        Fault::new("Unavailable", "cordis", e.to_string()),
+                        &[instance],
+                    )
+                    .await;
+                    routers()
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&token);
                     return Err(error);
                 }
+            };
+            self.router
+                .instances
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(
+                    id.clone(),
+                    Arc::new(Managed {
+                        identity: p::runtime::InstanceIdentity {
+                            id: id.clone(),
+                            generation: token as u64,
+                        },
+                        instance,
+                        provides: manifest.descriptor.provides,
+                        token,
+                        open: AtomicBool::new(true),
+                        fiber,
+                        _context: context,
+                        stop_lock: tokio::sync::Mutex::new(()),
+                    }),
+                );
+        }
+        for id in &self.router.graph.order {
+            let unit = self.router.unit(id)?;
+            if unit.provides.iter().any(|c| c == p::runtime::READY) {
+                self.router
+                    .dispatch(
+                        Request {
+                            execution: None,
+                            session_id: self.router.session_id,
+                            run_id: 0,
+                            contract: p::runtime::READY.into(),
+                            payload: serde_json::Value::Null,
+                        },
+                        self.router.graph.instances[id].scope.clone(),
+                        vec![id.clone()],
+                        0,
+                        Cancellation::default(),
+                        vec![],
+                        None,
+                    )
+                    .await
+                    .into_result()?;
             }
         }
-        let instances: Vec<_> = packages.values().cloned().collect();
-        let package_instances = packages.clone();
-        let roles = composition
-            .roles
-            .clone()
-            .into_iter()
-            .filter_map(|(role, name)| packages.get(&name).map(|instance| (role, instance.clone())))
-            .collect();
-        let fiber = match context
-            .spawn(PreparedPlugin::from_input(
-                Adapter,
-                Arc::new(Services(roles)),
-            ))
-            .await
-        {
-            Ok(fiber) => fiber,
-            Err(error) => {
-                router.open.store(false, Ordering::Release);
-                let error = rollback_initialization(
-                    Fault::new("Unavailable", "cordis", error.to_string()),
-                    &instances,
-                )
-                .await;
-                let mut registry = routers().lock().unwrap_or_else(|e| e.into_inner());
-                for token in &tokens {
-                    registry.remove(token);
-                }
-                return Err(error);
-            }
-        };
-        Ok(Self {
-            router,
-            tokens,
-            fiber,
-            instances,
-            packages: package_instances,
-            composition,
-        })
+        Ok(())
     }
-    /// The composition this kernel mounted, including its role bindings.
+    /// The mounted declaration, including stable instance and scope bindings.
     pub fn composition(&self) -> &Composition {
         &self.composition
     }
-    /// Route one request to the roles this composition selected, and settle it
-    /// with its cleanup. Cancellation is the caller's decision, passed in.
+    /// Calls settle only after their operation-owned cleanup and native bridges finish.
     pub async fn invoke(&self, request: Request, cancel: Cancellation) -> Terminal {
         self.router.invoke(request, cancel).await
     }
-    /// Invoke a declared service on its owning package. Presentation actions use this
-    /// route so two authors can expose the same action contract without selecting one
-    /// global role winner. The package and role must both be installed in this generation.
+    /// Invoke a declared service on one stable instance, bypassing role selection for owner actions.
     pub async fn invoke_package(
         &self,
-        package: &str,
+        instance: &str,
         request: Request,
         cancel: Cancellation,
     ) -> Terminal {
-        if request.session_id != self.router.session_id {
-            return Terminal::failed(Fault::new("SessionMismatch", "router", "foreign session"));
-        }
-        let declared = self.composition.packages.iter().any(|manifest| {
-            manifest.descriptor.package == package
-                && manifest
-                    .descriptor
-                    .provides
-                    .iter()
-                    .any(|role| role == &request.contract)
-        });
-        if !declared {
+        if request.session_id != self.router.session_id || !self.router.open.load(Ordering::Acquire)
+        {
             return Terminal::failed(Fault::new(
-                "MissingDependency",
+                "SessionMismatch",
                 "router",
-                "owner does not provide action contract",
+                "foreign or closed session",
             ));
         }
-        let Some(instance) = self.packages.get(package) else {
-            return Terminal::failed(Fault::new(
-                "MissingDependency",
-                "router",
-                "owner is not installed",
-            ));
+        let unit = match self.router.unit(instance) {
+            Ok(i) => i,
+            Err(e) => return Terminal::failed(e),
         };
+        if !unit.provides.contains(&request.contract)
+            || matches!(
+                request.contract.as_str(),
+                p::INSTANCE_STOP | p::runtime::READY
+            )
+        {
+            return Terminal::failed(Fault::new(
+                "MissingDependency",
+                "router",
+                "owner does not provide public contract",
+            ));
+        }
         self.router
-            .events
-            .push(request.run_id, "service_called", request.public_trace());
-        instance.call(request, cancel).await
+            .dispatch(
+                request,
+                self.router.graph.instances[instance].scope.clone(),
+                vec![instance.into()],
+                0,
+                cancel,
+                vec![],
+                None,
+            )
+            .await
     }
-    /// Whether this generation has a selected role, including caller-runtime contributions.
+    /// Whether the session scope resolves this public contract.
     pub fn has_role(&self, contract: &str) -> bool {
-        self.composition.roles.contains_key(contract)
+        self.router.graph.binding("", contract).is_ok()
     }
-    /// The instance selected for one role contract, for a caller that has to
-    /// know whether a role is bound to a particular package.
-    pub fn role(&self, contract: &str) -> Result<Arc<NativeInstance>, Fault> {
-        self.router
-            .context
-            .try_service::<Services>()
-            .map_err(|e| Fault::new("Unavailable", "services", e.to_string()))?
-            .0
-            .get(contract)
-            .and_then(|instance| match instance.as_ref() {
-                Instance::Native(native) => Some(native.clone()),
-                Instance::Local(_) => None,
-            })
-            .ok_or_else(|| Fault::new("MissingDependency", "native-services", contract))
+    /// Retain the selected chain and its incarnation gates. Existing low-level callers use
+    /// the same wrappers, ownership and service access as ordinary session calls.
+    pub fn role(&self, contract: &str) -> Result<Arc<ServiceHandle>, Fault> {
+        let binding = self.router.graph.binding("", contract)?;
+        let owners = binding
+            .wrappers
+            .iter()
+            .chain(std::iter::once(&binding.tail))
+            .map(|id| self.router.unit(id).map(|u| u.identity.clone()))
+            .collect::<Result<_, _>>()?;
+        Ok(Arc::new(ServiceHandle {
+            router: Arc::downgrade(&self.router),
+            contract: contract.into(),
+            owners,
+        }))
     }
-    /// Close admission, cancel every in-flight request, and run each instance's
-    /// finalizer before releasing its library. Await this before dropping the
-    /// kernel, because only it guarantees the disposal barrier was reached.
+    /// Return the incarnation used by stale-handle and future configuration management checks.
+    pub fn instance_identity(&self, id: &str) -> Result<p::runtime::InstanceIdentity, Fault> {
+        Ok(self.router.unit(id)?.identity.clone())
+    }
+    /// Close one instance's admission immediately. Dependency cleanup may still call live providers.
+    pub fn quiesce_instance(&self, id: &str) -> Result<(), Fault> {
+        let unit = self.router.unit(id)?;
+        let jobs = self.router.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        unit.open.store(false, Ordering::Release);
+        for job in jobs.values().filter(|j| j.owner == unit.identity) {
+            job.cancel.cancel();
+        }
+        unit.instance.close();
+        Ok(())
+    }
+    /// Await one independently owned publication's jobs, bridges and finalizer. Dropping the waiter
+    /// cannot abandon shutdown. Callers manage dependency impact before invoking this primitive.
+    pub async fn stop_instance(&self, id: &str) -> Result<(), Fault> {
+        self.quiesce_instance(id)?;
+        let router = self.router.clone();
+        let id = id.to_owned();
+        tokio::spawn(async move { stop_unit(router, id).await })
+            .await
+            .map_err(|e| Fault::new("CleanupFailure", "runtime", e.to_string()))?
+    }
+    /// Dispose dependents before their declared owners/providers, retaining cleanup service access.
     pub async fn shutdown(&self) -> Result<(), Fault> {
         self.router.open.store(false, Ordering::Release);
-        for instance in &self.instances {
-            instance.close();
-        }
-        for cancel in self
-            .router
-            .requests
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .values()
-        {
-            cancel.cancel();
-        }
-        let disposed = self.fiber.dispose().await;
-        // Include explicitly loaded packages that were not selected for a role;
-        // instance finalizer failures survive repeated stop calls by the adapter.
-        let mut cleanup: Option<Fault> = None;
-        for instance in &self.instances {
-            if let Err(error) = instance.stop().await {
-                if let Some(first) = &mut cleanup {
-                    first
-                        .message
-                        .push_str(&format!("; instance cleanup: {error}"));
-                } else {
-                    cleanup = Some(error);
+        let router = self.router.clone();
+        tokio::spawn(async move {
+            let mut failure: Option<Fault> = None;
+            for id in router.graph.order.iter().rev() {
+                if router.unit(id).is_err() {
+                    continue;
+                }
+                if let Err(error) = stop_unit(router.clone(), id.clone()).await {
+                    if let Some(first) = &mut failure {
+                        first
+                            .message
+                            .push_str(&format!("; instance cleanup: {error}"));
+                    } else {
+                        failure = Some(error);
+                    }
                 }
             }
-        }
-        let workers = std::mem::take(
-            &mut *self
-                .router
-                .workers
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()),
-        );
-        for worker in workers {
-            let _ = worker.await;
-        }
-        let mut registry = routers().lock().unwrap_or_else(|e| e.into_inner());
-        for token in &self.tokens {
-            registry.remove(token);
-        }
-        drop(registry);
-        if let Some(mut error) = cleanup {
-            if let Err(disposal) = disposed {
-                error
-                    .message
-                    .push_str(&format!("; cordis cleanup: {disposal}"));
+            loop {
+                let workers =
+                    std::mem::take(&mut *router.workers.lock().unwrap_or_else(|e| e.into_inner()));
+                if workers.is_empty() {
+                    break;
+                }
+                for worker in workers {
+                    let _ = worker.await;
+                }
             }
-            return Err(error);
-        }
-        disposed.map_err(|e| Fault::new("CleanupFailure", "cordis", e.to_string()))
+            failure.map_or(Ok(()), Err)
+        })
+        .await
+        .map_err(|e| Fault::new("CleanupFailure", "runtime", e.to_string()))?
     }
 }
-
+/// A selected service handle expires when any member of its captured chain stops.
+pub struct ServiceHandle {
+    router: std::sync::Weak<Router>,
+    contract: String,
+    owners: Vec<p::runtime::InstanceIdentity>,
+}
+impl ServiceHandle {
+    /// Invoke the captured chain with cleanup ownership; stale handles never bind to replacements.
+    pub async fn call(&self, request: Request, cancel: Cancellation) -> Terminal {
+        let Some(router) = self.router.upgrade() else {
+            return Terminal::failed(Fault::new("Unavailable", "service", "owner dropped"));
+        };
+        if request.contract != self.contract
+            || self.owners.iter().any(|id| {
+                router.unit(&id.id).map_or(true, |u| {
+                    u.identity != *id || !u.open.load(Ordering::Acquire)
+                })
+            })
+        {
+            return Terminal::failed(Fault::new(
+                "Unavailable",
+                "service",
+                "contract mismatch or expired generation",
+            ));
+        }
+        if request.session_id != router.session_id || !router.open.load(Ordering::Acquire) {
+            return Terminal::failed(Fault::new(
+                "Unavailable",
+                "service",
+                "foreign or closed session",
+            ));
+        }
+        router
+            .dispatch(
+                request,
+                String::new(),
+                self.owners.iter().map(|id| id.id.clone()).collect(),
+                0,
+                cancel,
+                vec![],
+                None,
+            )
+            .await
+    }
+}
+async fn stop_unit(router: Arc<Router>, id: String) -> Result<(), Fault> {
+    let unit = router.unit(&id)?;
+    let _stop = unit.stop_lock.lock().await;
+    let jobs: Vec<_> = {
+        let jobs = router.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        unit.open.store(false, Ordering::Release);
+        jobs.values()
+            .filter(|j| j.owner == unit.identity)
+            .cloned()
+            .collect()
+    };
+    for job in &jobs {
+        job.cancel.cancel();
+    }
+    unit.instance.close();
+    let mut failure = None;
+    for job in jobs {
+        let mut status = job.status.subscribe();
+        loop {
+            if let Some(terminal) = status.borrow_and_update().clone() {
+                if let Some(error) = terminal.cleanup_errors.first() {
+                    failure = Some(error.clone());
+                }
+                break;
+            }
+            if status.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+    let call = router.next.fetch_add(1, Ordering::Relaxed);
+    let identity = p::runtime::CallIdentity {
+        owner: unit.identity.clone(),
+        scope: router.graph.instances[&id].scope.clone(),
+        call,
+        next: None,
+        job: None,
+    };
+    let request = Request {
+        execution: Some(identity.clone()),
+        session_id: router.session_id,
+        run_id: 0,
+        contract: p::INSTANCE_STOP.into(),
+        payload: serde_json::Value::Null,
+    };
+    router
+        .calls
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(
+            call,
+            routing::LiveCall {
+                identity,
+                request: request.clone(),
+                chain: vec![id.clone()],
+                index: 0,
+                stack: vec![(id.clone(), p::INSTANCE_STOP.into())],
+                delegated: false,
+            },
+        );
+    let result = unit.instance.finalize(request).await;
+    router
+        .calls
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&call);
+    let disposed = unit
+        .fiber
+        .dispose()
+        .await
+        .map_err(|e| Fault::new("CleanupFailure", "cordis", e.to_string()));
+    routers()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&unit.token);
+    result.and(disposed).and(failure.map_or(Ok(()), Err))
+}
 struct Delivery(Option<Result<Kernel, Fault>>);
 impl Drop for Delivery {
     fn drop(&mut self) {

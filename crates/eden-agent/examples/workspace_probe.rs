@@ -15,6 +15,7 @@ async fn call(
         .role(contract)?
         .call(
             Request {
+                execution: None,
                 session_id: session.id(),
                 run_id: 99,
                 contract: contract.into(),
@@ -101,6 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             assert_eq!(
                 old.call(
                     Request {
+                        execution: None,
                         session_id: session.id(),
                         run_id: 99,
                         contract: c::LOOP.into(),
@@ -187,6 +189,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let task = tokio::spawn(async move {
                 role.call(
                     Request {
+                        execution: None,
                         session_id: id,
                         run_id: 100,
                         contract: r::SEARCH.into(),

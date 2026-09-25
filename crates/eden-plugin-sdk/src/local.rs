@@ -132,12 +132,23 @@ impl LocalInstance {
     }
     /// Cancel and drain all operations, then run the optional instance finalizer once.
     pub async fn stop(self: &Arc<Self>) -> Result<(), Fault> {
+        self.stop_with_request(Request {
+            execution: None,
+            session_id: 0,
+            run_id: 0,
+            contract: eden_protocol::INSTANCE_STOP.into(),
+            payload: serde_json::Value::Null,
+        })
+        .await
+    }
+    /// Host finalization retains a live identity so cleanup can call surviving dependencies.
+    pub async fn stop_with_request(self: &Arc<Self>, request: Request) -> Result<(), Fault> {
         let instance = self.clone();
-        tokio::spawn(async move { instance.stop_owned().await })
+        tokio::spawn(async move { instance.stop_owned(request).await })
             .await
             .map_err(|e| Fault::new("CleanupFailure", "local-package", e.to_string()))?
     }
-    async fn stop_owned(&self) -> Result<(), Fault> {
+    async fn stop_owned(&self, request: Request) -> Result<(), Fault> {
         let _stop = self.stop.lock().await;
         self.close();
         if let Some(result) = self
@@ -171,18 +182,10 @@ impl LocalInstance {
             .iter()
             .any(|role| role == eden_protocol::INSTANCE_STOP)
         {
-            self.execute(
-                Request {
-                    session_id: 0,
-                    run_id: 0,
-                    contract: eden_protocol::INSTANCE_STOP.into(),
-                    payload: serde_json::Value::Null,
-                },
-                Cancellation::default(),
-            )
-            .await
-            .into_result()
-            .map(|_| ())
+            self.execute(request, Cancellation::default())
+                .await
+                .into_result()
+                .map(|_| ())
         } else {
             Ok(())
         };
@@ -232,6 +235,7 @@ mod tests {
             )
         };
         let request = Request {
+            execution: None,
             session_id: 1,
             run_id: 1,
             contract: "test".into(),

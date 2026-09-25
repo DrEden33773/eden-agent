@@ -57,6 +57,8 @@ async fn open(overrides: Value, endpoint: String, calls: Arc<AtomicUsize>) -> Se
     let cwd = std::env::current_dir().unwrap();
     Embedded::new(
         Composition {
+            host_environment: None,
+            runtime: Default::default(),
             packages: vec![],
             roles: BTreeMap::new(),
             resource_packages: vec![],

@@ -823,6 +823,7 @@ impl Session {
                     .invoke_package(
                         &request.owner,
                         Request {
+                            execution: None,
                             session_id: self.id(),
                             run_id,
                             contract: p::ACTION.into(),

@@ -850,6 +850,8 @@ mod tests {
             .unwrap();
         let root = PathBuf::from(installed["path"].as_str().unwrap());
         let empty = eden_plugin_sdk::protocol::Composition {
+            host_environment: None,
+            runtime: Default::default(),
             resource_packages: vec![],
             packages: vec![],
             roles: Default::default(),

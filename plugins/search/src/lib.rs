@@ -220,7 +220,22 @@ fn descriptor() -> Descriptor {
         ],
     }
 }
-fn create(config: Value) -> Result<Package, Fault> {
+fn create(mut config: Value) -> Result<Package, Fault> {
+    if let Some(host) =
+        eden_plugin_sdk::protocol::environment::HostEnvironment::from_config(&config)?
+    {
+        config["history_dir"] = serde_json::json!(host.global_dir.join("search-history"));
+        let mut excluded = config["excluded_paths"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        excluded.push(serde_json::json!(host.global_dir));
+        excluded.push(serde_json::json!(host.cwd.join(".eden/sessions")));
+        if let Some(history) = host.history_path {
+            excluded.push(serde_json::json!(history));
+        }
+        config["excluded_paths"] = serde_json::json!(excluded);
+    }
     let executable = match config.get("worker").and_then(Value::as_str) {
         Some(path) => PathBuf::from(path),
         None => std::env::current_exe()

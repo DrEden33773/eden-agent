@@ -548,6 +548,7 @@ fn skill_resource_uri_uses_frozen_source_and_enforces_tool_selection() {
             unsafe { runtime::create(create, descriptor, host, Bytes::new(&config), reply) };
         assert_ne!(instance, 0);
         let request = Request {
+            execution: None,
             session_id: 1,
             run_id: 1,
             contract: TOOL.into(),
@@ -913,6 +914,7 @@ mod user_shell {
     }
     fn input(project: &Project, command: &str) -> Request {
         Request {
+            execution: None,
             session_id: 1,
             run_id: 9,
             contract: USER_SHELL.into(),

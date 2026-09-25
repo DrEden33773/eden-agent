@@ -9,6 +9,8 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 fn composition() -> Composition {
     Composition {
+        host_environment: None,
+        runtime: Default::default(),
         packages: vec![],
         roles: BTreeMap::new(),
         resource_packages: vec![],

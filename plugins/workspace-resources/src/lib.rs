@@ -23,7 +23,16 @@ fn descriptor() -> Descriptor {
         provides: vec![SOURCE.into()],
     }
 }
-fn create(config: Value) -> Result<Package, Fault> {
+fn create(mut config: Value) -> Result<Package, Fault> {
+    if let Some(host) =
+        eden_plugin_sdk::protocol::environment::HostEnvironment::from_config(&config)?
+    {
+        config["cwd"] = serde_json::json!(host.cwd);
+        config["global_dir"] = serde_json::json!(host.global_dir);
+        config["trusted"] = serde_json::json!(host.project_trusted);
+        config["settings"] = host.settings;
+        config["resource_packages"] = serde_json::json!(host.resource_packages);
+    }
     let config: SourceConfig =
         serde_json::from_value(config).map_err(|e| invalid(e.to_string()))?;
     let initial = load(&config, 1)?;

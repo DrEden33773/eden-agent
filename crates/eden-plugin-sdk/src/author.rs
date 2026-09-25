@@ -31,6 +31,7 @@ impl CallContext {
     /// operation's scope has closed is rejected rather than delivered late.
     pub fn emit(&self, kind: &str, payload: Value) -> Result<(), Fault> {
         let event = Request {
+            execution: self.request.execution.clone(),
             session_id: self.session_id(),
             run_id: self.run_id(),
             contract: kind.into(),
@@ -52,6 +53,7 @@ impl CallContext {
         input: &I,
     ) -> Result<O, Fault> {
         let request = Request {
+            execution: self.request.execution.clone(),
             session_id: self.session_id(),
             run_id: self.run_id(),
             contract: contract.into(),
@@ -117,6 +119,98 @@ impl CallContext {
             .await
             .map_err(|_| Fault::new("Unavailable", "bridge", "bridge lost"))??;
         serde_json::from_value(value).map_err(serialization)
+    }
+    /// Read host-authoritative paths and trust without requiring object-shaped factory config.
+    pub async fn host_environment(&self) -> Result<Option<p::environment::HostEnvironment>, Fault> {
+        self.call(p::runtime::HOST, &p::runtime::HostRequest::Environment)
+            .await
+    }
+    /// Host-issued owner and generation; never derive ownership from package configuration.
+    pub fn identity(&self) -> Option<&p::runtime::CallIdentity> {
+        self.request.execution.as_ref()
+    }
+    /// Delegate to the remaining wrapper chain exactly once. A retained or consumed token fails.
+    pub async fn delegate<I: Serialize, O: DeserializeOwned>(&self, input: &I) -> Result<O, Fault> {
+        let token = self.identity().and_then(|id| id.next).ok_or_else(|| {
+            Fault::new(
+                "ExpiredContinuation",
+                "runtime",
+                "no continuation in this invocation",
+            )
+        })?;
+        self.call(
+            p::runtime::HOST,
+            &p::runtime::HostRequest::Delegate {
+                token,
+                input: serde_json::to_value(input).map_err(serialization)?,
+            },
+        )
+        .await
+    }
+    /// Resolve a service in an explicit descendant scope; siblings retain their own bindings.
+    pub async fn call_in<I: Serialize, O: DeserializeOwned>(
+        &self,
+        scope: &str,
+        contract: &str,
+        input: &I,
+    ) -> Result<O, Fault> {
+        self.call(
+            p::runtime::HOST,
+            &p::runtime::HostRequest::Call {
+                scope: scope.into(),
+                contract: contract.into(),
+                input: serde_json::to_value(input).map_err(serialization)?,
+            },
+        )
+        .await
+    }
+    /// Register an instance-owned service callback. Its lifetime is independent of this turn.
+    pub async fn submit_job<I: Serialize>(
+        &self,
+        contract: &str,
+        input: &I,
+    ) -> Result<p::runtime::JobStatus, Fault> {
+        self.call(
+            p::runtime::HOST,
+            &p::runtime::HostRequest::Submit {
+                contract: contract.into(),
+                input: serde_json::to_value(input).map_err(serialization)?,
+            },
+        )
+        .await
+    }
+    /// Observe registration or settled completion without waiting for a running job.
+    pub async fn inspect_job(&self, job: u64) -> Result<p::runtime::JobStatus, Fault> {
+        self.call(p::runtime::HOST, &p::runtime::HostRequest::Inspect { job })
+            .await
+    }
+    /// Release a settled job receipt. At most 1024 receipts may be retained per instance;
+    /// forgetting a running job fails so it cannot detach work from its owner.
+    pub async fn forget_job(&self, job: u64) -> Result<(), Fault> {
+        self.call(p::runtime::HOST, &p::runtime::HostRequest::Forget { job })
+            .await
+    }
+    /// Signal cancellation without claiming cleanup has finished; use join_job for the barrier.
+    pub async fn cancel_job(&self, job: u64) -> Result<(), Fault> {
+        self.call(p::runtime::HOST, &p::runtime::HostRequest::Cancel { job })
+            .await
+    }
+    /// Wait for the callback, children and cleanup. Cancelling this waiter does not abandon the job.
+    pub async fn join_job(&self, job: u64) -> Result<p::runtime::JobStatus, Fault> {
+        self.call(p::runtime::HOST, &p::runtime::HostRequest::Join { job })
+            .await
+    }
+    /// Await ordered observations. Lag is explicit, and cancellation releases the subscription.
+    pub async fn events_after(
+        &self,
+        after: u64,
+        kinds: Vec<String>,
+    ) -> Result<p::runtime::EventBatch, Fault> {
+        self.call(
+            p::runtime::HOST,
+            &p::runtime::HostRequest::Events { after, kinds },
+        )
+        .await
     }
     /// Publish or replace an owner-scoped semantic view. The host derives the owner from
     /// the installed package callback, so a caller cannot claim another package's slot.

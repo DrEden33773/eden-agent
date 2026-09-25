@@ -147,6 +147,7 @@ async fn invoke(
     let value = kernel
         .invoke(
             Request {
+                execution: None,
                 session_id: id,
                 run_id: 0,
                 contract: UPDATE_SOURCE.into(),

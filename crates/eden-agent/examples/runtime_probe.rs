@@ -216,7 +216,44 @@ async fn run(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(environment.cwd, std::fs::canonicalize(&cwd)?);
     assert_eq!(environment.global_dir, global_dir);
     assert!(!environment.project_trusted);
-    session.shutdown().await?;
+    let first = session.submit(format!("job@{}", listener.local_addr()?))?;
+    session.wait(first).await?.into_result()?;
+    let (mut session_stream, _) = listener.accept().await?;
+    session_stream.read_exact(&mut ready).await?;
+    assert_eq!(&ready, b"ready");
+    let second = session.submit("second turn")?;
+    session.wait(second).await?.into_result()?;
+    let mut cursor = 0;
+    let mut registered_job = None;
+    loop {
+        let batch = session.read_events(cursor).await?;
+        cursor = batch.last().map_or(cursor, |event| event.sequence);
+        for event in &batch {
+            if event.kind == "author_job_registered" && event.run_id == first {
+                registered_job = event.payload["id"].as_u64();
+            }
+        }
+        if let Some(event) = batch.iter().find(|event| {
+            event.kind == "job_observed_input" && event.payload["input_run"] == second
+        }) {
+            assert_eq!(event.run_id, 0);
+            assert_eq!(event.payload["identity"]["owner"]["id"], "one");
+            assert_eq!(event.payload["identity"]["job"].as_u64(), registered_job);
+            assert!(registered_job.is_some());
+            break;
+        }
+    }
+    let closing_session = session.clone();
+    let closed = tokio::spawn(async move { closing_session.shutdown().await });
+    session_stream.read_exact(&mut cleanup).await?;
+    assert_eq!(&cleanup, b"cleanup");
+    assert!(
+        !closed.is_finished(),
+        "Session closed before its cross-turn job cleaned up"
+    );
+    session_stream.write_all(b"ack").await?;
+    closed.await??;
+    assert_eq!(session_stream.read(&mut eof).await?, 0);
     println!(
         "{}",
         json!({
@@ -225,7 +262,8 @@ async fn run(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 "same-library instances, parent inheritance, child override, sibling isolation",
             "PL-04": "native author receives authoritative workspace environment",
             "PL-03":
-                "cross-turn event, run-zero job, TCP cleanup acknowledgement, stale handle rejected",
+                "two settled Session turns, run-zero job, TCP cleanup acknowledgement, stale \
+                 handle rejected",
         })
     );
     Ok(())

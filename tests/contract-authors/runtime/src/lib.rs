@@ -39,6 +39,12 @@ fn factory(config: Value) -> Result<Package, Fault> {
                         "native downstream failure",
                     ));
                 }
+                if label == "one"
+                    && let Some(endpoint) = input.prompt.strip_prefix("job@")
+                {
+                    let job = cx.submit_job(WORK, &endpoint).await?;
+                    cx.emit("author_job_registered", json!(job))?;
+                }
                 if mode == "wrapper" {
                     if input.prompt == "short" {
                         return Ok(p::ModelInput {
@@ -141,7 +147,9 @@ fn factory(config: Value) -> Result<Package, Fault> {
             stream.lock().await.write_all(b"ready").await.map_err(io)?;
             let mut cursor = 0;
             loop {
-                let batch = cx.events_after(cursor, vec!["next_input".into()]).await?;
+                let batch = cx
+                    .events_after(cursor, vec!["next_input".into(), "accepted".into()])
+                    .await?;
                 cursor = batch.cursor;
                 for event in batch.events {
                     cx.emit(

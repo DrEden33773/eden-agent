@@ -19,6 +19,7 @@ from typing import Any
 from install import ROOT, Composition, build_target, install, library, target
 
 AUTHORS = (
+    "runtime",
     "loop-a",
     "context-b",
     "lifecycle",
@@ -35,6 +36,7 @@ AUTHORS = (
 )
 INVALID = ("wrong-abi", "wrong-sdk", "short-table", "metadata-panic", "init-panic")
 EXAMPLES = (
+    "runtime_probe",
     "embedded",
     "contract_probe",
     "initialization_probe",

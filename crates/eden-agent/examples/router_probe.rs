@@ -54,6 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let stale = retained
             .call(
                 Request {
+                    execution: None,
                     session_id: session.id(),
                     run_id: run + 1,
                     contract: MODEL_MANAGER.into(),

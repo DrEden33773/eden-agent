@@ -32,6 +32,7 @@ class Fixture(http.server.ThreadingHTTPServer):
         self.stall_attach = False
         self.attach_started = threading.Event()
         self.attach_release = threading.Event()
+        self.recovery_snapshot_delay = 0.0
         self.sequence = 1
         self.read_only = False
         self.active = True
@@ -151,6 +152,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 }
             )
         else:
+            if self.fixture.attachment >= 2 and self.fixture.recovery_snapshot_delay:
+                delay = self.fixture.recovery_snapshot_delay
+                self.fixture.recovery_snapshot_delay = 0.0
+                time.sleep(delay)
             self.respond(self.fixture.snapshot())
 
     def do_POST(self):
@@ -281,6 +286,8 @@ def stalled_attach_recovery(binary):
             try:
                 terminal.send(b"\tX")
                 server.stall_attach = True
+                # A server-side attach acknowledgement precedes the client's recovered frame.
+                server.recovery_snapshot_delay = 0.8
                 server.expired = True
                 assert server.attach_started.wait(3), "recovery attach never started"
                 terminal.read(0.5)
@@ -288,8 +295,12 @@ def stalled_attach_recovery(binary):
                 wait_for(
                     lambda: server.attachment == 2, "stalled attach blocked recovery", seconds=9
                 )
-                terminal.read(0.5)
-                assert "Connected" in terminal.display, terminal.display
+
+                def connected():
+                    terminal.read(0.05)
+                    return "Connected" in terminal.display
+
+                wait_for(connected, "reattached client never rendered Connected")
                 terminal.send(b"\r")
                 wait_for(lambda: server.actions, "recovered form never submitted")
                 assert server.actions[-1]["values"]["text"] == "baseX"

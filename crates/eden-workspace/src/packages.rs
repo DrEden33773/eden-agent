@@ -503,6 +503,8 @@ mod tests {
         )
         .unwrap();
         let mut direct = Composition {
+            host_environment: None,
+            runtime: Default::default(),
             resource_packages: vec![],
             packages: vec![target_manifest],
             roles: Default::default(),

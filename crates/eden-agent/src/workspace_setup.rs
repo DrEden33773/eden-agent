@@ -49,82 +49,6 @@ pub(crate) fn prepare_resolved(
         {
             eden_workspace::merge(&mut package.config, config.clone());
         }
-        if package
-            .descriptor
-            .provides
-            .iter()
-            .any(|role| role == eden_protocol::resources::SOURCE)
-        {
-            let mut config = package.config.clone();
-            if !config.is_object() {
-                config = serde_json::json!({});
-            }
-            config["cwd"] = serde_json::json!(cwd);
-            config["global_dir"] = serde_json::json!(workspace.global_dir);
-            config["trusted"] = serde_json::json!(workspace.trusted);
-            config["settings"] = workspace.settings.clone();
-            package.config = config;
-        }
-        if package.descriptor.package == "model-access" {
-            if !package.config.is_object() {
-                package.config = serde_json::json!({});
-            }
-            package.config["global_dir"] = serde_json::json!(workspace.global_dir);
-            package.config["cwd"] = serde_json::json!(cwd);
-            // Untrusted project configuration has already been excluded by discovery.
-            package.config["commands_trusted"] = serde_json::json!(true);
-        }
-        if package.descriptor.package == "search" {
-            if !package.config.is_object() {
-                package.config = serde_json::json!({});
-            }
-            package.config["history_dir"] =
-                serde_json::json!(workspace.global_dir.join("search-history"));
-            let mut excluded = package.config["excluded_paths"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
-            excluded.push(serde_json::json!(workspace.global_dir));
-            excluded.push(serde_json::json!(Path::new(cwd).join(".eden/sessions")));
-            if let Some(history) = history {
-                let history = if history.is_absolute() {
-                    history.to_owned()
-                } else {
-                    std::env::current_dir()
-                        .map_err(|e| Fault::new("FileFailure", "history", e.to_string()))?
-                        .join(history)
-                };
-                excluded.push(serde_json::json!(history));
-            }
-            package.config["excluded_paths"] = serde_json::json!(excluded);
-        }
-        if package.descriptor.package == "distribution" {
-            if !package.config.is_object() {
-                package.config = serde_json::json!({});
-            }
-            package.config["root"] = serde_json::json!(workspace.global_dir.join("distribution"));
-            if package.config["updates"]["managed_root"].is_null()
-                && let Some(root) = std::env::var_os("EDEN_MANAGED_ROOT")
-            {
-                if !package.config["updates"].is_object() {
-                    package.config["updates"] = serde_json::json!({});
-                }
-                package.config["updates"]["managed_root"] =
-                    serde_json::json!(std::path::PathBuf::from(root));
-            }
-        }
-        if package.descriptor.package == "coding-tools" {
-            if !package.config.is_object() {
-                package.config = serde_json::json!({});
-            }
-            package.config["artifact_dir"] =
-                serde_json::json!(workspace.global_dir.join("artifacts"));
-            for key in ["tools", "exclude_tools", "read_only"] {
-                if let Some(value) = workspace.settings.get(key) {
-                    package.config[key] = value.clone();
-                }
-            }
-        }
     }
     eden_kernel::preflight(&selected)?;
     let embedded: Vec<_> = selected
@@ -142,14 +66,37 @@ pub(crate) fn prepare_resolved(
         &workspace.global_dir.join("distribution"),
     )?;
     selected.packages.extend(embedded);
+    let history_path = history
+        .map(|path| {
+            if path.is_absolute() {
+                Ok(path.to_owned())
+            } else {
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(path))
+                    .map_err(|error| Fault::new("FileFailure", "history", error.to_string()))
+            }
+        })
+        .transpose()?;
+    let environment = eden_protocol::environment::HostEnvironment {
+        cwd: workspace.cwd,
+        global_dir: workspace.global_dir,
+        project_trusted: workspace.trusted,
+        // Discovery has excluded untrusted project configuration.
+        commands_trusted: true,
+        settings: workspace.settings,
+        history_path,
+        managed_root: std::env::var_os("EDEN_MANAGED_ROOT").map(std::path::PathBuf::from),
+        resource_packages: selected.resource_packages.clone(),
+    };
+    selected.host_environment = Some(environment.clone());
+    let environment = serde_json::to_value(environment)
+        .map_err(|error| Fault::new("InvalidInput", "host-environment", error.to_string()))?;
     for package in &mut selected.packages {
-        if package
-            .descriptor
-            .provides
-            .iter()
-            .any(|role| role == eden_protocol::resources::SOURCE)
-        {
-            package.config["resource_packages"] = serde_json::json!(selected.resource_packages);
+        if package.config.is_null() {
+            package.config = serde_json::json!({});
+        }
+        if package.config.is_object() {
+            package.config[eden_protocol::environment::CONFIG_KEY] = environment.clone();
         }
     }
     Ok(selected)
@@ -173,4 +120,100 @@ pub(crate) fn register(
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod environment_tests {
+    use super::*;
+
+    #[test]
+    fn every_author_receives_authoritative_host_environment() {
+        let root = std::env::temp_dir().join(format!(
+            "eden-host-env-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let global = root.join("global");
+        std::fs::create_dir_all(&global).unwrap();
+        let names = [
+            "third-party",
+            "model-access",
+            "search",
+            "distribution",
+            "coding-tools",
+        ];
+        let mut packages: Vec<_> = names
+            .iter()
+            .map(|name| {
+                serde_json::json!({
+                    "descriptor": {
+                        "package": name,
+                        "version": "0.1.0",
+                        "provides": [eden_protocol::delivery::EXPORTER],
+                    },
+                    "host": eden_protocol::CONTRACT,
+                    "sdk": eden_protocol::CONTRACT,
+                    "target": eden_plugin_sdk::abi::TARGET,
+                    "library": "unused",
+                    "config": { "__eden_host": { "cwd": "forged" }, "custom": 42 },
+                })
+            })
+            .collect();
+        let mut scalar = packages[0].clone();
+        scalar["descriptor"]["package"] = serde_json::json!("scalar-author");
+        scalar["config"] = serde_json::json!([1, 2, 3]);
+        packages.push(scalar);
+        let selected = serde_json::from_value(serde_json::json!({
+            "packages": packages,
+            "roles": { eden_protocol::delivery::EXPORTER: "third-party" },
+        }))
+        .unwrap();
+        let result = prepare_resolved(
+            selected,
+            &root,
+            root.to_str().unwrap(),
+            &WorkspaceOptions {
+                global_dir: global.clone(),
+                project_trust: Some(false),
+                overrides: serde_json::json!({
+                    "plugins": { "third-party": { "__eden_host": { "cwd": "settings-forged" } } },
+                }),
+            },
+            &Events::new(0),
+            Some(&root.join("history.jsonl")),
+            &names
+                .into_iter()
+                .chain(["scalar-author"])
+                .map(String::from)
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(result.host_environment.as_ref().unwrap().cwd, root);
+        for package in result.packages {
+            if package.descriptor.package == "scalar-author" {
+                assert_eq!(package.config, serde_json::json!([1, 2, 3]));
+                continue;
+            }
+            assert_eq!(
+                package.config["__eden_host"]["cwd"],
+                serde_json::json!(root)
+            );
+            assert_eq!(
+                package.config["__eden_host"]["global_dir"],
+                serde_json::json!(global)
+            );
+            assert_eq!(package.config["__eden_host"]["project_trusted"], false);
+            assert_eq!(package.config["custom"], 42);
+            let host = eden_protocol::environment::HostEnvironment::from_config(&package.config)
+                .unwrap()
+                .unwrap();
+            assert!(host.commands_trusted);
+            assert_eq!(host.history_path, Some(root.join("history.jsonl")));
+            assert!(package.config.get("artifact_dir").is_none());
+            assert!(package.config.get("root").is_none());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

@@ -420,6 +420,7 @@ impl Session {
                 .kernel
                 .invoke(
                     Request {
+                        execution: None,
                         session_id: session.id(),
                         run_id,
                         contract: role.into(),
@@ -618,7 +619,7 @@ impl Session {
         self.0.events.read_after(sequence).await
     }
     /// Useful for low-level native integration; the returned proxy retains its generation gate.
-    pub fn role(&self, contract: &str) -> Result<Arc<eden_kernel::NativeInstance>, Fault> {
+    pub fn role(&self, contract: &str) -> Result<Arc<eden_kernel::ServiceHandle>, Fault> {
         self.0.kernel.role(contract)
     }
     /// Close admission, cancel and settle the active run, then destroy plugin-owned runtimes.
@@ -727,6 +728,7 @@ impl Session {
             .kernel
             .invoke(
                 Request {
+                    execution: None,
                     session_id: self.id(),
                     run_id,
                     contract: role.into(),

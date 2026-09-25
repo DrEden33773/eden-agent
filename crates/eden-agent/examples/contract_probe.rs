@@ -177,6 +177,7 @@ async fn probe(path: &Path, mode: &str) -> Result<(), Error> {
     let stale = role
         .call(
             Request {
+                execution: None,
                 session_id: session.id(),
                 run_id: run + 1,
                 contract: AGENT_LOOP.into(),

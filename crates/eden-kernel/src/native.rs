@@ -205,6 +205,16 @@ impl NativeInstance {
         }
     }
     pub(crate) async fn stop(self: &Arc<Self>) -> Result<(), Fault> {
+        self.stop_with_request(Request {
+            execution: None,
+            session_id: 0,
+            run_id: 0,
+            contract: eden_protocol::INSTANCE_STOP.into(),
+            payload: serde_json::Value::Null,
+        })
+        .await
+    }
+    pub(crate) async fn stop_with_request(self: &Arc<Self>, request: Request) -> Result<(), Fault> {
         let _owner = self.stop_lock.lock().await;
         if let Some(result) = self
             .stop_result
@@ -226,16 +236,7 @@ impl NativeInstance {
         }
         let mut result = if self.has_finalizer {
             self.clone()
-                .invoke(
-                    Request {
-                        session_id: 0,
-                        run_id: 0,
-                        contract: eden_protocol::INSTANCE_STOP.into(),
-                        payload: serde_json::Value::Null,
-                    },
-                    Cancellation::default(),
-                    true,
-                )
+                .invoke(request, Cancellation::default(), true)
                 .await
                 .into_result()
                 .map(|_| ())
@@ -330,6 +331,7 @@ mod tests {
             instance
                 .call(
                     Request {
+                        execution: None,
                         session_id: 1,
                         run_id: 1,
                         contract: eden_protocol::INSTANCE_STOP.into(),
@@ -351,6 +353,7 @@ mod tests {
         let terminal = instance
             .call(
                 Request {
+                    execution: None,
                     session_id: 1,
                     run_id: 1,
                     contract: eden_protocol::INSTANCE_STOP.into(),

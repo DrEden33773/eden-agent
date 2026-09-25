@@ -49,6 +49,68 @@ def main() -> None:
             composition["packages"].append(
                 package(name, roles, f"plugins/{name}/0.1.0/{lib}", triple)
             )
+        runtime_library = library("author_runtime")
+        runtime_dir = destination / "plugins/runtime/0.1.0"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(author_artifact("runtime"), runtime_dir / runtime_library)
+        runtime_composition = copy.deepcopy(composition)
+        runtime_composition["packages"] = [
+            item
+            for item in runtime_composition["packages"]
+            if item["descriptor"]["package"] == "standard"
+        ]
+        runtime_composition["packages"].append(
+            package(
+                "runtime-author",
+                [
+                    ROLES[1],
+                    "author.runtime.control.v1",
+                    "author.runtime.work.v1",
+                    "eden.instance-ready.v1",
+                ],
+                f"plugins/runtime/0.1.0/{runtime_library}",
+                triple,
+            )
+        )
+        runtime_composition["runtime"] = {
+            "instances": [
+                {"id": name, "package": "runtime-author", "config": {"mode": mode, "label": label}}
+                for name, mode, label in [
+                    ("one", "wrapper", "one"),
+                    ("two", "wrapper", "two"),
+                    ("child-a", "tail", "a"),
+                    ("child-b", "tail", "b"),
+                    ("worker", "tail", "worker"),
+                ]
+            ],
+            "scopes": {
+                "": {
+                    "bindings": {
+                        ROLES[1]: {"tail": "standard", "wrappers": ["one", "two"]},
+                        "author.runtime.control.v1": {"tail": "worker"},
+                    }
+                },
+                "a": {"parent": "", "bindings": {ROLES[1]: {"tail": "child-a"}}},
+                "b": {"parent": ""},
+            },
+        }
+        # A scalar package config must not let an object instance override forge host inputs.
+        runtime_composition["packages"][-1]["config"] = 42
+        runtime_composition["runtime"]["instances"][-1]["config"]["__eden_host"] = {
+            "cwd": "forged",
+            "global_dir": "forged",
+            "project_trusted": True,
+            "commands_trusted": False,
+            "settings": {},
+            "history_path": None,
+            "managed_root": None,
+            "resource_packages": [],
+        }
+        runtime_path = destination / "runtime.json"
+        write(runtime_path, runtime_composition)
+        results["runtime"] = json.loads(
+            run([example("runtime_probe"), runtime_path], scratch).stdout
+        )
         invalid_paths = {}
         for feature in [
             "wrong-abi",

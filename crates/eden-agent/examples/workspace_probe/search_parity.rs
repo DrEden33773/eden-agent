@@ -154,6 +154,7 @@ pub(super) async fn run(
     let task = tokio::spawn(async move {
         role.call(
             Request {
+                execution: None,
                 session_id: id,
                 run_id: 101,
                 contract: r::SEARCH.into(),

@@ -2,15 +2,17 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub mod delivery;
+pub mod environment;
 pub mod interaction;
 pub mod models;
 pub mod presentation;
 pub mod resources;
+pub mod runtime;
 pub mod shell;
 pub mod updates;
 
 /// Exact host/SDK pairing for this development release.
-pub const CONTRACT: &str = "eden-native-0.6.0";
+pub const CONTRACT: &str = "eden-native-0.7.0";
 /// Agent loop role.
 pub const AGENT_LOOP: &str = "eden.agent-loop.v1";
 /// Context projection role.
@@ -104,6 +106,8 @@ impl Terminal {
 // Field and variant names state the payload; see docs/development-checks.md#doc-comments.
 #[allow(missing_docs)]
 pub struct Request {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<runtime::CallIdentity>,
     pub session_id: u64,
     pub run_id: u64,
     pub contract: String,
@@ -120,7 +124,11 @@ impl Request {
         } else {
             self.payload.clone()
         };
-        serde_json::json!({ "contract": self.contract, "input": input })
+        serde_json::json!({
+            "contract": self.contract,
+            "input": input,
+            "execution": self.execution,
+        })
     }
 }
 impl std::fmt::Debug for Request {
@@ -139,6 +147,7 @@ mod privacy_tests {
     fn auth_and_credential_calls_never_expose_input_to_trace_or_debug() {
         for contract in [models::AUTH, models::CREDENTIAL_SOURCE] {
             let request = Request {
+                execution: None,
                 session_id: 1,
                 run_id: 1,
                 contract: contract.into(),
@@ -190,6 +199,10 @@ pub struct PackageManifest {
 // Field and variant names state the payload; see docs/development-checks.md#doc-comments.
 #[allow(missing_docs)]
 pub struct Composition {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_environment: Option<environment::HostEnvironment>,
+    #[serde(default)]
+    pub runtime: runtime::Graph,
     pub packages: Vec<PackageManifest>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resource_packages: Vec<resources::LockedResourcePackage>,

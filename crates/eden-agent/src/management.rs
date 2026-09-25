@@ -559,6 +559,7 @@ async fn isolated_service<I: Serialize, O: serde::de::DeserializeOwned + Send + 
         let result = kernel
             .invoke(
                 Request {
+                    execution: None,
                     session_id: id,
                     run_id: 0,
                     contract: role,
@@ -667,6 +668,7 @@ impl Session {
                                 .kernel
                                 .invoke(
                                     Request {
+                                        execution: None,
                                         session_id: session.id(),
                                         run_id,
                                         contract: c::CONTEXT.into(),
@@ -748,6 +750,7 @@ impl Session {
                 .kernel
                 .invoke(
                     Request {
+                        execution: None,
                         session_id: session.id(),
                         run_id,
                         contract: c::CONTEXT.into(),

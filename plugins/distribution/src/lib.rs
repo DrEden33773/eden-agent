@@ -25,7 +25,20 @@ fn descriptor() -> Descriptor {
         ],
     }
 }
-fn create(config: Value) -> Result<Package, Fault> {
+fn create(mut config: Value) -> Result<Package, Fault> {
+    if let Some(host) =
+        eden_plugin_sdk::protocol::environment::HostEnvironment::from_config(&config)?
+    {
+        config["root"] = serde_json::json!(host.global_dir.join("distribution"));
+        if config["updates"]["managed_root"].is_null()
+            && let Some(root) = host.managed_root
+        {
+            if !config["updates"].is_object() {
+                config["updates"] = serde_json::json!({});
+            }
+            config["updates"]["managed_root"] = serde_json::json!(root);
+        }
+    }
     let root = config["root"]
         .as_str()
         .map(PathBuf::from)

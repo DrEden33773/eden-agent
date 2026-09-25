@@ -187,7 +187,14 @@ fn descriptor() -> Descriptor {
         ],
     }
 }
-fn create(config: Value) -> Result<Package, Fault> {
+fn create(mut config: Value) -> Result<Package, Fault> {
+    if let Some(host) =
+        eden_plugin_sdk::protocol::environment::HostEnvironment::from_config(&config)?
+    {
+        config["global_dir"] = serde_json::json!(host.global_dir);
+        config["cwd"] = serde_json::json!(host.cwd);
+        config["commands_trusted"] = serde_json::json!(host.commands_trusted);
+    }
     let package = credentials::register(
         router::register(
             catalog::register(Package::new("model-access"), &config)?,

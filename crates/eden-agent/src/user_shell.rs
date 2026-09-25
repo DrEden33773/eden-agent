@@ -48,6 +48,7 @@ impl Session {
                 .kernel
                 .invoke(
                     Request {
+                        execution: None,
                         session_id: session.id(),
                         run_id,
                         contract: USER_SHELL.into(),

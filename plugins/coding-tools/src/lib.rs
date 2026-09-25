@@ -29,7 +29,17 @@ fn descriptor() -> Descriptor {
         ],
     }
 }
-fn create(config: Value) -> Result<Package, Fault> {
+fn create(mut config: Value) -> Result<Package, Fault> {
+    if let Some(host) =
+        eden_plugin_sdk::protocol::environment::HostEnvironment::from_config(&config)?
+    {
+        config["artifact_dir"] = serde_json::json!(host.global_dir.join("artifacts"));
+        for key in ["tools", "exclude_tools", "read_only"] {
+            if let Some(value) = host.settings.get(key) {
+                config[key] = value.clone();
+            }
+        }
+    }
     use eden_plugin_sdk::protocol::resources as r;
     let registry = registry::Registry::new(&config)?;
     let listing = registry.clone();

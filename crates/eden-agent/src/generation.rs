@@ -51,7 +51,7 @@ impl Generation {
             .clone()
     }
     /// The instance the active generation selected for one role contract.
-    pub fn role(&self, contract: &str) -> Result<Arc<eden_kernel::NativeInstance>, Fault> {
+    pub fn role(&self, contract: &str) -> Result<Arc<eden_kernel::ServiceHandle>, Fault> {
         self.get()?.role(contract)
     }
     /// Route a request through the active generation. A session with no active

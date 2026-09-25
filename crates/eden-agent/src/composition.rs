@@ -77,6 +77,18 @@ pub(crate) fn binding(composition: &eden_protocol::Composition, cwd: &str) -> Re
                 .collect::<Vec<_>>()
         );
     }
+    if !composition.runtime.instances.is_empty() || !composition.runtime.scopes.is_empty() {
+        let mut graph =
+            serde_json::to_value(&composition.runtime).map_err(|e| failure(e.to_string()))?;
+        if let Some(instances) = graph["instances"].as_array_mut() {
+            for instance in instances {
+                if let Some(object) = instance.as_object_mut() {
+                    object.remove("config");
+                }
+            }
+        }
+        binding["runtime"] = graph;
+    }
     Ok(binding)
 }
 /// Locations support data-only copy reference tracking, but are not package identity.
@@ -183,6 +195,7 @@ impl Session {
                 kernel
                     .invoke(
                         Request {
+                            execution: None,
                             session_id: self.id(),
                             run_id,
                             contract: c::STORE.into(),
@@ -195,6 +208,7 @@ impl Session {
                 kernel
                     .invoke(
                         Request {
+                            execution: None,
                             session_id: self.id(),
                             run_id,
                             contract: c::QUEUE.into(),
@@ -208,6 +222,7 @@ impl Session {
                 kernel
                     .invoke(
                         Request {
+                            execution: None,
                             session_id: self.id(),
                             run_id,
                             contract: c::STORE.into(),

@@ -182,6 +182,7 @@ async fn call(
     instance
         .call(
             Request {
+                execution: None,
                 session_id: 1,
                 run_id: 1,
                 contract: role.into(),

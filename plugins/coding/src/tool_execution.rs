@@ -322,6 +322,7 @@ mod tests {
     }
     fn round(items: Vec<Item>) -> Request {
         Request {
+            execution: None,
             session_id: 1,
             run_id: 1,
             contract: "test.execute".into(),

@@ -38,7 +38,7 @@ class Composition(TypedDict):
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-CONTRACT = "eden-native-0.7.0"
+CONTRACT = "eden-native-0.8.0"
 ROLES = ["eden.agent-loop.v1", "eden.context.v1", "eden.provider.v1", "eden.tool.v1"]
 
 
@@ -183,7 +183,16 @@ def install(
                         }
                     ]
                 }
-            composition["packages"].append(package(pkg, roles, relative, target(), config))
+            manifest = package(pkg, roles, relative, target(), config)
+            if pkg == "coding":
+                manifest["requires"] = [
+                    "eden.coding-context.v2",
+                    "eden.coding-provider.v1",
+                    "eden.coding-tool.v1",
+                    "eden.session-store.v2",
+                    "eden.submission-queue.v2",
+                ]
+            composition["packages"].append(manifest)
             composition["roles"].update(
                 {role: pkg for role in roles if role != "eden.instance-stop.v1"}
             )

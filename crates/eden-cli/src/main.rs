@@ -52,6 +52,7 @@ async fn run(parsed: Parsed, shell: &Shell) -> Result<i32, Box<dyn std::error::E
             | Family::Update { .. }
             | Family::InstallationCheck,
         ) => eden_cli::delivery::run(&parsed.cli).await,
+        Some(Family::Config { .. }) => eden_cli::configuration_commands::run(&parsed.cli).await,
         Some(Family::Rpc) => eden_cli::rpc::run(&parsed.cli).await,
         Some(Family::Live { endpoint, web_root }) => {
             eden_cli::live::run_host(&parsed.cli, endpoint, web_root.as_deref()).await

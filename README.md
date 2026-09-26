@@ -31,6 +31,8 @@ cargo run -p eden-agent --example embedded -- artifacts/install/composition.json
 
 The [embedded example](crates/eden-agent/examples/embedded.rs) uses the same `Session::open`, `submit`, `wait` and `shutdown` API as the CLI. Accepted submissions have a run identity; final results are retained for `inspect` even when a waiting receiver is dropped. `events_after` reads ordered in-memory events. Await `shutdown` before dropping your Tokio runtime.
 
+Configuration queries, validation, previews and local application are available through the same SDK, [CLI and RPC management interface](docs/configuration.md). A configuration operation has its own identity, waits for affected foreground runs by default, and preserves unrelated instances.
+
 ## Native plugin authors
 
 Read the [author guide](docs/plugin-authoring.md) and [native contract](docs/native-plugins.md). The public SDK is `crates/eden-plugin-sdk`; it re-exports protocol types. [Loop A](tests/contract-authors/loop-a) and [Context B](tests/contract-authors/context-b) are independently built author examples. First-party roles use the same SDK and loader.

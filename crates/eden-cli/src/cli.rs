@@ -97,7 +97,7 @@ pub struct Cli {
     /// Continue a saved session instead of submitting a new prompt
     #[arg(long = "continue", requires = "session", conflicts_with = "prompt")]
     pub continue_session: bool,
-    /// Session for prompt/model/auth/router commands; queries require an existing file
+    /// Session for prompt/model/auth/router/config commands; queries require an existing file
     #[arg(long, global = true, visible_alias = "resume", value_name = "PATH")]
     pub session: Option<PathBuf>,
     /// Keep the run in memory and write no session file
@@ -240,6 +240,12 @@ pub enum Family {
         /// Authentication operation.
         action: AuthAction,
     },
+    /// Inspect, validate and apply instance configuration without a chat run
+    Config {
+        #[command(subcommand)]
+        /// Revision-bound management action.
+        action: ConfigAction,
+    },
     /// Inspect or change saved project trust
     Trust {
         #[command(subcommand)]
@@ -284,6 +290,55 @@ pub enum Family {
         #[command(subcommand)]
         /// Which session operation to perform.
         action: SessionAction,
+    },
+}
+
+/// Ordinary edits use the SDK's recursive object merge and whole-array replacement.
+#[derive(Debug, Args)]
+pub struct ConfigChangeArgs {
+    /// Stable instance id from config inspect
+    pub instance: String,
+    /// Configuration revision from config inspect
+    #[arg(long)]
+    pub revision: u64,
+    /// Ordinary configuration merge patch; secret changes require private input
+    #[arg(long, value_name = "JSON", default_value = "{}")]
+    pub patch: String,
+    /// Resolved composition containing an already installed replacement package
+    #[arg(long, value_name = "PATH")]
+    pub replacement: Option<PathBuf>,
+}
+
+/// Management operations retain their own identity independently of conversation runs.
+#[derive(Debug, Subcommand)]
+pub enum ConfigAction {
+    /// Show redacted effective configuration, sources, revisions and application metadata
+    Inspect,
+    /// Check declared schema and plugin business constraints without applying
+    Validate {
+        /// Revision-bound candidate.
+        #[command(flatten)]
+        change: ConfigChangeArgs,
+    },
+    /// Show affected instances and foreground work before applying
+    Preview {
+        /// Revision-bound candidate.
+        #[command(flatten)]
+        change: ConfigChangeArgs,
+    },
+    /// Apply the candidate and wait for the final application or recovery receipt
+    Apply {
+        /// Revision-bound candidate.
+        #[command(flatten)]
+        change: ConfigChangeArgs,
+        /// Wait for affected foreground work, or cancel it before applying
+        #[arg(long, default_value = "wait", value_parser = ["wait", "cancel"])]
+        mode: String,
+    },
+    /// Query a retained management operation receipt
+    Status {
+        /// Management operation identity returned by apply
+        operation: u64,
     },
 }
 

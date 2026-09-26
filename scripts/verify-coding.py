@@ -223,6 +223,24 @@ def main() -> None:
         finally:
             entry_server.close()
         author = build_author(destination, scratch)
+        configuration_failure = copy.deepcopy(composition)
+        configuration_store = copy.deepcopy(author)
+        configuration_store["config"] = {"fail_kind": "configuration_commit"}
+        configuration_failure["packages"].append(configuration_store)
+        configuration_failure["roles"][STORE] = "coding-replacements"
+        configuration_path = destination / "configuration-commit-failure.json"
+        write(configuration_path, configuration_failure)
+        results["configuration"] = json.loads(
+            run(
+                [
+                    example("configuration_probe"),
+                    destination / "composition.json",
+                    configuration_path,
+                    scratch / "configuration",
+                ],
+                scratch,
+            ).stdout
+        )
         caller = scratch / "unrelated caller 工作目录"
         caller.mkdir()
         project = scratch / "coding project"

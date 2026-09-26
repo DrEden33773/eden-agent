@@ -180,6 +180,13 @@ impl Session {
             embedded.packages,
         )
         .await?;
+        let configuration_revision = self
+            .0
+            .configuration
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .revision
+            + 1;
         let setup = async {
             if self.0.coding {
                 let request = match &self.0.history_path {
@@ -218,7 +225,7 @@ impl Session {
                     )
                     .await
                     .into_result()?;
-                workspace_setup::register(self, kernel.composition(), true)?;
+                workspace_setup::register(self, &kernel.composition(), true)?;
                 kernel
                     .invoke(
                         Request {
@@ -226,17 +233,25 @@ impl Session {
                             session_id: self.id(),
                             run_id,
                             contract: c::STORE.into(),
-                            payload: json!(c::StoreRequest::Append {
+                            payload: json!(c::StoreRequest::AppendBatch {
                                 run_id,
-                                kind: "composition_lock".into(),
-                                payload: locked.clone()
+                                entries: vec![
+                                    c::RecordDraft {
+                                        kind: "configuration_reset".into(),
+                                        payload: json!({ "revision": configuration_revision })
+                                    },
+                                    c::RecordDraft {
+                                        kind: "composition_lock".into(),
+                                        payload: locked.clone()
+                                    }
+                                ]
                             }),
                         },
                         Cancellation::default(),
                     )
                     .await
                     .into_result()?;
-                workspace_setup::register(self, kernel.composition(), false)?;
+                workspace_setup::register(self, &kernel.composition(), false)?;
             }
             Ok::<_, Fault>(())
         }
@@ -248,7 +263,18 @@ impl Session {
             }
             return Err(error);
         }
+        let sources =
+            configuration_metadata::origins(&kernel.composition(), &self.0.workspace_options)?;
         self.0.kernel.install(kernel);
+        *self
+            .0
+            .configuration
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = configuration::Manager {
+            revision: configuration_revision,
+            sources,
+            ..Default::default()
+        };
         self.0.events.push(run_id, "composition_switched", locked);
         Ok(json!({ "available": true, "composition": path }))
     }

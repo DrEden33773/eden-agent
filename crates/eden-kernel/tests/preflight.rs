@@ -69,3 +69,42 @@ fn unknown_domain_requirements_are_checked_without_host_domain_types() {
         .insert("example.weather.v2".into(), "standard".into());
     preflight(&composition).unwrap();
 }
+
+#[test]
+fn a_self_provided_required_contract_can_still_have_external_wrappers() {
+    use eden_protocol as p;
+    let roles = [p::AGENT_LOOP, p::CONTEXT, p::PROVIDER, p::TOOL];
+    let roles_map = roles
+        .into_iter()
+        .map(|role| (role, "default"))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let composition = serde_json::from_value(serde_json::json!({
+        "packages": [
+            {
+                "descriptor": { "package": "default", "version": "1", "provides": roles },
+                "host": p::CONTRACT,
+                "sdk": p::CONTRACT,
+                "target": eden_plugin_sdk::abi::TARGET,
+                "library": "default",
+                "requires": [p::CONTEXT],
+            },
+            {
+                "descriptor": { "package": "wrapper", "version": "1", "provides": [p::CONTEXT] },
+                "host": p::CONTRACT,
+                "sdk": p::CONTRACT,
+                "target": eden_plugin_sdk::abi::TARGET,
+                "library": "wrapper",
+            }
+        ],
+        "roles": roles_map,
+        "runtime": {
+            "scopes": {
+                "": {
+                    "bindings": { (p::CONTEXT): { "tail": "default", "wrappers": ["wrapper"] } },
+                },
+            },
+        },
+    }))
+    .unwrap();
+    eden_kernel::preflight(&composition).unwrap();
+}

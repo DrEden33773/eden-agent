@@ -11,6 +11,8 @@ mod startup;
 mod user_shell;
 pub use control::SessionState;
 mod composition;
+pub mod configuration;
+mod configuration_metadata;
 mod generation;
 mod models;
 mod workspace_setup;
@@ -33,12 +35,14 @@ struct State {
     active: Option<(u64, Cancellation)>,
     shells: BTreeMap<u64, Cancellation>,
     commands: BTreeMap<u64, Cancellation>,
+    command_contracts: BTreeMap<u64, String>,
     management: bool,
     pending_inputs: usize,
     terminals: BTreeMap<u64, Terminal>,
     shutdown_result: Option<Result<(), Fault>>,
 }
 struct Inner {
+    configuration: Mutex<configuration::Manager>,
     maintenance: startup::Maintenance,
     previews: Mutex<BTreeMap<String, eden_protocol::delivery::Artifact>>,
     id: u64,
@@ -201,7 +205,11 @@ impl Session {
             "eden-host-interaction-v1",
         )?;
         embedded = embedded.package(presentation.package(), "eden-host-presentation-v1")?;
-        let selected = embedded.composition;
+        let mut selected = embedded.composition;
+        let sources = configuration_metadata::origins(&selected, &workspace_options)?;
+        let mut configuration = configuration::replay(&mut selected, &previous)?;
+        configuration.sources = sources;
+        configuration::replay_sources(&mut configuration, &previous);
         let local = embedded.packages;
         let desired = composition::binding(&selected, &cwd)?;
         if !rebind
@@ -240,6 +248,7 @@ impl Session {
             return Err(error);
         }
         let session = Self(Arc::new(Inner {
+            configuration: Mutex::new(configuration),
             maintenance: Default::default(),
             previews: Mutex::new(BTreeMap::new()),
             id,
@@ -257,6 +266,7 @@ impl Session {
                 active: None,
                 shells: BTreeMap::new(),
                 commands: BTreeMap::new(),
+                command_contracts: BTreeMap::new(),
                 management: false,
                 pending_inputs: 0,
                 terminals: BTreeMap::new(),
@@ -461,6 +471,7 @@ impl Session {
                 "session closed or already running",
             ));
         }
+        self.configuration_admission(if self.0.coding { c::LOOP } else { AGENT_LOOP }, management)?;
         let run_id = state.next;
         state.next = state
             .next
@@ -663,7 +674,15 @@ impl Session {
             changed.as_mut().enable();
             {
                 let state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
-                if state.pending_inputs == 0 && state.shells.is_empty() && state.commands.is_empty()
+                if state.pending_inputs == 0
+                    && state.shells.is_empty()
+                    && state.commands.is_empty()
+                    && !self
+                        .0
+                        .configuration
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .active
                 {
                     break;
                 }
@@ -767,7 +786,12 @@ impl Session {
     }
     /// Read committed public history through the selected storage role.
     pub async fn history(&self) -> Result<Vec<c::Record>, Fault> {
-        if !self.0.kernel.available() {
+        if !self
+            .0
+            .kernel
+            .get()
+            .is_ok_and(|kernel| kernel.role_running(c::STORE))
+        {
             return match &self.0.history_path {
                 Some(path) => eden_kernel::history::read(path),
                 None => Ok(self
@@ -798,6 +822,7 @@ impl Session {
                     "session closed or managing history",
                 ));
             }
+            self.configuration_admission(c::QUEUE, false)?;
             state.pending_inputs += 1;
             state.active.as_ref().map(|(id, _)| *id).unwrap_or(0)
         };

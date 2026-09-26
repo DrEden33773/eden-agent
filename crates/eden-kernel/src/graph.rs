@@ -9,6 +9,7 @@ pub(crate) struct Graph {
     pub instances: BTreeMap<String, InstanceSpec>,
     pub scopes: BTreeMap<String, ServiceScope>,
     pub order: Vec<String>,
+    pub dependencies: BTreeMap<String, BTreeSet<String>>,
 }
 fn invalid(message: impl Into<String>) -> Fault {
     Fault::new("InvalidInput", "runtime-graph", message)
@@ -119,6 +120,7 @@ impl Graph {
             instances,
             scopes,
             order: vec![],
+            dependencies: BTreeMap::new(),
         };
         for spec in graph.instances.values() {
             if !graph.scopes.contains_key(&spec.scope) {
@@ -126,6 +128,49 @@ impl Graph {
             }
             for role in &packages[spec.package.as_str()].requires {
                 graph.binding(&spec.scope, role)?;
+            }
+        }
+        for (id, spec) in &graph.instances {
+            let mut dependencies: BTreeSet<_> = spec
+                .dependencies
+                .iter()
+                .chain(spec.owner.iter())
+                .cloned()
+                .collect();
+            for role in &packages[spec.package.as_str()].requires {
+                let binding = graph.binding(&spec.scope, role)?;
+                // A package may require a contract it also implements (for example loop +
+                // context). Its outer wrappers already depend on this tail; they cannot
+                // become providers required to initialize/finalize the same tail.
+                if binding.tail == *id {
+                    continue;
+                }
+                dependencies.extend(
+                    binding
+                        .wrappers
+                        .iter()
+                        .chain(std::iter::once(&binding.tail))
+                        .filter(|target| *target != id)
+                        .cloned(),
+                );
+            }
+            graph.dependencies.insert(id.clone(), dependencies);
+        }
+        // A retained wrapper continuation depends on every downstream publication in its chain.
+        for scope in graph.scopes.values() {
+            for binding in scope.bindings.values() {
+                let chain: Vec<_> = binding
+                    .wrappers
+                    .iter()
+                    .chain(std::iter::once(&binding.tail))
+                    .collect();
+                for pair in chain.windows(2) {
+                    graph
+                        .dependencies
+                        .entry(pair[0].clone())
+                        .or_default()
+                        .insert(pair[1].clone());
+                }
             }
         }
         let mut visiting = BTreeSet::new();
@@ -151,11 +196,11 @@ impl Graph {
         if !visiting.insert(id.into()) {
             return Err(invalid("instance ownership/dependency cycle"));
         }
-        let spec = self
-            .instances
+        let dependencies = self
+            .dependencies
             .get(id)
             .ok_or_else(|| invalid(format!("missing owner/dependency {id}")))?;
-        for dependency in spec.dependencies.iter().chain(spec.owner.iter()) {
+        for dependency in dependencies {
             self.visit(dependency, visiting, done, order)?;
         }
         visiting.remove(id);

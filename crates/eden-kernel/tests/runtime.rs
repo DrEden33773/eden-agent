@@ -229,3 +229,92 @@ async fn explicitly_scoped_instance_cannot_reach_a_sibling_through_root_binding(
     assert_eq!(value, "tail(x)");
     kernel.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn lr_preview_keeps_scope_override_isolated_and_includes_owned_children() {
+    let child = Package::new("child").service(p::CONTEXT, |v: String, _| async move { Ok(v) });
+    let owned = Package::new("owned");
+    let sibling = Package::new("sibling");
+    let kernel = mount(
+        vec![tail(), child, owned, sibling],
+        json!({
+            "instances": [
+                { "id": "child", "package": "child", "scope": "a" },
+                { "id": "owned", "package": "owned", "owner": "child" },
+                { "id": "sibling", "package": "sibling", "scope": "b" }
+            ],
+            "scopes": {
+                "a": { "parent": "", "bindings": { (p::CONTEXT): { "tail": "child" } } },
+                "b": { "parent": "" },
+            },
+        }),
+    )
+    .await;
+    let mut candidate = kernel.composition().clone();
+    candidate.runtime.instances[0].config = Some(json!({ "changed": true }));
+    assert_eq!(
+        kernel.affected_instances(&candidate).unwrap(),
+        vec!["child", "owned"]
+    );
+    assert!(
+        !kernel
+            .affected_by_contract(p::CONTEXT, &["child".into()])
+            .unwrap()
+    );
+    kernel.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn lr_management_gate_retains_unrelated_calls_and_rejects_retained_handle() {
+    let child = Package::new("child").service("child", |v: String, _| async move { Ok(v) });
+    let kernel = mount(
+        vec![tail(), child],
+        json!({ "scopes": { "": { "bindings": { "child": { "tail": "child" } } } } }),
+    )
+    .await;
+    let handle = kernel.role(p::CONTEXT).unwrap();
+    kernel.set_reconfiguring(&["tail".into()], true).unwrap();
+    let request = Request {
+        execution: None,
+        session_id: 1,
+        run_id: 1,
+        contract: p::CONTEXT.into(),
+        payload: json!("x"),
+    };
+    assert_eq!(
+        handle
+            .call(request.clone(), Cancellation::default())
+            .await
+            .into_result()
+            .unwrap_err()
+            .code,
+        "Reconfiguring"
+    );
+    assert_eq!(
+        kernel
+            .invoke(request, Cancellation::default())
+            .await
+            .into_result()
+            .unwrap_err()
+            .code,
+        "Reconfiguring"
+    );
+    let request = Request {
+        execution: None,
+        session_id: 1,
+        run_id: 1,
+        contract: "child".into(),
+        payload: json!("ok"),
+    };
+    assert_eq!(
+        kernel
+            .invoke(request, Cancellation::default())
+            .await
+            .into_result()
+            .unwrap(),
+        json!("ok")
+    );
+    kernel.set_reconfiguring(&["tail".into()], false).unwrap();
+    assert_eq!(invoke(&kernel, "x").await, "tail(x)");
+    kernel.shutdown().await.unwrap();
+}

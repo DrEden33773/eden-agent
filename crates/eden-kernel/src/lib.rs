@@ -3,6 +3,7 @@
 mod graph;
 pub mod history;
 mod native;
+mod replacement;
 mod routing;
 use cordis_core::{Context, FiberHandle, Plugin, PreparedPlugin, Service};
 use eden_plugin_sdk::{
@@ -323,6 +324,7 @@ struct Managed {
     fiber: FiberHandle,
     _context: Context,
     stop_lock: tokio::sync::Mutex<()>,
+    stop_result: Mutex<Option<Result<(), Fault>>>,
 }
 // HostApi tokens use a process registry, so retained author contexts cannot dereference freed hosts.
 type RouterRegistry = Mutex<BTreeMap<usize, (std::sync::Weak<Router>, String)>>;
@@ -416,9 +418,12 @@ unsafe extern "C" fn event(context: usize, bytes: Bytes) {
     }
 }
 /// A composition of independently disposable native instance publications.
+#[derive(Clone)]
 pub struct Kernel {
     router: Arc<Router>,
-    composition: Composition,
+    composition: Arc<Mutex<Composition>>,
+    base: std::path::PathBuf,
+    replacement: Arc<tokio::sync::Mutex<()>>,
 }
 async fn rollback_initialization(mut error: Fault, instances: &[Arc<Instance>]) -> Fault {
     for instance in instances {
@@ -426,6 +431,7 @@ async fn rollback_initialization(mut error: Fault, instances: &[Arc<Instance>]) 
     }
     for instance in instances {
         if let Err(cleanup) = instance.stop().await {
+            error.code = "CleanupFailure".into();
             error
                 .message
                 .push_str(&format!("; rollback cleanup: {cleanup}"));
@@ -543,12 +549,22 @@ impl Kernel {
             instances: Mutex::new(BTreeMap::new()),
             calls: Mutex::new(BTreeMap::new()),
             jobs: Mutex::new(BTreeMap::new()),
+            reconfiguring: Mutex::new(Default::default()),
         });
         let kernel = Self {
             router,
-            composition,
+            composition: Arc::new(Mutex::new(composition)),
+            base: base.to_owned(),
+            replacement: Arc::new(tokio::sync::Mutex::new(())),
         };
-        let result = kernel.initialize(&manifests, &mut local).await;
+        let result = kernel
+            .initialize(
+                &manifests,
+                &mut local,
+                &kernel.router.graph,
+                &kernel.router.graph.order,
+            )
+            .await;
         if let Err(mut error) = result {
             if let Err(cleanup) = kernel.shutdown().await {
                 error
@@ -563,6 +579,8 @@ impl Kernel {
         &self,
         manifests: &BTreeMap<String, (p::PackageManifest, std::path::PathBuf)>,
         local: &mut BTreeMap<String, eden_plugin_sdk::Package>,
+        graph: &graph::Graph,
+        order: &[String],
     ) -> Result<(), Fault> {
         let host_environment = self
             .router
@@ -571,8 +589,8 @@ impl Kernel {
             .map(serde_json::to_value)
             .transpose()
             .map_err(|e| Fault::new("InvalidInput", "host-environment", e.to_string()))?;
-        for id in &self.router.graph.order {
-            let spec = &self.router.graph.instances[id];
+        for id in order {
+            let spec = &graph.instances[id];
             let (mut manifest, path) = manifests[&spec.package].clone();
             // Instance overrides cannot replace authority, including scalar-to-object configs.
             let environment = host_environment
@@ -663,10 +681,11 @@ impl Kernel {
                         fiber,
                         _context: context,
                         stop_lock: tokio::sync::Mutex::new(()),
+                        stop_result: Mutex::new(None),
                     }),
                 );
         }
-        for id in &self.router.graph.order {
+        for id in order {
             let unit = self.router.unit(id)?;
             if unit.provides.iter().any(|c| c == p::runtime::READY) {
                 self.router
@@ -692,8 +711,11 @@ impl Kernel {
         Ok(())
     }
     /// The mounted declaration, including stable instance and scope bindings.
-    pub fn composition(&self) -> &Composition {
-        &self.composition
+    pub fn composition(&self) -> Composition {
+        self.composition
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
     /// Calls settle only after their operation-owned cleanup and native bridges finish.
     pub async fn invoke(&self, request: Request, cancel: Cancellation) -> Terminal {
@@ -701,6 +723,20 @@ impl Kernel {
     }
     /// Invoke a declared service on one stable instance, bypassing role selection for owner actions.
     pub async fn invoke_package(
+        &self,
+        instance: &str,
+        request: Request,
+        cancel: Cancellation,
+    ) -> Terminal {
+        if let Err(error) = self.router.admit(&[instance.to_owned()]) {
+            return Terminal::failed(error);
+        }
+        self.invoke_package_management(instance, request, cancel)
+            .await
+    }
+    /// Trusted host transaction calls may reach gated owners for configuration or persistence.
+    /// Do not expose this admission bypass as a client-controlled routing option.
+    pub async fn invoke_package_management(
         &self,
         instance: &str,
         request: Request,
@@ -746,6 +782,19 @@ impl Kernel {
     pub fn has_role(&self, contract: &str) -> bool {
         self.router.graph.binding("", contract).is_ok()
     }
+    /// Report whether the selected chain still has live publications after a partial failure.
+    pub fn role_running(&self, contract: &str) -> bool {
+        self.router
+            .graph
+            .binding("", contract)
+            .is_ok_and(|binding| {
+                binding
+                    .wrappers
+                    .iter()
+                    .chain(std::iter::once(&binding.tail))
+                    .all(|id| self.instance_running(id))
+            })
+    }
     /// Retain the selected chain and its incarnation gates. Existing low-level callers use
     /// the same wrappers, ownership and service access as ordinary session calls.
     pub fn role(&self, contract: &str) -> Result<Arc<ServiceHandle>, Fault> {
@@ -760,6 +809,27 @@ impl Kernel {
             router: Arc::downgrade(&self.router),
             contract: contract.into(),
             owners,
+            scope: String::new(),
+        }))
+    }
+    /// Capture an owner action's generation before releasing presentation admission locks.
+    /// Retained actions cannot execute against a later incarnation with the same stable id.
+    pub fn instance_service(&self, id: &str, contract: &str) -> Result<Arc<ServiceHandle>, Fault> {
+        let unit = self.router.unit(id)?;
+        if !unit.provides.iter().any(|role| role == contract)
+            || matches!(contract, p::INSTANCE_STOP | p::runtime::READY)
+        {
+            return Err(Fault::new(
+                "MissingDependency",
+                "router",
+                "owner does not provide public contract",
+            ));
+        }
+        Ok(Arc::new(ServiceHandle {
+            router: Arc::downgrade(&self.router),
+            contract: contract.into(),
+            owners: vec![unit.identity.clone()],
+            scope: self.router.graph.instances[id].scope.clone(),
         }))
     }
     /// Return the incarnation used by stale-handle and future configuration management checks.
@@ -791,7 +861,9 @@ impl Kernel {
     pub async fn shutdown(&self) -> Result<(), Fault> {
         self.router.open.store(false, Ordering::Release);
         let router = self.router.clone();
+        let replacement = self.replacement.clone();
         tokio::spawn(async move {
+            let _replacement = replacement.lock().await;
             let mut failure: Option<Fault> = None;
             for id in router.graph.order.iter().rev() {
                 if router.unit(id).is_err() {
@@ -828,6 +900,7 @@ pub struct ServiceHandle {
     router: std::sync::Weak<Router>,
     contract: String,
     owners: Vec<p::runtime::InstanceIdentity>,
+    scope: String,
 }
 impl ServiceHandle {
     /// Invoke the captured chain with cleanup ownership; stale handles never bind to replacements.
@@ -835,6 +908,15 @@ impl ServiceHandle {
         let Some(router) = self.router.upgrade() else {
             return Terminal::failed(Fault::new("Unavailable", "service", "owner dropped"));
         };
+        if let Err(error) = router.admit(
+            &self
+                .owners
+                .iter()
+                .map(|owner| owner.id.clone())
+                .collect::<Vec<_>>(),
+        ) {
+            return Terminal::failed(error);
+        }
         if request.contract != self.contract
             || self.owners.iter().any(|id| {
                 router.unit(&id.id).map_or(true, |u| {
@@ -856,14 +938,15 @@ impl ServiceHandle {
             ));
         }
         router
-            .dispatch(
+            .dispatch_expected(
                 request,
-                String::new(),
+                self.scope.clone(),
                 self.owners.iter().map(|id| id.id.clone()).collect(),
                 0,
                 cancel,
                 vec![],
                 None,
+                self.owners.first(),
             )
             .await
     }
@@ -871,6 +954,14 @@ impl ServiceHandle {
 async fn stop_unit(router: Arc<Router>, id: String) -> Result<(), Fault> {
     let unit = router.unit(&id)?;
     let _stop = unit.stop_lock.lock().await;
+    if let Some(result) = unit
+        .stop_result
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        return result;
+    }
     let jobs: Vec<_> = {
         let jobs = router.jobs.lock().unwrap_or_else(|e| e.into_inner());
         unit.open.store(false, Ordering::Release);
@@ -943,7 +1034,9 @@ async fn stop_unit(router: Arc<Router>, id: String) -> Result<(), Fault> {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&unit.token);
-    result.and(disposed).and(failure.map_or(Ok(()), Err))
+    let result = result.and(disposed).and(failure.map_or(Ok(()), Err));
+    *unit.stop_result.lock().unwrap_or_else(|e| e.into_inner()) = Some(result.clone());
+    result
 }
 struct Delivery(Option<Result<Kernel, Fault>>);
 impl Drop for Delivery {

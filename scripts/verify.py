@@ -59,6 +59,8 @@ def main() -> None:
             for item in runtime_composition["packages"]
             if item["descriptor"]["package"] == "standard"
         ]
+        # A default package may require its own wrapped context contract without a lifecycle cycle.
+        runtime_composition["packages"][0]["requires"] = [ROLES[1]]
         runtime_composition["packages"].append(
             package(
                 "runtime-author",
@@ -67,6 +69,8 @@ def main() -> None:
                     "author.runtime.control.v1",
                     "author.runtime.work.v1",
                     "eden.instance-ready.v1",
+                    "eden.configuration.v1",
+                    "eden.instance-stop.v1",
                 ],
                 f"plugins/runtime/0.1.0/{runtime_library}",
                 triple,

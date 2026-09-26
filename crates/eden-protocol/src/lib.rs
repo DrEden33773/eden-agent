@@ -1,6 +1,7 @@
 //! Public data records shared by the host and native plugin SDK.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+pub mod configuration;
 pub mod delivery;
 pub mod environment;
 pub mod interaction;
@@ -12,7 +13,7 @@ pub mod shell;
 pub mod updates;
 
 /// Exact host/SDK pairing for this development release.
-pub const CONTRACT: &str = "eden-native-0.7.0";
+pub const CONTRACT: &str = "eden-native-0.8.0";
 /// Agent loop role.
 pub const AGENT_LOOP: &str = "eden.agent-loop.v1";
 /// Context projection role.
@@ -118,7 +119,7 @@ impl Request {
     pub fn public_trace(&self) -> Value {
         let input = if matches!(
             self.contract.as_str(),
-            models::AUTH | models::CREDENTIAL_SOURCE
+            models::AUTH | models::CREDENTIAL_SOURCE | configuration::CONFIGURATION
         ) {
             serde_json::json!({ "redacted": true })
         } else {
@@ -145,7 +146,11 @@ mod privacy_tests {
     use super::*;
     #[test]
     fn auth_and_credential_calls_never_expose_input_to_trace_or_debug() {
-        for contract in [models::AUTH, models::CREDENTIAL_SOURCE] {
+        for contract in [
+            models::AUTH,
+            models::CREDENTIAL_SOURCE,
+            configuration::CONFIGURATION,
+        ] {
             let request = Request {
                 execution: None,
                 session_id: 1,

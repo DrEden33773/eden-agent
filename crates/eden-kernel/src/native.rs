@@ -433,7 +433,7 @@ mod tests {
                 .collect::<Vec<_>>(),
         )
         .await;
-        assert_eq!(error.code, original.code);
+        assert_eq!(error.code, "CleanupFailure");
         assert_eq!(error.source, original.source);
         assert!(error.message.starts_with(&original.message));
         for source in ["first-plugin", "second-plugin"] {

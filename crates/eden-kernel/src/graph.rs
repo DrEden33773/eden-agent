@@ -139,6 +139,12 @@ impl Graph {
                 .collect();
             for role in &packages[spec.package.as_str()].requires {
                 let binding = graph.binding(&spec.scope, role)?;
+                // A package may require a contract it also implements (for example loop +
+                // context). Its outer wrappers already depend on this tail; they cannot
+                // become providers required to initialize/finalize the same tail.
+                if binding.tail == *id {
+                    continue;
+                }
                 dependencies.extend(
                     binding
                         .wrappers

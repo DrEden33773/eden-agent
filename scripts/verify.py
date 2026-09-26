@@ -59,6 +59,8 @@ def main() -> None:
             for item in runtime_composition["packages"]
             if item["descriptor"]["package"] == "standard"
         ]
+        # A default package may require its own wrapped context contract without a lifecycle cycle.
+        runtime_composition["packages"][0]["requires"] = [ROLES[1]]
         runtime_composition["packages"].append(
             package(
                 "runtime-author",

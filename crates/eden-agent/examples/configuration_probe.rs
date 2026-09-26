@@ -165,7 +165,7 @@ async fn committed_configuration(path: &Path, scratch: &Path) -> ProbeResult<Val
             new_library = Some(destination);
         }
     }
-    let new_library = new_library.ok_or("search library missing")?;
+    let new_library = std::fs::canonicalize(new_library.ok_or("search library missing")?)?;
     let replacement_path = scratch.join("replacement-composition.json");
     std::fs::write(&replacement_path, serde_json::to_vec(&replacement)?)?;
     let mut replacement_change = change("search", updated.revision, json!({}));

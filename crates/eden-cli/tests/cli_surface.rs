@@ -505,3 +505,50 @@ fn quiet_drops_status_but_never_a_failure() {
         stderr(&verbose)
     );
 }
+
+#[test]
+fn configuration_commands_expose_revision_and_application_mode() {
+    let output = run(&["config", "apply", "--help"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let help = stdout(&output);
+    for flag in ["--revision", "--patch", "--replacement", "--mode"] {
+        assert!(help.contains(flag), "{help}");
+    }
+    let missing_revision = run(&["config", "apply", "example", "--patch", "{}"]);
+    assert_eq!(missing_revision.status.code(), Some(2));
+    assert!(stderr(&missing_revision).contains("--revision"));
+    let invalid_mode = run(&[
+        "config",
+        "apply",
+        "example",
+        "--revision",
+        "0",
+        "--mode",
+        "now",
+    ]);
+    assert_eq!(invalid_mode.status.code(), Some(2));
+    assert!(stderr(&invalid_mode).contains("now"));
+}
+
+#[test]
+fn configuration_apply_requires_a_saved_session_and_checks_json_before_loading() {
+    let output = run(&["config", "apply", "example", "--revision", "0"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("--session PATH"));
+    let output = run(&[
+        "--composition",
+        "missing.json",
+        "--session",
+        "missing-history.jsonl",
+        "config",
+        "apply",
+        "example",
+        "--revision",
+        "0",
+        "--patch",
+        "{invalid",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).contains("--patch must be valid JSON"));
+    assert!(!stderr(&output).contains("{invalid"));
+}

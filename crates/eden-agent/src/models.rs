@@ -267,6 +267,7 @@ mod tests {
     async fn managed_auth_result_stays_private_while_settled_event_is_redacted() {
         let events = Events::new(1);
         let session = Session(Arc::new(Inner {
+            configuration: Mutex::new(Default::default()),
             maintenance: Default::default(),
             previews: Mutex::new(BTreeMap::new()),
             id: 1,
@@ -284,6 +285,7 @@ mod tests {
                 active: None,
                 shells: BTreeMap::new(),
                 commands: BTreeMap::new(),
+                command_contracts: BTreeMap::new(),
                 management: false,
                 pending_inputs: 0,
                 terminals: BTreeMap::new(),

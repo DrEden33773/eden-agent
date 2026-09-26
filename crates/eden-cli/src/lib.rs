@@ -3,6 +3,8 @@
 
 /// Declarative command surface of the `eden` executable.
 pub mod cli;
+/// Headless instance configuration through the shared Session authority.
+pub mod configuration_commands;
 /// Independent export, publication and installation maintenance.
 pub mod delivery;
 /// Explicit environment-file parsing for CLI startup.

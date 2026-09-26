@@ -17,6 +17,7 @@ pub(super) struct Job {
     pub status: tokio::sync::watch::Sender<Option<Terminal>>,
 }
 pub(super) struct Router {
+    pub reconfiguring: Mutex<BTreeSet<String>>,
     pub environment: Option<p::environment::HostEnvironment>,
     pub session_id: u64,
     pub events: Arc<Events>,
@@ -58,6 +59,19 @@ impl Router {
             .as_ref()
             .map_or("", |c| c.scope.as_str())
             .to_owned();
+        let binding = match self.graph.binding(&scope, &request.contract) {
+            Ok(binding) => binding,
+            Err(error) => return Terminal::failed(error),
+        };
+        let ids: Vec<_> = binding
+            .wrappers
+            .iter()
+            .chain(std::iter::once(&binding.tail))
+            .cloned()
+            .collect();
+        if let Err(error) = self.admit(&ids) {
+            return Terminal::failed(error);
+        }
         self.route(request, scope, cancel, vec![], None).await
     }
     async fn route(
@@ -84,6 +98,19 @@ impl Router {
     #[allow(clippy::too_many_arguments)]
     pub fn dispatch(
         self: &Arc<Self>,
+        request: Request,
+        scope: String,
+        chain: Vec<String>,
+        index: usize,
+        cancel: Cancellation,
+        stack: Vec<(String, String)>,
+        job: Option<u64>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Terminal> + Send + '_>> {
+        self.dispatch_expected(request, scope, chain, index, cancel, stack, job, None)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn dispatch_expected(
+        self: &Arc<Self>,
         mut request: Request,
         scope: String,
         chain: Vec<String>,
@@ -91,13 +118,23 @@ impl Router {
         cancel: Cancellation,
         mut stack: Vec<(String, String)>,
         job: Option<u64>,
+        expected: Option<&InstanceIdentity>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Terminal> + Send + '_>> {
         let router = self.clone();
+        // Capture the publication before queueing work: admitted old calls must not drift into
+        // the replacement while the runtime waits to poll their worker.
+        let unit = self.unit(&chain[index]).and_then(|unit| {
+            if expected.is_some_and(|expected| *expected != unit.identity) {
+                Err(Fault::new("Unavailable", "service", "expired generation"))
+            } else {
+                Ok(unit)
+            }
+        });
         Box::pin(async move {
             let (sender, receiver) = tokio::sync::oneshot::channel();
             let worker = tokio::spawn(async move {
                 let terminal = async move {
-                    let unit = match router.unit(&chain[index]) {
+                    let unit = match unit {
                         Ok(unit) => unit,
                         Err(e) => return Terminal::failed(e),
                     };

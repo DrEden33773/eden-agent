@@ -41,6 +41,7 @@ EXAMPLES = (
     "contract_probe",
     "initialization_probe",
     "coding_probe",
+    "configuration_probe",
     "session_probe",
     "context_probe",
     "workspace_probe",

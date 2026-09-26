@@ -84,6 +84,7 @@ impl Session {
                 "session closed or managing history",
             ));
         }
+        self.configuration_admission(c::CODING_CONTROL, false)?;
         state.pending_inputs += 1;
         Ok(state.active.as_ref().map(|(id, _)| *id).unwrap_or(0))
     }
@@ -123,6 +124,7 @@ impl Session {
                     "session closed or managing history",
                 ));
             }
+            self.configuration_admission(&contract, false)?;
             let id = state.next;
             state.next = state
                 .next
@@ -130,6 +132,7 @@ impl Session {
                 .ok_or_else(|| Fault::new("Unavailable", "command", "run identity exhausted"))?;
             let cancel = Cancellation::default();
             state.commands.insert(id, cancel.clone());
+            state.command_contracts.insert(id, contract.clone());
             self.0.presentation.begin_run(id);
             (id, cancel)
         };
@@ -169,6 +172,7 @@ impl Session {
             }
             let mut state = session.0.state.lock().unwrap_or_else(|e| e.into_inner());
             state.commands.remove(&run_id);
+            state.command_contracts.remove(&run_id);
             session.0.presentation.end_run(run_id);
             state.terminals.insert(run_id, terminal.clone());
             session

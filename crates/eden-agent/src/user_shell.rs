@@ -29,6 +29,7 @@ impl Session {
                     "session closed or managing history",
                 ));
             }
+            self.configuration_admission(USER_SHELL, false)?;
             let id = state.next;
             state.next = state
                 .next

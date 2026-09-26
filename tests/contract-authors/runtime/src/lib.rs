@@ -17,6 +17,8 @@ fn descriptor() -> p::Descriptor {
             CONTROL.into(),
             WORK.into(),
             p::runtime::READY.into(),
+            p::configuration::CONFIGURATION.into(),
+            p::INSTANCE_STOP.into(),
         ],
     }
 }
@@ -24,14 +26,71 @@ fn io(e: std::io::Error) -> Fault {
     Fault::new("IoFailure", "runtime-author", e.to_string())
 }
 fn factory(config: Value) -> Result<Package, Fault> {
+    let attempts = if let Some(path) = config["attempts_file"].as_str() {
+        let previous = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| text.parse::<u64>().ok())
+            .unwrap_or(0);
+        std::fs::write(path, (previous + 1).to_string()).map_err(io)?;
+        previous + 1
+    } else {
+        0
+    };
+    if config["fail_prepare"] == true
+        || config["fail_after"]
+            .as_u64()
+            .is_some_and(|limit| attempts > limit)
+    {
+        return Err(Fault::new(
+            "AuthorPrepareFailure",
+            "runtime-author",
+            "controlled initialization failure",
+        ));
+    }
     let mode = config["mode"].as_str().unwrap_or("tail").to_owned();
-    let label = config["label"].as_str().unwrap_or("author").to_owned();
+    let effective = std::sync::Arc::new(std::sync::Mutex::new(config.clone()));
+    let context_config = effective.clone();
+    let control_config = effective.clone();
+    let update_config = effective.clone();
     let environment = p::environment::HostEnvironment::from_config(&config)?;
     Ok(Package::new("runtime-author")
         .service(p::CONTEXT, move |input: p::RunInput, cx| {
             let mode = mode.clone();
-            let label = label.clone();
+            let label = context_config
+                .lock()
+                .unwrap()
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or("author")
+                .to_owned();
             async move {
+                if label == "one"
+                    && let Some(endpoint) = input.prompt.strip_prefix("hold@")
+                {
+                    let stream = std::sync::Arc::new(tokio::sync::Mutex::new(
+                        tokio::net::TcpStream::connect(endpoint).await.map_err(io)?,
+                    ));
+                    let cleanup = stream.clone();
+                    cx.scope.cleanup(async move {
+                        let mut stream = cleanup.lock().await;
+                        stream.write_all(b"cleanup").await.map_err(io)?;
+                        let mut ack = [0; 3];
+                        stream.read_exact(&mut ack).await.map_err(io)?;
+                        if &ack != b"ack" {
+                            return Err(Fault::new(
+                                "CleanupFailure",
+                                "runtime-author",
+                                "bad foreground cleanup acknowledgement",
+                            ));
+                        }
+                        stream.shutdown().await.map_err(io)?;
+                        Ok(())
+                    })?;
+                    let mut stream = stream.lock().await;
+                    stream.write_all(b"ready").await.map_err(io)?;
+                    let mut release = [0; 3];
+                    stream.read_exact(&mut release).await.map_err(io)?;
+                }
                 if input.prompt.contains("fail") && label == "two" {
                     return Err(Fault::new(
                         "AuthorFailure",
@@ -80,9 +139,11 @@ fn factory(config: Value) -> Result<Package, Fault> {
         })
         .service(CONTROL, move |input: Value, cx| {
             let environment = environment.clone();
+            let effective = control_config.clone();
             async move {
                 match input["op"].as_str().unwrap_or("") {
                     "identity" => Ok(json!(cx.identity())),
+                    "configuration" => Ok(effective.lock().unwrap().clone()),
                     "environment" => {
                         let value = match environment {
                             Some(value) => Some(value),
@@ -163,6 +224,62 @@ fn factory(config: Value) -> Result<Package, Fault> {
         })
         .service(p::runtime::READY, |_: (), cx| async move {
             cx.emit("author_ready", json!(cx.identity()))
+        })
+        .service(
+            p::configuration::CONFIGURATION,
+            move |request: p::configuration::PluginRequest, _| {
+                let effective = update_config.clone();
+                async move {
+                    use p::configuration::{Description, FieldError, PluginRequest, Validation};
+                    match request {
+                        PluginRequest::Describe => Ok(json!(Description {
+                            schema: Some(json!({
+                                "type": "object",
+                                "properties": {
+                                    "label": { "type": "string", "minLength": 1 },
+                                    "fail_prepare": { "type": "boolean" },
+                                    "fail_stop": { "type": "boolean" },
+                                },
+                            })),
+                            live_paths: vec!["/label".into()],
+                            description: Some(
+                                "Independent native restart and atomic live-update fixture".into()
+                            ),
+                            ..Description::default()
+                        })),
+                        PluginRequest::Validate { config } | PluginRequest::Update { config }
+                            if config["label"] == "forbidden" =>
+                        {
+                            Ok(json!(Validation {
+                                errors: vec![FieldError {
+                                    path: "/label".into(),
+                                    code: "author_label".into(),
+                                    message: "Label is reserved".into()
+                                }]
+                            }))
+                        }
+                        PluginRequest::Validate { .. } => Ok(json!(Validation::default())),
+                        PluginRequest::Update { config } => {
+                            *effective.lock().unwrap() = config;
+                            Ok(json!(Validation::default()))
+                        }
+                    }
+                }
+            },
+        )
+        .service(p::INSTANCE_STOP, move |_: (), _| {
+            let fail = effective.lock().unwrap()["fail_stop"] == true;
+            async move {
+                if fail {
+                    Err(Fault::new(
+                        "CleanupFailure",
+                        "runtime-author",
+                        "controlled finalizer failure",
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
         }))
 }
 export_plugin!(descriptor, factory);

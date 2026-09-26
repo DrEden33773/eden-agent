@@ -1,5 +1,5 @@
 //! Command-specific use of root arguments, checked before runtime or file access.
-use crate::cli::{Cli, Family, ModelAction};
+use crate::cli::{Cli, ConfigAction, Family, ModelAction};
 use clap::{ArgMatches, parser::ValueSource};
 
 /// Reject explicit options that the selected operation would otherwise discard.
@@ -42,7 +42,8 @@ pub(crate) fn validate(cli: &Cli, matches: &ArgMatches) -> Result<(), String> {
         if cli.session.is_some()
             && !matches!(
                 family,
-                Family::Models { .. }
+                Family::Config { .. }
+                    | Family::Models { .. }
                     | Family::Auth { .. }
                     | Family::Router { .. }
                     | Family::Rpc
@@ -51,6 +52,18 @@ pub(crate) fn validate(cli: &Cli, matches: &ArgMatches) -> Result<(), String> {
         {
             return Err(
                 "--session/--resume is not accepted by this command; use its history path argument"
+                    .into(),
+            );
+        }
+        if matches!(
+            family,
+            Family::Config {
+                action: ConfigAction::Apply { .. } | ConfigAction::Status { .. }
+            }
+        ) && cli.session.is_none()
+        {
+            return Err(
+                "config apply/status requires --session PATH; use RPC for an in-memory session"
                     .into(),
             );
         }

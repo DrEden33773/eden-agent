@@ -67,6 +67,8 @@ def main() -> None:
                     "author.runtime.control.v1",
                     "author.runtime.work.v1",
                     "eden.instance-ready.v1",
+                    "eden.configuration.v1",
+                    "eden.instance-stop.v1",
                 ],
                 f"plugins/runtime/0.1.0/{runtime_library}",
                 triple,

@@ -49,6 +49,15 @@ impl Default for Hub {
     }
 }
 impl Hub {
+    pub(crate) fn invalidate_instances(&self, owners: &[String]) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        for ((owner, _), view) in &mut state.views {
+            if owners.contains(owner) {
+                view.active = false;
+            }
+        }
+        self.bump(&mut state);
+    }
     fn bump(&self, state: &mut HubState) {
         state.sequence += 1;
         self.changed.send_replace(state.sequence);
@@ -710,6 +719,16 @@ impl Session {
                     ));
                 }
                 let admitted_run_id = view.run_id;
+                let handler = if request.owner == "eden-host-interaction" {
+                    None
+                } else {
+                    Some(
+                        self.0
+                            .kernel
+                            .get()?
+                            .instance_service(&request.owner, p::ACTION)?,
+                    )
+                };
                 let node = find_action(&view.view.nodes, &request.action)
                     .ok_or_else(|| Fault::new("InvalidInput", "presentation", "unknown action"))?;
                 validate_action(node, &request.values)?;
@@ -743,14 +762,14 @@ impl Session {
                         listeners: vec![send],
                     },
                 );
-                Some(admitted_run_id)
+                Some((admitted_run_id, handler))
             }
         };
-        if let Some(admitted_run_id) = start {
+        if let Some((admitted_run_id, handler)) = start {
             let session = self.clone();
             tokio::spawn(async move {
                 session
-                    .complete_presentation_action(request, admitted_run_id)
+                    .complete_presentation_action(request, admitted_run_id, handler)
                     .await;
             });
         }
@@ -758,7 +777,12 @@ impl Session {
             .await
             .map_err(|_| Fault::new("Unavailable", "presentation", "action result lost"))?
     }
-    async fn complete_presentation_action(&self, request: p::ActionRequest, admitted_run_id: u64) {
+    async fn complete_presentation_action(
+        &self,
+        request: p::ActionRequest,
+        admitted_run_id: u64,
+        handler: Option<Arc<eden_kernel::ServiceHandle>>,
+    ) {
         let hub = &self.0.presentation;
         let owner = {
             let state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -818,10 +842,9 @@ impl Session {
                     )),
                 }
             }
-            Ok((run_id, cancel)) => match self.0.kernel.get() {
-                Ok(kernel) => kernel
-                    .invoke_package(
-                        &request.owner,
+            Ok((run_id, cancel)) => match handler {
+                Some(handler) => handler
+                    .call(
                         Request {
                             execution: None,
                             session_id: self.id(),
@@ -833,7 +856,11 @@ impl Session {
                     )
                     .await
                     .into_result(),
-                Err(error) => Err(error),
+                None => Err(Fault::new(
+                    "Unavailable",
+                    "presentation",
+                    "missing action generation",
+                )),
             },
             Err(error) => Err(error),
         };

@@ -25,6 +25,11 @@ const METHODS: &[&str] = &[
     "session.new",
     "session.open",
     "state",
+    "config.inspect",
+    "config.validate",
+    "config.preview",
+    "config.apply",
+    "config.status",
     "prompt",
     "resume",
     "cancel",
@@ -209,6 +214,7 @@ enum Dispatch {
     Immediate(Value),
     Run(u64, bool),
     Query(Query),
+    Management(Query),
 }
 fn query(future: impl Future<Output = Result<Value, Fault>> + Send + 'static) -> Dispatch {
     Dispatch::Query(Box::pin(future))
@@ -231,6 +237,31 @@ fn dispatch(
             Dispatch::Immediate(json!({ "interactions": enabled, "methods": METHODS }))
         }
         "state" => Dispatch::Immediate(json!(session.state())),
+        "config.inspect" => query(async move { Ok(json!(s.inspect_configuration().await?)) }),
+        "config.validate" => {
+            let change: eden_agent::configuration::Change = parameter(request.params.clone())?;
+            query(async move { Ok(json!(s.validate_configuration(change).await?)) })
+        }
+        "config.preview" => {
+            let change: eden_agent::configuration::Change = parameter(request.params.clone())?;
+            query(async move { Ok(json!(s.preview_configuration(change).await?)) })
+        }
+        "config.apply" => {
+            let change: eden_agent::configuration::Change = parameter(request.params.clone())?;
+            let mode: eden_agent::configuration::ApplyMode = request
+                .params
+                .get("mode")
+                .cloned()
+                .map(parameter)
+                .transpose()?
+                .unwrap_or_default();
+            Dispatch::Management(Box::pin(async move {
+                Ok(json!({ "operation": s.apply_configuration(change, mode).await? }))
+            }))
+        }
+        "config.status" => Dispatch::Immediate(json!(
+            session.configuration_operation(field(request, "operation")?)?
+        )),
         "prompt" => Dispatch::Run(session.submit_blocks(content(request)?)?, false),
         "resume" => Dispatch::Run(session.resume()?, false),
         "shell" => Dispatch::Run(
@@ -559,7 +590,11 @@ where
                             kind,
                             Some(&id),
                             session_id,
-                            json!({ "result": value }),
+                            if kind == "accepted" {
+                                value
+                            } else {
+                                json!({ "result": value })
+                            },
                         ),
                         Err(e) => error(Some(&id), session_id, e),
                     };
@@ -736,6 +771,13 @@ where
                                     )
                                 });
                             }
+                        }
+                        Ok(Dispatch::Management(operation)) => {
+                            pending.insert(request.id.clone());
+                            let id = session.id();
+                            tasks.spawn(
+                                async move { (request.id, id, "accepted", operation.await) },
+                            );
                         }
                         Ok(Dispatch::Query(query)) => {
                             pending.insert(request.id.clone());
@@ -981,6 +1023,207 @@ pub async fn run(cli: &Cli) -> Result<i32, Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    async fn management_response<R: AsyncRead + Unpin>(frames: &mut Frames<R>, id: &str) -> Value {
+        loop {
+            let bytes = tokio::time::timeout(Duration::from_secs(5), frames.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            if value["id"] == id {
+                return value;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn configuration_rpc_acknowledges_before_completion_without_chat_run() {
+        use eden_agent::{WorkspaceOptions, embedded::Embedded};
+        use eden_plugin_sdk::Package;
+        use eden_protocol::{
+            AGENT_LOOP, CONTEXT, Composition, PROVIDER, TOOL, configuration as cfg,
+        };
+        use std::sync::Arc;
+        let release = Arc::new(tokio::sync::Notify::new());
+        let update_release = release.clone();
+        let package = Package::new("rpc-config")
+            .service(AGENT_LOOP, |_: Value, _| async {
+                Ok::<_, Fault>(Value::Null)
+            })
+            .service(CONTEXT, |_: Value, _| async { Ok::<_, Fault>(Value::Null) })
+            .service(PROVIDER, |_: Value, _| async {
+                Ok::<_, Fault>(Value::Null)
+            })
+            .service(TOOL, |_: Value, _| async { Ok::<_, Fault>(Value::Null) })
+            .service(cfg::CONFIGURATION, move |request: cfg::PluginRequest, _| {
+                let release = update_release.clone();
+                async move {
+                    match request {
+                        cfg::PluginRequest::Describe => Ok(json!(cfg::Description {
+                            schema: Some(json!({
+                                "properties": { "limit": { "type": "integer", "minimum": 1 } },
+                            })),
+                            live_paths: vec!["/limit".into()],
+                            secret_paths: vec!["/token".into()],
+                            ..Default::default()
+                        })),
+                        cfg::PluginRequest::Validate { .. } => {
+                            Ok(json!(cfg::Validation::default()))
+                        }
+                        cfg::PluginRequest::Update { .. } => {
+                            release.notified().await;
+                            Ok(json!(cfg::Validation::default()))
+                        }
+                    }
+                }
+            });
+        let cwd = std::env::temp_dir().join(format!(
+            "eden-rpc-config-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let composition: Composition = serde_json::from_value(json!({
+            "packages": [],
+            "roles": {},
+            "runtime": {
+                "instances": [{
+                    "id": "rpc-config",
+                    "package": "rpc-config",
+                    "config": { "limit": 1, "token": "rpc-private-canary" },
+                }],
+            },
+        }))
+        .unwrap();
+        let workspace = WorkspaceOptions {
+            global_dir: cwd.join("global"),
+            project_trust: Some(false),
+            ..Default::default()
+        };
+        let session = Embedded::new(composition, cwd.clone())
+            .package(package, "rpc-config-v1")
+            .unwrap()
+            .open(
+                SessionOptions {
+                    cwd: cwd.clone(),
+                    history: None,
+                },
+                workspace.clone(),
+            )
+            .await
+            .unwrap();
+        let (client, server) = tokio::io::duplex(65536);
+        let (server_input, server_output) = tokio::io::split(server);
+        let (client_input, mut client_output) = tokio::io::split(client);
+        let mut frames = Frames::new(client_input, 65536);
+        let running = tokio::spawn(serve(
+            session.clone(),
+            OpenOptions {
+                composition: cwd.join("unused.json"),
+                workspace,
+            },
+            server_input,
+            server_output,
+            Limits::default(),
+        ));
+        for (id, method, params) in [
+            ("inspect", "config.inspect", json!({})),
+            (
+                "validate",
+                "config.validate",
+                json!({ "instance": "rpc-config", "revision": 0, "patch": { "limit": 0 } }),
+            ),
+            (
+                "preview",
+                "config.preview",
+                json!({ "instance": "rpc-config", "revision": 0, "patch": { "limit": 2 } }),
+            ),
+            (
+                "apply",
+                "config.apply",
+                json!({ "instance": "rpc-config", "revision": 0, "patch": { "limit": 2 } }),
+            ),
+        ] {
+            let request = json!({
+                "version": 1,
+                "id": id,
+                "session_id": session.id(),
+                "method": method,
+                "params": params,
+            });
+            client_output
+                .write_all(format!("{request}\n").as_bytes())
+                .await
+                .unwrap();
+            let reply = management_response(&mut frames, id).await;
+            match id {
+                "inspect" => {
+                    assert_eq!(reply["result"]["revision"], 0);
+                    assert!(!reply.to_string().contains("rpc-private-canary"));
+                }
+                "validate" => assert_eq!(reply["result"]["errors"][0]["path"], "/limit"),
+                "preview" => assert_eq!(reply["result"]["application"], "live"),
+                "apply" => {
+                    assert_eq!(reply["type"], "accepted");
+                    assert_eq!(reply["operation"], 1);
+                    assert!(reply.get("run_id").is_none());
+                }
+                _ => unreachable!(),
+            }
+        }
+        assert!(session.state().active_run.is_none());
+        release.notify_one();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), session.wait_configuration(1))
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            eden_agent::configuration::Status::Applied
+        );
+        for (id, method, params) in [
+            ("status", "config.status", json!({ "operation": 1 })),
+            (
+                "stale",
+                "config.apply",
+                json!({ "instance": "rpc-config", "revision": 0, "patch": { "limit": 3 } }),
+            ),
+            ("close", "shutdown", json!({})),
+        ] {
+            let request = json!({
+                "version": 1,
+                "id": id,
+                "session_id": session.id(),
+                "method": method,
+                "params": params,
+            });
+            client_output
+                .write_all(format!("{request}\n").as_bytes())
+                .await
+                .unwrap();
+            let reply = management_response(&mut frames, id).await;
+            if id == "status" {
+                assert_eq!(reply["result"]["status"], "applied");
+            }
+            if id == "stale" {
+                assert_eq!(reply["error"]["code"], "Conflict");
+            }
+        }
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), running)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        std::fs::remove_dir_all(cwd).unwrap();
+    }
+
     #[tokio::test]
     async fn framing_preserves_unicode_crlf_and_eof_tail() {
         let bytes = "{\"x\":\"a\u{2028}b\u{2029}中文\"}\r\nlast";

@@ -561,6 +561,7 @@ def headless(endpoint: dict, terminal: Terminal | None, reason: str) -> dict:
     for instance in (HELPER, CUSTOM):
         call(endpoint, "/configuration/open", {"instance": instance})
     receipts = []
+    request_sequence = 0
     for instance, path, value in [
         (HELPER, "/count", 4),
         (HELPER, "/count", 5),
@@ -574,6 +575,7 @@ def headless(endpoint: dict, terminal: Terminal | None, reason: str) -> dict:
         call(endpoint, "/configuration/open", {"instance": instance})
         for action in ("validate", "preview", "apply"):
             view, node = form(endpoint, instance)
+            request_sequence += 1
             result = call(
                 endpoint,
                 "/action",
@@ -583,7 +585,7 @@ def headless(endpoint: dict, terminal: Terminal | None, reason: str) -> dict:
                     "view_id": view["id"],
                     "revision": view["revision"],
                     "action": f"{node['id']}:{action}",
-                    "request_id": f"native-{time.monotonic_ns()}",
+                    "request_id": f"native-{request_sequence}",
                     "values": {
                         "binding": node["binding"],
                         "edits": [{"operation": "set", "path": path, "value": value}],

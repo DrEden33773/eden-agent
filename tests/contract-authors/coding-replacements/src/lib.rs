@@ -449,6 +449,28 @@ impl Storage {
                 payload,
             } => self.append(run_id, vec![RecordDraft { kind, payload }])?,
             StoreRequest::AppendBatch { run_id, entries } => self.append(run_id, entries)?,
+            StoreRequest::AppendChecked {
+                run_id,
+                session_id,
+                sequence,
+                head,
+                branch,
+                entries,
+            } => {
+                let (current_head, current_branch) = branch_state(&self.records)?;
+                if self.id != session_id
+                    || self.records.len() as u64 != sequence
+                    || current_head != head
+                    || current_branch != branch
+                {
+                    return Err(Fault::new(
+                        "CheckpointConflict",
+                        "author-store",
+                        "stale checkpoint",
+                    ));
+                }
+                self.append(run_id, entries)?;
+            }
             StoreRequest::Navigate { target, branch } => {
                 self.available()?;
                 self.commit(vec![Record {
@@ -711,6 +733,7 @@ mod tests {
     use super::*;
     fn state(version: u32, value: Value) -> ExtensionState {
         ExtensionState {
+            references: vec![],
             namespace: "author.counter".into(),
             version,
             required: true,

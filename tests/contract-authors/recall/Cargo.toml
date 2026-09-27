@@ -1,0 +1,16 @@
+[package]
+name = "author-recall"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+eden-plugin-sdk = { path = "../../../crates/eden-plugin-sdk", version = "0.1.0" }
+
+[lints.rust]
+missing_docs = "deny"

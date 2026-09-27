@@ -267,9 +267,13 @@ def main() -> None:
             )
         )
         summary_count = [0]
+        summary_retry = [False]
 
         def repeated(body: dict[str, Any], _: int) -> tuple[int, dict[str, Any]]:
             if summary(body):
+                if not summary_retry[0]:
+                    summary_retry[0] = True
+                    return 503, {"error": {"message": "transient summary failure"}}
                 summary_count[0] += 1
                 assert body["max_output_tokens"] in [8192, 13107]
                 if summary_count[0] == 2:
@@ -298,6 +302,13 @@ def main() -> None:
                 and any(b.get("type") == "image" for b in r["payload"].get("content", []))
             )
             command(config, history, "compact")
+            after_summary = records(history)
+            checkpoint = next(r for r in reversed(after_summary) if r["kind"] == "compaction")
+            assert checkpoint["payload"]["request_id"].endswith(":compaction")
+            assert not any(
+                r["kind"] == "model_attempt" and r["payload"]["status"] == "interrupted"
+                for r in after_summary
+            ), "successful summary must be associated with its committed checkpoint"
             task(config, history, "First continued task")
             first_projection = server.requests[-1]["input"]
             assert "summary-marker-1" in json.dumps(first_projection)
@@ -317,6 +328,7 @@ def main() -> None:
             assert summary_count[0] == 2
             results["repeated_manual_compaction"] = {
                 "summary_calls": 2,
+                "transient_summary_retry_committed": summary_retry[0],
                 "summary_allowances": [
                     body["max_output_tokens"] for body in server.requests if summary(body)
                 ],

@@ -19,6 +19,8 @@ from typing import Any
 from install import ROOT, Composition, build_target, install, library, target
 
 AUTHORS = (
+    "notes",
+    "recall",
     "cache-warmer",
     "runtime",
     "loop-a",
@@ -37,6 +39,7 @@ AUTHORS = (
 )
 INVALID = ("wrong-abi", "wrong-sdk", "short-table", "metadata-panic", "init-panic")
 EXAMPLES = (
+    "notes_probe",
     "cache_warm_probe",
     "runtime_probe",
     "embedded",
@@ -245,13 +248,14 @@ def export_authors(destination: pathlib.Path) -> None:
                 if path.name == "Cargo.toml":
                     data = data.replace(b"../../../crates/", b"../../sdk/crates/")
                 files[pathlib.Path("authors") / name / path.relative_to(base)] = data
-    files[pathlib.Path("authors/cache-warmer/src/lib.rs")] = (
-        ROOT / "plugins/cache-warmer/src/lib.rs"
-    ).read_bytes()
-    cache_manifest = pathlib.Path("authors/cache-warmer/Cargo.toml")
-    files[cache_manifest] = files[cache_manifest].replace(
-        b'path = "../../../plugins/cache-warmer/src/lib.rs"', b'path = "src/lib.rs"'
-    )
+    for plugin in ("cache-warmer", "notes"):
+        files[pathlib.Path(f"authors/{plugin}/src/lib.rs")] = (
+            ROOT / f"plugins/{plugin}/src/lib.rs"
+        ).read_bytes()
+        plugin_manifest = pathlib.Path(f"authors/{plugin}/Cargo.toml")
+        files[plugin_manifest] = files[plugin_manifest].replace(
+            f'path = "../../../plugins/{plugin}/src/lib.rs"'.encode(), b'path = "src/lib.rs"'
+        )
     sync_files(files, destination)
 
 

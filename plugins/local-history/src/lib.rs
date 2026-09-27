@@ -154,6 +154,28 @@ impl Store {
                 self.append(run_id, vec![RecordDraft { kind, payload }])?;
             }
             StoreRequest::AppendBatch { run_id, entries } => self.append(run_id, entries)?,
+            StoreRequest::AppendChecked {
+                run_id,
+                session_id,
+                sequence,
+                head,
+                branch,
+                entries,
+            } => {
+                let (current_head, current_branch) = branch_state(&self.records)?;
+                if self.id != session_id
+                    || self.records.len() as u64 != sequence
+                    || current_head != head
+                    || current_branch != branch
+                {
+                    return Err(Fault::new(
+                        "CheckpointConflict",
+                        "local-history",
+                        "history changed before checkpoint commit",
+                    ));
+                }
+                self.append(run_id, entries)?;
+            }
             StoreRequest::Navigate { target, branch } => {
                 self.available()?;
                 let record = Record {
@@ -366,6 +388,40 @@ eden_plugin_sdk::export_plugin!(descriptor, create);
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn checkpoint_rejects_stale_head_without_partial_notes() {
+        let mut store = Store::default();
+        store
+            .handle(StoreRequest::Open {
+                path: None,
+                session_id: 7,
+            })
+            .unwrap();
+        let request = StoreRequest::AppendChecked {
+            run_id: 1,
+            session_id: 7,
+            sequence: 0,
+            head: None,
+            branch: "main".into(),
+            entries: vec![
+                RecordDraft {
+                    kind: "extension_state".into(),
+                    payload: serde_json::json!({ "summary": "notes" }),
+                },
+                RecordDraft {
+                    kind: "compaction".into(),
+                    payload: serde_json::json!({ "summary": "notes", "first_kept": 0 }),
+                },
+            ],
+        };
+        store.handle(request.clone()).unwrap();
+        assert_eq!(
+            store.handle(request).unwrap_err().code,
+            "CheckpointConflict"
+        );
+        assert_eq!(store.records.len(), 2);
+    }
+
     #[test]
     fn memory_receipt_is_ordered_and_creates_no_file() {
         let mut store = Store::default();

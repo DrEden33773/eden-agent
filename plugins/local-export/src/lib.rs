@@ -147,6 +147,13 @@ fn project(request: &ExportRequest) -> Result<(Vec<Value>, Vec<String>), Fault> 
                     ),
                 })
             }
+            "extension_state" if s.extensions => {
+                json!({
+                    "type": "extension",
+                    "namespace": record.payload["namespace"],
+                    "summary": record.payload["summary"],
+                })
+            }
             kind if kind.contains('.') && s.extensions => {
                 json!({
                     "type": "extension",

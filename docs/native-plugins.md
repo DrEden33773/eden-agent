@@ -1,6 +1,6 @@
 # Native plugin contract
 
-The current development release pairs host and SDK exactly as `eden-native-0.9.0`, ABI version 1, on the same target triple. Authors use Rust 1.98.1. The host and each library own their Rust dependencies and runtimes. Libraries are trusted native code running with the host's permissions.
+The current development release pairs host and SDK exactly as `eden-native-0.10.0`, ABI version 1, on the same target triple. Authors use Rust 1.98.1. The host and each library own their Rust dependencies and runtimes. Libraries are trusted native code running with the host's permissions.
 
 ## Installation and selection
 
@@ -57,3 +57,5 @@ Host/SDK pairing changed from `eden-native-0.7.0` to `eden-native-0.8.0`; rebuil
 ## Auxiliary inference pairing
 
 Version `eden-native-0.9.0` adds auxiliary request preparation/replay, host snapshot revision and event-position operations, plus streaming cancellation and budget enforcement. Rebuild native authors and manifests together; the C ABI table remains version 1. Old binaries are rejected by the exact pairing check. Existing flat configurations and history remain readable. See [auxiliary inference](auxiliary-models.md) for supported routes, ephemeral handles, configuration and accounting boundaries.
+
+Version `eden-native-0.10.0` adds the selected compaction policy, conditional checkpoint append, declared extension source references and bounded history recall. The C ABI table remains version 1. See [compaction and notes](compaction.md) for activation, recovery and migration.

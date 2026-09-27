@@ -118,6 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let run = session
         .record_state(ExtensionState {
+            references: vec![],
             namespace,
             version,
             required: true,

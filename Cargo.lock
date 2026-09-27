@@ -1424,6 +1424,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "eden-notes"
+version = "0.1.0"
+dependencies = [
+ "eden-plugin-sdk",
+ "serde",
+]
+
+[[package]]
 name = "eden-plugin-sdk"
 version = "0.1.0"
 dependencies = [
@@ -1450,6 +1458,14 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "eden-recall"
+version = "0.1.0"
+dependencies = [
+ "eden-plugin-sdk",
+ "serde",
 ]
 
 [[package]]

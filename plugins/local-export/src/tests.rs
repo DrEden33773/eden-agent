@@ -254,3 +254,27 @@ fn static_presentation_obeys_selection_without_leaking_title_or_fallback() {
     assert!(!artifact.content.contains("diff"));
     assert!(!artifact.content.contains("FILE_CANARY"));
 }
+
+#[test]
+fn absent_notes_plugin_still_exports_public_summary_without_opaque_state() {
+    let records = vec![record(
+        1,
+        "extension_state",
+        json!({
+            "namespace": "eden.notes",
+            "version": 1,
+            "required": true,
+            "summary": "PUBLIC_NOTES",
+            "value": { "text": "OPAQUE_CANARY" },
+        }),
+    )];
+    let output = export(ExportRequest {
+        records,
+        selection: Selection::default(),
+        format: Format::Jsonl,
+    })
+    .unwrap();
+    let text = serde_json::to_string(&output).unwrap();
+    assert!(text.contains("PUBLIC_NOTES"));
+    assert!(!text.contains("OPAQUE_CANARY"));
+}

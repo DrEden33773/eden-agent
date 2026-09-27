@@ -80,7 +80,19 @@ def main() -> None:
     }
     with tempfile.TemporaryDirectory(prefix="eden-fmt-baseline-") as temporary:
         baseline = pathlib.Path(temporary)
-        archive = subprocess.check_output(["git", "archive", "77bd79a"])
+        baseline_commit = "77bd79a6fbf70a709addd6f50eaf4ea049a42ebd"
+        if subprocess.run(
+            ["git", "cat-file", "-e", f"{baseline_commit}^{{commit}}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).returncode:
+            subprocess.run(
+                ["git", "fetch", "--no-tags", "--depth=1", "origin", baseline_commit],
+                check=True,
+                stdout=sys.stderr,
+            )
+        receipt["baseline_commit"] = baseline_commit
+        archive = subprocess.check_output(["git", "archive", baseline_commit])
         import io
         import tarfile
 
@@ -182,7 +194,7 @@ def main() -> None:
         for child in (root / "target").iterdir()
         if child.is_dir()
     }
-    output = root / "artifacts/ci/formatter-performance.json"
+    output = root / "artifacts/ci/formatter-measurements.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(receipt, indent=2))

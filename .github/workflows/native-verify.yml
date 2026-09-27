@@ -191,6 +191,11 @@ jobs:
         id: hooks
         if: ${{ !inputs.cache-only && fromJSON(inputs.selected).hooks == true && success() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: node scripts/ci-run.mjs hooks pnpm hooks:test
+      # Auxiliary measurements are inspected separately and must not cancel acceptance.
+      - name: One-time formatter performance evidence
+        if: ${{ !inputs.cache-only && success() }}
+        continue-on-error: true
+        run: node scripts/ci-run.mjs formatter-performance python scripts/formatter-benchmark.py
       # Platform sensitivity, not the crate list, decides what each runner
       # executes. These targets own the branches that really differ per OS:
       # process ownership and shell descendants, link creation, path scope and
@@ -233,9 +238,6 @@ jobs:
       - name: Verify and execute the native packaged archive
         if: ${{ !inputs.cache-only && success() }}
         run: node scripts/ci-run.mjs archive python scripts/verify-archive.py artifacts/eden-${{ runner.os }}-${{ runner.arch }}.tar.gz
-      - name: One-time formatter performance evidence
-        if: ${{ !inputs.cache-only && success() }}
-        run: node scripts/ci-run.mjs formatter-performance python scripts/formatter-benchmark.py
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         if: ${{ inputs.save-cache && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && !cancelled() && steps.toolchain.outcome == 'success' && steps.toolchain-cache.outputs.cache-hit != 'true' }}
         with:

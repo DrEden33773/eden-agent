@@ -6,6 +6,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use eden_protocol::Fault;
+use eden_protocol::configuration_form::{Binding, Control, Edit, Field as ConfigurationField};
 use eden_protocol::presentation::{
     ActionRequest, ActivityTarget, Field, FieldKind, LiveView, Node, Snapshot,
 };
@@ -33,6 +34,14 @@ type DraftKey = (String, String, String, String);
 #[derive(Clone)]
 enum Focus {
     Composer,
+    Configuration {
+        owner: String,
+        view_id: String,
+        node_id: String,
+        revision: u64,
+        binding: Binding,
+        field: ConfigurationField,
+    },
     Field {
         owner: String,
         view_id: String,
@@ -52,6 +61,13 @@ impl Focus {
     fn identity(&self) -> (&str, &str, &str, &str) {
         match self {
             Self::Composer => ("", "", "", ""),
+            Self::Configuration {
+                owner,
+                view_id,
+                node_id,
+                field,
+                ..
+            } => (owner, view_id, node_id, &field.path),
             Self::Field {
                 owner,
                 view_id,
@@ -74,6 +90,14 @@ impl Drop for Follower {
         self.0.abort();
     }
 }
+#[derive(Default)]
+struct ConfigurationDraft {
+    binding: Option<Binding>,
+    fields: String,
+    edits: BTreeMap<String, Edit>,
+    raw: BTreeMap<String, String>,
+    rows: BTreeMap<String, usize>,
+}
 struct Screen {
     snapshot: Snapshot,
     active_run: Option<u64>,
@@ -81,6 +105,7 @@ struct Screen {
     composer: String,
     drafts: BTreeMap<DraftKey, Value>,
     option_cursor: BTreeMap<DraftKey, usize>,
+    configuration_drafts: BTreeMap<String, ConfigurationDraft>,
     focus: usize,
     message: String,
     request_number: u64,
@@ -125,6 +150,22 @@ impl Screen {
 fn collect_focus(nodes: &[Node], view: &LiveView, items: &mut Vec<Focus>) {
     for node in nodes {
         match node {
+            Node::ConfigurationForm {
+                id,
+                binding,
+                fields,
+            } => {
+                for field in fields {
+                    items.push(Focus::Configuration {
+                        owner: view.owner.clone(),
+                        view_id: view.view.id.clone(),
+                        node_id: id.clone(),
+                        revision: view.revision,
+                        binding: binding.clone(),
+                        field: field.clone(),
+                    });
+                }
+            }
             Node::Form { id, action, fields } if !view.handled_actions.contains(action) => {
                 for field in fields {
                     items.push(Focus::Field {
@@ -207,6 +248,55 @@ fn lines(nodes: &[Node], out: &mut Vec<Line<'static>>, depth: usize) {
                 format!("{prefix}{text}"),
                 Style::default().fg(Color::Yellow),
             )),
+            Node::ConfigurationForm {
+                binding, fields, ..
+            } => {
+                out.push(Line::raw(format!(
+                    "{prefix}Configuration {} · revision {} · generation {:?}",
+                    binding.instance, binding.revision, binding.generation
+                )));
+                out.push(Line::raw(format!(
+                    "{prefix}Tab fields · Ctrl+v validate / p preview / s apply / k cancel / f \
+                     refresh / d discard"
+                )));
+                out.push(Line::raw(format!(
+                    "{prefix}Ctrl+b inherit / e clear / u erase input · lists: ←/→ row, Ctrl+n \
+                     add, Ctrl+Delete remove, Ctrl+←/→ reorder"
+                )));
+                for field in fields {
+                    let value = if field.control == Control::Secret {
+                        format!(
+                            "{} · Private input pending D2",
+                            if field.configured {
+                                "Configured"
+                            } else {
+                                "Not configured"
+                            }
+                        )
+                    } else {
+                        field
+                            .value
+                            .as_ref()
+                            .map_or("missing".into(), Value::to_string)
+                    };
+                    out.push(Line::raw(format!(
+                        "{prefix}  {} [{}] = {} · source {}{}{}",
+                        field.label,
+                        field.path,
+                        value,
+                        field.source.as_deref().unwrap_or("unspecified"),
+                        if field.writable { "" } else { " · read only" },
+                        if field.control == Control::Json {
+                            " · JSON fallback (non-secret subtree)"
+                        } else {
+                            ""
+                        }
+                    )));
+                    if let Some(description) = &field.description {
+                        out.push(Line::raw(format!("{prefix}    {description}")));
+                    }
+                }
+            }
             Node::Form { fields, .. } => {
                 out.push(Line::styled(
                     format!("{prefix}form (Tab to edit, Enter to submit)"),
@@ -342,7 +432,54 @@ fn draw(terminal: &mut RawTerminal, screen: &mut Screen) -> io::Result<()> {
             areas[1],
         );
         let focused = match focus {
-            Focus::Composer => format!("Composer: {}", screen.composer),
+            Focus::Composer => format!(
+                "Composer: {} · Ctrl+o opens instance settings; Ctrl+l inspects instances",
+                screen.composer
+            ),
+            Focus::Configuration {
+                owner,
+                view_id,
+                node_id,
+                binding,
+                field,
+                ..
+            } => {
+                let id = configuration_key(screen, &owner, &view_id, &node_id);
+                let draft = screen.configuration_drafts.get(&id);
+                let conflict = draft.is_some_and(|draft| {
+                    draft.binding.as_ref().is_some_and(|old| {
+                        old != &binding
+                            || draft.fields
+                                != configuration_schema(screen, &owner, &view_id, &node_id)
+                    })
+                });
+                let value = draft
+                    .and_then(|draft| draft.raw.get(&field.path))
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        configuration_text(&configuration_value(draft, &field), &field.control)
+                    });
+                let row = draft
+                    .and_then(|draft| draft.rows.get(&field.path))
+                    .copied()
+                    .unwrap_or(0);
+                format!(
+                    "{}{}: {} · row {} · {:?}",
+                    if conflict {
+                        "CONFLICT: draft retained; Ctrl+d to discard. "
+                    } else {
+                        ""
+                    },
+                    field.label,
+                    if field.control == Control::Secret {
+                        "Private input pending D2"
+                    } else {
+                        &value
+                    },
+                    row + 1,
+                    draft.and_then(|draft| draft.edits.get(&field.path))
+                )
+            }
             Focus::Field {
                 owner,
                 view_id,
@@ -382,6 +519,327 @@ fn draw(terminal: &mut RawTerminal, screen: &mut Screen) -> io::Result<()> {
         );
     })?;
     Ok(())
+}
+fn configuration_schema(screen: &Screen, owner: &str, view: &str, node: &str) -> String {
+    fn find(nodes: &[Node], id: &str) -> Option<String> {
+        for node in nodes {
+            match node {
+                Node::ConfigurationForm {
+                    id: found, fields, ..
+                } if found == id => {
+                    return Some(
+                        json!(
+                            fields
+                                .iter()
+                                .map(|field| (
+                                    &field.path,
+                                    &field.control,
+                                    field.writable,
+                                    &field.options,
+                                    &field.item_kind
+                                ))
+                                .collect::<Vec<_>>()
+                        )
+                        .to_string(),
+                    );
+                }
+                Node::Group { children, .. } => {
+                    if let Some(found) = find(children, id) {
+                        return Some(found);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+    screen
+        .snapshot
+        .views
+        .iter()
+        .find(|item| item.owner == owner && item.view.id == view)
+        .and_then(|view| find(&view.view.nodes, node))
+        .unwrap_or_default()
+}
+fn configuration_key(screen: &Screen, owner: &str, view: &str, node: &str) -> String {
+    format!("{}/{owner}/{view}/{node}", screen.snapshot.session_id)
+}
+fn configuration_value(draft: Option<&ConfigurationDraft>, field: &ConfigurationField) -> Value {
+    if field.control == Control::Secret {
+        return Value::Null;
+    }
+    match draft.and_then(|draft| draft.edits.get(&field.path)) {
+        Some(Edit::Set { value, .. }) => value.clone(),
+        _ => field.value.clone().unwrap_or(Value::Null),
+    }
+}
+fn configuration_text(value: &Value, control: &Control) -> String {
+    if *control == Control::Text {
+        value.as_str().unwrap_or("").into()
+    } else {
+        value.to_string()
+    }
+}
+fn configuration_key_event(
+    screen: &mut Screen,
+    replies: &tokio::sync::mpsc::UnboundedSender<Reply>,
+    endpoint: &Path,
+    key: crossterm::event::KeyEvent,
+) {
+    let Focus::Configuration {
+        owner,
+        view_id,
+        node_id,
+        revision,
+        binding,
+        field,
+    } = screen.current()
+    else {
+        return;
+    };
+    let id = configuration_key(screen, &owner, &view_id, &node_id);
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    if control && key.code == KeyCode::Char('d') {
+        screen.configuration_drafts.remove(&id);
+        screen.message = "Draft discarded; using current values".into();
+        return;
+    }
+    let fields = configuration_schema(screen, &owner, &view_id, &node_id);
+    let draft = screen.configuration_drafts.entry(id).or_default();
+    let conflict = draft
+        .binding
+        .as_ref()
+        .is_some_and(|old| old != &binding || draft.fields != fields);
+    let action = if control {
+        match key.code {
+            KeyCode::Char('v') => Some("validate"),
+            KeyCode::Char('p') => Some("preview"),
+            KeyCode::Char('s') => Some("apply"),
+            KeyCode::Char('k') => Some("cancel_apply"),
+            KeyCode::Char('f') => Some("refresh"),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    if let Some(action) = action {
+        let refresh = action == "refresh";
+        if conflict && !refresh {
+            screen.message = "Configuration conflict; draft retained. Ctrl+d discards it.".into();
+            return;
+        }
+        if !refresh && !draft.raw.is_empty() {
+            screen.message =
+                "Invalid or unfinished field input; correct it before submitting".into();
+            return;
+        }
+        let edits: Vec<_> = if refresh {
+            vec![]
+        } else {
+            draft.edits.values().cloned().collect()
+        };
+        let request = ActionRequest {
+            session_id: screen.snapshot.session_id,
+            owner,
+            view_id,
+            revision,
+            action: format!("{node_id}:{action}"),
+            request_id: String::new(),
+            values: json!({ "binding": binding, "edits": edits }),
+        };
+        submit(screen, replies, endpoint, "/action", json!(request));
+        return;
+    }
+    if conflict {
+        screen.message = "Configuration conflict; draft retained. Ctrl+d discards it.".into();
+        return;
+    }
+    if !field.writable || field.control == Control::Secret {
+        return;
+    }
+    draft.binding.get_or_insert(binding);
+    draft.fields = fields;
+    let path = field.path.clone();
+    if control && matches!(key.code, KeyCode::Char('b') | KeyCode::Char('e')) {
+        draft.raw.remove(&path);
+        draft.edits.insert(
+            path.clone(),
+            if key.code == KeyCode::Char('b') {
+                Edit::Inherit { path }
+            } else {
+                Edit::Clear { path }
+            },
+        );
+        return;
+    }
+    let mut value = configuration_value(Some(draft), &field);
+    if field.control == Control::List {
+        let mut items = value.as_array().cloned().unwrap_or_default();
+        let row = draft.rows.entry(path.clone()).or_default();
+        *row = (*row).min(items.len().saturating_sub(1));
+        match key.code {
+            KeyCode::Left | KeyCode::Right => {
+                let next = if key.code == KeyCode::Left {
+                    row.saturating_sub(1)
+                } else {
+                    (*row + 1).min(items.len().saturating_sub(1))
+                };
+                if control && !items.is_empty() {
+                    items.swap(*row, next);
+                }
+                *row = next;
+                draft.raw.remove(&path);
+            }
+            KeyCode::Char('n') if control => {
+                items.push(match field.item_kind.as_deref() {
+                    Some("integer" | "number") => json!(0),
+                    Some("boolean") => json!(false),
+                    Some("object") => json!({}),
+                    Some("array") => json!([]),
+                    Some("string") => json!(""),
+                    _ => match items.first() {
+                        Some(Value::Number(_)) => json!(0),
+                        Some(Value::Object(_)) => json!({}),
+                        Some(Value::Bool(_)) => json!(false),
+                        Some(Value::String(_)) => json!(""),
+                        _ => Value::Null,
+                    },
+                });
+                *row = items.len() - 1;
+                draft.raw.remove(&path);
+            }
+            KeyCode::Delete if control && !items.is_empty() => {
+                items.remove(*row);
+                *row = (*row).min(items.len().saturating_sub(1));
+                draft.raw.remove(&path);
+            }
+            _ => {
+                if let Some(item) = items.get_mut(*row) {
+                    let item_control = match field.item_kind.as_deref() {
+                        Some("integer") => Control::Integer,
+                        Some("number") => Control::Number,
+                        Some("boolean") => Control::Boolean,
+                        Some("string") => Control::Text,
+                        Some(_) => Control::Json,
+                        None => match item {
+                            Value::String(_) => Control::Text,
+                            Value::Number(_) => Control::Number,
+                            Value::Bool(_) => Control::Boolean,
+                            _ => Control::Json,
+                        },
+                    };
+                    match configuration_edit_value(
+                        item.clone(),
+                        &item_control,
+                        &[],
+                        draft.raw.get(&path),
+                        key,
+                    ) {
+                        Ok(Some(next)) => {
+                            if (field.item_kind.as_deref() == Some("object") && !next.is_object())
+                                || (field.item_kind.as_deref() == Some("array") && !next.is_array())
+                            {
+                                draft.raw.insert(path, next.to_string());
+                                screen.message =
+                                    "List row must retain its declared object or array type".into();
+                                return;
+                            }
+                            *item = next;
+                            draft.raw.remove(&path);
+                        }
+                        Err(raw) => {
+                            draft.raw.insert(path, raw);
+                            screen.message = "List row needs valid typed input (objects use JSON \
+                                              fallback)"
+                                .into();
+                            return;
+                        }
+                        _ => return,
+                    }
+                }
+            }
+        }
+        value = json!(items);
+    } else {
+        match configuration_edit_value(
+            value,
+            &field.control,
+            &field.options,
+            draft.raw.get(&path),
+            key,
+        ) {
+            Ok(Some(next)) => {
+                value = next;
+                draft.raw.remove(&path);
+            }
+            Err(raw) => {
+                draft.raw.insert(path, raw);
+                screen.message = "Enter valid typed input; Ctrl+u erases the current input".into();
+                return;
+            }
+            _ => return,
+        }
+    }
+    draft.edits.insert(path.clone(), Edit::Set { path, value });
+}
+fn configuration_edit_value(
+    value: Value,
+    control: &Control,
+    options: &[Value],
+    raw: Option<&String>,
+    key: crossterm::event::KeyEvent,
+) -> Result<Option<Value>, String> {
+    if *control == Control::Boolean && key.code == KeyCode::Char(' ') {
+        return Ok(Some(json!(!value.as_bool().unwrap_or(false))));
+    }
+    if *control == Control::Choice
+        && !options.is_empty()
+        && matches!(key.code, KeyCode::Left | KeyCode::Right)
+    {
+        let index = options
+            .iter()
+            .position(|option| option == &value)
+            .unwrap_or(0);
+        return Ok(Some(
+            options[if key.code == KeyCode::Left {
+                (index + options.len() - 1) % options.len()
+            } else {
+                (index + 1) % options.len()
+            }]
+            .clone(),
+        ));
+    }
+    if matches!(
+        control,
+        Control::Boolean | Control::Choice | Control::Secret
+    ) {
+        return Ok(None);
+    }
+    let mut text = raw
+        .cloned()
+        .unwrap_or_else(|| configuration_text(&value, control));
+    match key.code {
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => text.clear(),
+        KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            text.push(character)
+        }
+        KeyCode::Backspace => {
+            text.pop();
+        }
+        _ => return Ok(None),
+    }
+    if *control == Control::Text {
+        return Ok(Some(json!(text)));
+    }
+    match serde_json::from_str::<Value>(&text) {
+        Ok(parsed)
+            if (*control != Control::Integer || parsed.is_i64() || parsed.is_u64())
+                && (*control != Control::Number || parsed.is_number()) =>
+        {
+            Ok(Some(parsed))
+        }
+        _ => Err(text),
+    }
 }
 fn definite_reply(error: &Fault) -> bool {
     !(error.source == "live"
@@ -446,6 +904,41 @@ fn receive_reply(screen: &mut Screen, reply: Reply) {
     }
     if reply.result.is_ok() && reply.route == "/prompt" && reply.body["text"] == screen.composer {
         screen.composer.clear();
+    }
+    if reply.route == "/action"
+        && reply.body["action"]
+            .as_str()
+            .is_some_and(|action| action.ends_with(":apply") || action.ends_with(":cancel_apply"))
+        && reply
+            .result
+            .as_ref()
+            .is_ok_and(|result| result["status"] == "applied")
+        && let (Some(owner), Some(view), Some(action)) = (
+            reply.body["owner"].as_str(),
+            reply.body["view_id"].as_str(),
+            reply.body["action"].as_str(),
+        )
+    {
+        let id = configuration_key(
+            screen,
+            owner,
+            view,
+            action.rsplit_once(':').map_or(action, |(node, _)| node),
+        );
+        if screen
+            .configuration_drafts
+            .get(&id)
+            .and_then(|draft| draft.binding.as_ref())
+            .is_some_and(|binding| json!(binding) == reply.body["values"]["binding"])
+            && screen.configuration_drafts.get(&id).is_some_and(|draft| {
+                serde_json::to_value(draft.edits.values().collect::<Vec<_>>())
+                    .ok()
+                    .as_ref()
+                    == Some(&reply.body["values"]["edits"])
+            })
+        {
+            screen.configuration_drafts.remove(&id);
+        }
     }
     screen.message = match reply.result {
         Ok(value) => format!("{}: {value}", reply.route),
@@ -626,6 +1119,7 @@ async fn run_attached(
         composer: String::new(),
         drafts: BTreeMap::new(),
         option_cursor: BTreeMap::new(),
+        configuration_drafts: BTreeMap::new(),
         focus: 0,
         message: String::new(),
         request_number: 0,
@@ -817,8 +1311,25 @@ async fn run_attached(
             }
             continue;
         }
+        if let Focus::Configuration { .. } = screen.current() {
+            configuration_key_event(&mut screen, &replies, endpoint, key);
+            continue;
+        }
         match screen.current() {
             Focus::Composer => match key.code {
+                KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    let body = json!({ "instance": screen.composer.trim() });
+                    submit(&mut screen, &replies, endpoint, "/configuration/open", body);
+                }
+                KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    submit(
+                        &mut screen,
+                        &replies,
+                        endpoint,
+                        "/configuration/inspect",
+                        json!({}),
+                    );
+                }
                 KeyCode::Char(character) => {
                     screen.composer.push(character);
                     let target = ActivityTarget::Composer;
@@ -1062,5 +1573,35 @@ mod tests {
                 }]
             );
         }
+    }
+    #[test]
+    fn configuration_inputs_keep_numeric_types_and_explicit_null() {
+        use crossterm::event::KeyEvent;
+        let key = |character| KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE);
+        assert_eq!(
+            configuration_edit_value(json!(1), &Control::Integer, &[], None, key('2')),
+            Ok(Some(json!(12)))
+        );
+        assert!(
+            configuration_edit_value(json!(1), &Control::Integer, &[], None, key('.')).is_err()
+        );
+        assert_eq!(
+            configuration_edit_value(
+                Value::Null,
+                &Control::Json,
+                &[],
+                Some(&"nul".into()),
+                key('l')
+            ),
+            Ok(Some(Value::Null))
+        );
+        assert_eq!(
+            configuration_edit_value(json!(""), &Control::Text, &[], None, key('x')),
+            Ok(Some(json!("x")))
+        );
+        assert_eq!(
+            configuration_edit_value(Value::Null, &Control::Secret, &[], None, key('x')),
+            Ok(None)
+        );
     }
 }

@@ -137,6 +137,7 @@ async fn active_invalidation(session: &Session, scratch: &Path, cause: &str) -> 
                         revision: original.revision,
                         patch: json!({ "mode": "off" }),
                         replacement: None,
+                        edits: vec![],
                     },
                     ApplyMode::Wait,
                 )
@@ -268,6 +269,7 @@ async fn probe(composition: &Path, scratch: &Path, mode: &str) -> Result<Value> 
                 revision: original.revision,
                 patch: json!({ "mode": "off" }),
                 replacement: None,
+                edits: vec![],
             },
             ApplyMode::Wait,
         )

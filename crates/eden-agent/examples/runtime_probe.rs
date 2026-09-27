@@ -309,6 +309,7 @@ async fn configuration_acceptance(path: &Path) -> Result<(), Box<dyn std::error:
         revision,
         patch,
         replacement: None,
+        edits: vec![],
     };
     let original_worker = identity(&inspect, "worker");
     let original_child = identity(&inspect, "child-a");

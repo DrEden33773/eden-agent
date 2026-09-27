@@ -13,6 +13,9 @@ pub struct Change {
     pub instance: String,
     pub revision: u64,
     pub patch: Value,
+    /// Exact path edits run after the legacy merge patch; missing preserves older requests.
+    #[serde(default)]
+    pub edits: Vec<eden_protocol::configuration_form::Edit>,
     /// A resolved composition containing the installed replacement package. No build or install runs.
     pub replacement: Option<PathBuf>,
 }
@@ -108,6 +111,8 @@ pub(crate) struct Manager {
     pub receipts: BTreeMap<u64, Receipt>,
     pub descriptions: BTreeMap<String, p::Description>,
     pub sources: BTreeMap<String, BTreeMap<String, String>>,
+    pub inherited: BTreeMap<String, Value>,
+    pub inherited_sources: BTreeMap<String, BTreeMap<String, String>>,
 }
 fn fault(code: &str, message: impl Into<String>) -> Fault {
     Fault::new(code, "configuration", message)
@@ -149,6 +154,39 @@ pub(crate) fn config(composition: &Composition, id: &str) -> Result<(InstanceSpe
         object.remove(eden_protocol::environment::CONFIG_KEY);
     }
     Ok((spec, value))
+}
+fn apply_edits(
+    value: &mut Value,
+    inherited: &Value,
+    change: &Change,
+    description: &p::Description,
+) -> Result<(), Fault> {
+    for edit in &change.edits {
+        let path = edit.path();
+        let overlaps = |other: &str| {
+            path == other
+                || path.starts_with(&format!("{other}/"))
+                || other.starts_with(&format!("{path}/"))
+        };
+        if description
+            .secret_paths
+            .iter()
+            .any(|secret| overlaps(secret))
+        {
+            return Err(fault(
+                "PrivateInputRequired",
+                "secret fields require private input",
+            ));
+        }
+        if !path.is_empty() && overlaps(&format!("/{}", eden_protocol::environment::CONFIG_KEY)) {
+            return Err(fault("InvalidInput", "host environment is not editable"));
+        }
+    }
+    eden_protocol::configuration_form::apply_edits(value, inherited, &change.edits)?;
+    if value.get(eden_protocol::environment::CONFIG_KEY).is_some() {
+        return Err(fault("InvalidInput", "host environment is not editable"));
+    }
+    Ok(())
 }
 fn set_config(composition: &mut Composition, mut spec: InstanceSpec, value: Value) {
     spec.config = Some(value);
@@ -248,8 +286,25 @@ impl Session {
                 continue;
             }
             let (_, effective) = config(&composition, &spec.id)?;
-            let mut description = self.description(&composition, &spec).await?;
-            description.defaults = p::redact(&description.defaults, &description.secret_paths);
+            let description = match self.description(&composition, &spec).await {
+                Ok(description) => description,
+                Err(_) => self
+                    .0
+                    .configuration
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .descriptions
+                    .get(&spec.id)
+                    .cloned()
+                    .unwrap_or_else(|| p::Description {
+                        description: Some(
+                            "Configuration description unavailable; values are withheld".into(),
+                        ),
+                        secret_paths: vec![String::new()],
+                        ..Default::default()
+                    }),
+            };
+            let description = p::public_description(&description);
             let generation = kernel
                 .instance_identity(&spec.id)
                 .ok()
@@ -361,7 +416,23 @@ impl Session {
             ));
         }
         let mut value = old.clone();
-        eden_workspace::merge(&mut value, change.patch.clone());
+        if !change
+            .patch
+            .as_object()
+            .is_some_and(|patch| patch.is_empty())
+        {
+            eden_workspace::merge(&mut value, change.patch.clone());
+        }
+        let inherited = self
+            .0
+            .configuration
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .inherited
+            .get(&change.instance)
+            .cloned()
+            .unwrap_or_else(|| old.clone());
+        apply_edits(&mut value, &inherited, change, &description)?;
         let mut validation = p::validate(&description, &value)?;
         validation
             .errors
@@ -731,6 +802,18 @@ impl Session {
                 "explicit_session",
             );
         }
+        if receipt.status == Status::Applied {
+            let inherited = manager
+                .inherited_sources
+                .get(&change.instance)
+                .cloned()
+                .unwrap_or_default();
+            configuration_metadata::edit_origins(
+                manager.sources.entry(change.instance.clone()).or_default(),
+                &inherited,
+                &change.edits,
+            );
+        }
         manager.active = false;
         manager.blocked.clear();
         manager.receipts.insert(operation, receipt.clone());
@@ -962,6 +1045,11 @@ impl Session {
 /// Reapply only committed explicit edits before checking the persisted composition identity.
 pub(crate) fn replay(selected: &mut Composition, records: &[c::Record]) -> Result<Manager, Fault> {
     let mut manager = Manager::default();
+    for spec in specs(selected) {
+        manager
+            .inherited
+            .insert(spec.id.clone(), config(selected, &spec.id)?.1);
+    }
     let start = records
         .iter()
         .rposition(|r| r.kind == "configuration_reset")
@@ -994,7 +1082,21 @@ pub(crate) fn replay(selected: &mut Composition, records: &[c::Record]) -> Resul
         }
         if record.payload["application"] != "unchanged" {
             let (spec, mut value) = config(selected, &change.instance)?;
-            eden_workspace::merge(&mut value, change.patch);
+            if !change
+                .patch
+                .as_object()
+                .is_some_and(|patch| patch.is_empty())
+            {
+                eden_workspace::merge(&mut value, change.patch.clone());
+            }
+            eden_protocol::configuration_form::apply_edits(
+                &mut value,
+                manager
+                    .inherited
+                    .get(&change.instance)
+                    .unwrap_or(&Value::Null),
+                &change.edits,
+            )?;
             set_config(selected, spec, value);
         }
         manager.revision = receipt.revision;
@@ -1040,9 +1142,19 @@ pub(crate) fn replay_sources(manager: &mut Manager, records: &[c::Record]) {
     {
         if let Ok(change) = serde_json::from_value::<Change>(record.payload["change"].clone()) {
             configuration_metadata::overlay(
-                manager.sources.entry(change.instance).or_default(),
+                manager.sources.entry(change.instance.clone()).or_default(),
                 &change.patch,
                 "explicit_session",
+            );
+            let inherited = manager
+                .inherited_sources
+                .get(&change.instance)
+                .cloned()
+                .unwrap_or_default();
+            configuration_metadata::edit_origins(
+                manager.sources.entry(change.instance.clone()).or_default(),
+                &inherited,
+                &change.edits,
             );
         }
     }
@@ -1171,5 +1283,63 @@ mod tests {
         assert_eq!(composition.packages[0].library, "new.so");
         let (_, effective) = config(&composition, "plugin").unwrap();
         assert_eq!(effective, json!({ "secret": "kept", "n": 2 }));
+    }
+    #[test]
+    fn replay_retains_path_edit_clear_null_and_inherited_semantics() {
+        let mut composition: Composition = serde_json::from_value(json!({
+            "packages": [{
+                "descriptor": { "package": "plugin", "version": "1", "provides": [] },
+                "host": eden_protocol::CONTRACT,
+                "sdk": eden_protocol::CONTRACT,
+                "target": "test",
+                "library": "unused.so",
+                "config": { "n": 1, "remove": 7, "unknown": { "kept": true }, "secret": "private" },
+            }],
+            "roles": {},
+        }))
+        .unwrap();
+        let make = |revision, edits| {
+            record(
+                "configuration_commit",
+                json!({
+                    "change": {
+                        "instance": "plugin",
+                        "revision": revision - 1,
+                        "patch": {},
+                        "replacement": null,
+                        "edits": edits,
+                    },
+                    "receipt": {
+                        "operation": revision,
+                        "revision": revision,
+                        "instance": "plugin",
+                        "affected": ["plugin"],
+                        "status": "applied",
+                        "error": null,
+                        "recovery_error": null,
+                    },
+                    "application": "restart",
+                }),
+            )
+        };
+        replay(
+            &mut composition,
+            &[
+                make(
+                    1,
+                    json!([
+                        { "operation": "set", "path": "/n", "value": 9 },
+                        { "operation": "clear", "path": "/remove" },
+                        { "operation": "set", "path": "/nullable", "value": null }
+                    ]),
+                ),
+                make(2, json!([{ "operation": "inherit", "path": "/n" }])),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            config(&composition, "plugin").unwrap().1,
+            json!({ "n": 1, "nullable": null, "unknown": { "kept": true }, "secret": "private" })
+        );
     }
 }

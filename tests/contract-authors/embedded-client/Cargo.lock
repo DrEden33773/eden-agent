@@ -158,6 +158,7 @@ version = "0.1.0"
 dependencies = [
  "eden-kernel",
  "eden-plugin-sdk",
+ "eden-presentation",
  "eden-protocol",
  "eden-workspace",
  "jsonschema",
@@ -186,6 +187,15 @@ dependencies = [
  "eden-protocol",
  "futures-util",
  "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "eden-presentation"
+version = "0.1.0"
+dependencies = [
+ "eden-protocol",
  "serde_json",
  "tokio",
 ]

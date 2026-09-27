@@ -7,7 +7,7 @@
     "build": "vite build",
     "dev": "vite",
     "types": "tsc --noEmit",
-    "test:browser": "node tests/recovery.mjs"
+    "test:browser": "node tests/recovery.mjs && node tests/configuration.mjs"
   },
   "dependencies": {
     "@adobe/react-spectrum": "3.47.5",

@@ -488,6 +488,11 @@ async fn dispatch(
                 .await
                 .map_err(|_| fault("Unavailable", "queue result lost"))?
         }
+        ("POST", "/configuration/inspect") => Ok(json!(session.inspect_configuration().await?)),
+        ("POST", "/configuration/open") => {
+            let instance: String = field(&body, "instance")?;
+            Ok(json!(session.open_configuration(&instance).await?))
+        }
         ("POST", "/action") => {
             let action: ActionRequest = serde_json::from_value(body)
                 .map_err(|error| fault("InvalidInput", error.to_string()))?;

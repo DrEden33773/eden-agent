@@ -12,6 +12,13 @@ import {
 import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
+import {
+  type Binding,
+  bindingIdentity,
+  type ConfigurationDraft,
+  ConfigurationForm,
+  type ConfigurationNode,
+} from "./configuration";
 
 type Field = {
   id: string;
@@ -22,6 +29,7 @@ type Field = {
   options: string[];
 };
 type Node =
+  | ConfigurationNode
   | { kind: "text"; id: string; text: string }
   | { kind: "code"; id: string; language: string | null; text: string }
   | { kind: "diff"; id: string; before: string; after: string }
@@ -34,6 +42,7 @@ type Node =
 type View = {
   owner: string;
   run_id: number;
+  scope?: "run" | "management";
   revision: number;
   active: boolean;
   handled_actions: string[];
@@ -108,6 +117,10 @@ function App() {
   const [frame, setFrame] = useState<Frame | null>(null);
   const [composer, setComposer] = useState(sessionStorage.getItem("eden-live-composer") ?? "");
   const [drafts, setDrafts] = useState<Record<string, Record<string, unknown>>>({});
+  const [configurationDrafts, setConfigurationDrafts] = useState<
+    Record<string, ConfigurationDraft | undefined>
+  >({});
+  const [instance, setInstance] = useState("");
   const [message, setMessage] = useState("");
   const [connection, setConnection] = useState("Connecting to the shared session…");
   const [connected, setConnected] = useState(false);
@@ -266,6 +279,7 @@ function App() {
       forgetAttempt("action", attempt);
       setPendingAttempt(null);
       setMessage(`Action: ${JSON.stringify(result)}`);
+      return result;
     } catch (error) {
       if (error instanceof ApiFault) {
         forgetAttempt("action", attempt);
@@ -295,6 +309,27 @@ function App() {
       forgetAttempt(kind, body);
       setPendingAttempt(null);
       setMessage(`Retry resolved: ${JSON.stringify(result)}`);
+      if (
+        kind === "action" &&
+        typeof body.action === "string" &&
+        /:(apply|cancel_apply)$/.test(body.action) &&
+        (result as { status?: string } | null)?.status === "applied"
+      ) {
+        const values = body.values as { binding?: Binding; edits?: unknown } | undefined;
+        const node = body.action.slice(0, body.action.lastIndexOf(":"));
+        const key = `${body.session_id}/${body.owner}/${body.view_id}/${node}`;
+        setConfigurationDrafts((previous) => {
+          const draft = previous[key];
+          if (
+            !draft ||
+            !values?.binding ||
+            bindingIdentity(draft.binding) !== bindingIdentity(values.binding) ||
+            JSON.stringify(Object.values(draft.edits)) !== JSON.stringify(values.edits)
+          )
+            return previous;
+          return { ...previous, [key]: undefined };
+        });
+      }
       if (kind === "send" && composer === body.text) {
         setComposer("");
         sessionStorage.removeItem("eden-live-composer");
@@ -309,6 +344,19 @@ function App() {
   };
   const renderNode = (node: Node, view: View): React.ReactNode => {
     switch (node.kind) {
+      case "configuration_form": {
+        const key = `${frame?.presentation.session_id}/${view.owner}/${view.id}/${node.id}`;
+        return (
+          <ConfigurationForm
+            key={key}
+            node={node}
+            draft={configurationDrafts[key]}
+            save={(draft) => setConfigurationDrafts((previous) => ({ ...previous, [key]: draft }))}
+            disabled={!connected || !view.active || Boolean(frame?.state.read_only)}
+            act={(action, values) => act(view, action, values)}
+          />
+        );
+      }
       case "text":
         return <p key={node.id}>{node.text}</p>;
       case "code":
@@ -504,6 +552,33 @@ function App() {
               ? "Read-only saved history"
               : "Connected to the shared session")}
         </div>
+        {!frame?.state.read_only && (
+          <section aria-label="Configuration settings" className="controls">
+            <TextField label="Configuration instance" value={instance} onChange={setInstance} />
+            <Button
+              variant="secondary"
+              isDisabled={!connected || !instance.trim()}
+              onPress={() => {
+                void api("/configuration/open", { instance: instance.trim() })
+                  .then((result) => setMessage(`Configuration: ${JSON.stringify(result)}`))
+                  .catch((error) => setMessage(String(error)));
+              }}
+            >
+              Open settings
+            </Button>
+            <Button
+              variant="secondary"
+              isDisabled={!connected}
+              onPress={() => {
+                void api("/configuration/inspect", {})
+                  .then((result) => setMessage(JSON.stringify(result)))
+                  .catch((error) => setMessage(String(error)));
+              }}
+            >
+              Inspect instances
+            </Button>
+          </section>
+        )}
         <section className="views" aria-label="Live presentation">
           {frame?.presentation.views.map((view) => (
             <article

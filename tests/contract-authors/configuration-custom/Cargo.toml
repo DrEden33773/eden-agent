@@ -1,0 +1,15 @@
+[package]
+name = "author-configuration-custom"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98.1"
+license = "Apache-2.0"
+[workspace]
+[lib]
+crate-type = ["cdylib"]
+[dependencies]
+eden-plugin-sdk = { path = "../../../crates/eden-plugin-sdk", version = "0.1.0" }
+[profile.dev]
+debug = 1
+[profile.test]
+debug = 1

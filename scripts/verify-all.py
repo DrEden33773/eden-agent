@@ -143,7 +143,8 @@ def main() -> None:
     budget = cpu_budget()
     if args.workers is not None and args.workers < 1:
         parser.error("--workers must be positive")
-    workers = min(args.workers or min(budget, 4), len(SUITES))
+    # One extra waiting suite overlaps controlled I/O; this is not a CPU reservation.
+    workers = min(args.workers or min(budget + 1, 5), len(SUITES))
     order = list(SUITES) if args.order == "declared" else suite_order()
     output = args.output.resolve()
     reset_output(output)

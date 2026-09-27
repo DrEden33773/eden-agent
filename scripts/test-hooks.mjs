@@ -15,7 +15,13 @@ console.log(
 );
 const result = spawnSync(process.execPath, ["--test", `--test-concurrency=${workers}`, ...files], {
   stdio: "inherit",
-  env: { ...process.env, EDEN_CPU_BUDGET: String(Math.max(1, Math.floor(budget / workers))) },
+  env: {
+    ...process.env,
+    EDEN_CPU_BUDGET: String(Math.max(1, Math.floor(budget / workers))),
+    ...(!process.env.CARGO_BUILD_JOBS && !process.env.CARGO_MAKEFLAGS
+      ? { CARGO_BUILD_JOBS: String(Math.max(1, Math.floor(budget / workers))) }
+      : {}),
+  },
 });
 if (result.error) throw result.error;
 process.exitCode = result.status ?? 1;

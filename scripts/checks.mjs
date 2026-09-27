@@ -244,9 +244,7 @@ for dependency in config["dependency-groups"]["dev"]:
     const expected = readFileSync(join(root, "rustfmt-toolchain"), "utf8").trim();
     const identity = spawnSync(formatter, ["--version"], { env: rustEnv, encoding: "utf8" });
     if (identity.status !== 0 || identity.stdout.trim() !== `eden-fmt ${expected}`)
-      throw new Error(
-        "eden-fmt version differs from this snapshot; run cargo build --locked -p eden-fmt.",
-      );
+      throw new Error("eden-fmt version differs from this snapshot; run pnpm rust:prepare.");
   }
   // Each manifest owns its own tree: the root run leaves the independent
   // authors to the runs their own manifests get below.

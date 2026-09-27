@@ -1,10 +1,21 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { command, fixture, git, unchanged } from "./development-hooks-fixture.mjs";
 
 test("pre-commit rejects bad staged Markdown despite an unstaged fix, without rewriting either", (t) => {
@@ -305,4 +316,64 @@ test("reused snapshots preserve unchanged mtimes and remove deleted files; busy 
   } finally {
     rmSync(`${snapshot}.lock`, { recursive: true, force: true });
   }
+});
+
+test("concurrent formatter identities and explicit native targets publish their own executable", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "eden-tool-publication-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const source = fileURLToPath(new URL("../", import.meta.url));
+  const moduleUrl = new URL("../scripts/formatter-tool.mjs", import.meta.url).href;
+  const roots = [join(base, "a"), join(base, "b")];
+  for (const [index, root] of roots.entries()) {
+    mkdirSync(join(root, "crates/eden-fmt/src"), { recursive: true });
+    writeFileSync(
+      join(root, "Cargo.toml"),
+      '[workspace]\nmembers = ["crates/eden-fmt"]\nresolver = "2"\n',
+    );
+    writeFileSync(
+      join(root, "Cargo.lock"),
+      'version = 4\n\n[[package]]\nname = "eden-fmt"\nversion = "0.0.0"\n',
+    );
+    writeFileSync(
+      join(root, "crates/eden-fmt/Cargo.toml"),
+      '[package]\nname = "eden-fmt"\nversion = "0.0.0"\nedition = "2024"\n',
+    );
+    writeFileSync(
+      join(root, "crates/eden-fmt/src/main.rs"),
+      `fn main() { println!("${index}"); }\n`,
+    );
+    copyFileSync(join(source, "rust-toolchain.toml"), join(root, "rust-toolchain.toml"));
+  }
+  const host = command(source, "rustc", ["-vV"]).stdout.match(/^host: (\S+)$/m)[1];
+  const prepare = async (root) => {
+    const result = await promisify(execFile)(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `import { formatterTool } from ${JSON.stringify(moduleUrl)}; console.log(formatterTool(process.argv[1], process.argv[2], true));`,
+        root,
+        base,
+      ],
+      { env: { ...process.env, CARGO_BUILD_TARGET: host } },
+    );
+    return result.stdout.trim();
+  };
+  const binaries = await Promise.all(roots.map(prepare));
+  for (const [index, binary] of binaries.entries())
+    assert.equal(command(base, binary, []).stdout.trim(), String(index));
+  // Seed the old unqualified output with a different implementation: a build
+  // with an explicit target must never publish it for a changed source.
+  const oldOutput = join(base, "target/formatter-build/release");
+  mkdirSync(oldOutput, { recursive: true });
+  copyFileSync(
+    binaries[0],
+    join(oldOutput, process.platform === "win32" ? "eden-fmt.exe" : "eden-fmt"),
+  );
+  writeFileSync(
+    join(roots[1], "crates/eden-fmt/src/main.rs"),
+    'fn main() { println!("changed"); }\n',
+  );
+  const updated = await prepare(roots[1]);
+  assert.equal(command(base, updated, []).stdout.trim(), "changed");
 });

@@ -1,6 +1,7 @@
 // Persist each executed phase's duration, command, compiler counts and raw log.
 import { spawn } from "node:child_process";
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { availableParallelism } from "node:os";
 import { join } from "node:path";
 import { cpuBudget } from "./cpu-budget.mjs";
 
@@ -55,6 +56,8 @@ child.on("close", (code, signal) => {
         status: code === 0 ? "passed" : "failed",
         command: [program, ...args],
         cpu_budget: budget,
+        detected_cpu_budget: availableParallelism(),
+        requested_cpu_budget: process.env.EDEN_CPU_BUDGET ?? null,
         started_at: startedAt,
         duration_seconds: (performance.now() - started) / 1000,
         exit_code: code,

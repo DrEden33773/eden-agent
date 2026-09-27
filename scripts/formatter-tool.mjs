@@ -57,21 +57,51 @@ export function formatterTool(root = project, toolRoot = project, prepare = fals
     throw new Error(
       "eden-fmt is missing or out of date. Run pnpm rust:prepare in the product clone, then save again.",
     );
-  const target = join(toolRoot, "target", "formatter-build");
+  // Different snapshot identities never share a mutable executable. Cargo's
+  // build lock alone ends before the subsequent publication copy.
+  const target = join(toolRoot, "target", "formatter-build", identity);
+  const compiler = spawnSync("rustc", ["-vV"], { cwd: root, encoding: "utf8" });
+  const host = compiler.stdout?.match(/^host: (\S+)$/m)?.[1];
+  if (compiler.status !== 0 || !host) throw new Error("Cannot determine the formatter host target");
   const result = spawnSync(
     "cargo",
-    ["build", "--release", "--locked", "-p", "eden-fmt", "--target-dir", target],
-    { cwd: root, stdio: "inherit" },
+    [
+      "build",
+      "--release",
+      "--locked",
+      "-p",
+      "eden-fmt",
+      "--target",
+      host,
+      "--target-dir",
+      target,
+      "--message-format=json-render-diagnostics",
+    ],
+    {
+      cwd: root,
+      stdio: ["ignore", "pipe", "inherit"],
+      encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024,
+    },
   );
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error("Could not prepare eden-fmt");
+  const artifacts = result.stdout
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  const artifact = artifacts.find(
+    (item) =>
+      item.reason === "compiler-artifact" && item.target.name === "eden-fmt" && item.executable,
+  )?.executable;
+  if (!artifact) throw new Error("Cargo did not report a formatter executable");
   if (formatterIdentity(root) !== identity)
     throw new Error("Formatter inputs changed during preparation; run pnpm rust:prepare again.");
   const parent = join(toolRoot, "target", "formatter");
   mkdirSync(parent, { recursive: true });
   const temporary = mkdtempSync(join(parent, "prepare-"));
   try {
-    copyFileSync(join(target, "release", executable), join(temporary, executable));
+    copyFileSync(artifact, join(temporary, executable));
     // Publish the complete executable, never a partly copied file to a save.
     try {
       renameSync(temporary, directory);

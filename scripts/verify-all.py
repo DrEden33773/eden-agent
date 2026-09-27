@@ -134,18 +134,25 @@ def suite_order() -> list[str]:
     ]
 
 
+def choose_schedule(budget: int, requested: int | None, order: str) -> tuple[int, list[str]]:
+    # Five suites helped the 16-CPU comparison, but not consistently the 3/4-CPU
+    # hosted runners. Retain their established queue and four-suite ceiling.
+    ceiling = 5 if budget > 4 else 4
+    workers = min(requested or min(budget + 1, ceiling), len(SUITES))
+    longest = order == "longest" or (order == "auto" and budget > 4)
+    return workers, suite_order() if longest else list(SUITES)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workers", type=int, help="positive suite limit (capped by suite count)")
-    parser.add_argument("--order", choices=("longest", "declared"), default="longest")
+    parser.add_argument("--order", choices=("auto", "longest", "declared"), default="auto")
     parser.add_argument("--output", type=pathlib.Path, default=ROOT / "artifacts/verification")
     args = parser.parse_args()
     budget = cpu_budget()
     if args.workers is not None and args.workers < 1:
         parser.error("--workers must be positive")
-    # One extra waiting suite overlaps controlled I/O; this is not a CPU reservation.
-    workers = min(args.workers or min(budget + 1, 5), len(SUITES))
-    order = list(SUITES) if args.order == "declared" else suite_order()
+    workers, order = choose_schedule(budget, args.workers, args.order)
     output = args.output.resolve()
     reset_output(output)
     start = time.monotonic()

@@ -220,7 +220,13 @@ def main() -> None:
                 package("presentation-peer", [peer_contract, ACTION], str(peer), target()),
                 package(
                     "coding",
-                    ["eden.coding-control.v1", CODING, CODING_CONTEXT, QUEUE],
+                    [
+                        "eden.coding-control.v1",
+                        CODING,
+                        "eden.compaction-policy.v1",
+                        CODING_CONTEXT,
+                        QUEUE,
+                    ],
                     str(build_target() / "debug" / library("eden_coding")),
                     target(),
                 ),

@@ -261,3 +261,41 @@ fn an_explicit_skip_still_wins_over_a_declared_dot_directory() {
     let found = collect(std::slice::from_ref(&fixture.0), &[skipped]).unwrap();
     assert!(found.is_empty(), "{found:?}");
 }
+
+#[test]
+fn worker_counts_preserve_mixed_file_results_and_error_order() {
+    use eden_fmt::engine::{Mode, Options, run};
+    let fixture = Fixture::new("workers");
+    fixture.write("a.rs", "fn short(){let a=1;}\n");
+    fixture.write("b.rs", "fn broken(\n");
+    fixture.write(
+        "c.rs",
+        "fn long(){let x=serde_json::json!({\"a\":[1,2,3]});}\n",
+    );
+    fixture.write("d.rs", "fn broken_again(\n");
+    let files = collect(std::slice::from_ref(&fixture.0), &[]).unwrap();
+    let mut previous = None;
+    for jobs in [1, 4, 16] {
+        let options = Options {
+            jobs,
+            ..Options::default()
+        };
+        let outcome = run(&files, &Mode::Check, &options);
+        let actual = (
+            outcome.changed,
+            outcome
+                .failed
+                .into_iter()
+                .map(|(path, error)| (path, error.to_string()))
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(actual.0.len(), 2);
+        assert_eq!(actual.1.len(), 2);
+        if let Some(expected) = &previous {
+            assert_eq!(&actual, expected);
+        }
+        previous = Some(actual);
+        let empty = run(&[], &Mode::Check, &options);
+        assert!(empty.changed.is_empty() && empty.failed.is_empty());
+    }
+}

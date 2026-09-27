@@ -4,6 +4,9 @@ import { existsSync, readdirSync, readFileSync, symlinkSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { cpuBudget } from "./cpu-budget.mjs";
+import { formatterTool } from "./formatter-tool.mjs";
+
 const project = fileURLToPath(new URL("../", import.meta.url));
 // `missing_docs` reaches rustdoc through the workspace lint table, so a build
 // already fails on an undocumented item. These four catch what a build cannot:
@@ -74,18 +77,10 @@ const verifiedPythonRoots = new Set();
 // eden-fmt formats the json! and select! bodies rustfmt cannot reach. It is a
 // workspace member, so it is resolved from the tree that owns it rather than
 // from the snapshot being checked: a hook snapshot has no build outputs.
-function edenFmt(toolRoot, env) {
-  const name = process.platform === "win32" ? "eden-fmt.exe" : "eden-fmt";
-  const candidates = [
-    env.EDEN_FMT,
-    env.CARGO_TARGET_DIR ? join(env.CARGO_TARGET_DIR, "debug", name) : "",
-    join(toolRoot, "target", "debug", name),
-    join(toolRoot, "target", "hooks", "debug", name),
-  ].filter(Boolean);
-  const found = candidates.find((candidate) => existsSync(candidate));
-  if (!found)
-    throw new Error("eden-fmt is not built. Run cargo build --locked -p eden-fmt in this clone.");
-  return found;
+function edenFmt(root, toolRoot, env) {
+  // Small synthetic hook fixtures deliberately have no formatter crate.
+  if (!existsSync(join(root, "crates/eden-fmt/Cargo.toml")) && env.EDEN_FMT) return env.EDEN_FMT;
+  return formatterTool(root, toolRoot, true);
 }
 
 // TypeScript resolves imports beside the snapshot sources. Reuse only a matching
@@ -227,7 +222,8 @@ for dependency in config["dependency-groups"]["dev"]:
   const rustEnv = withToolchainPath(
     {
       ...env,
-      CARGO_TARGET_DIR: env.CARGO_TARGET_DIR || join(root, "target"),
+      CARGO_TARGET_DIR:
+        env.CARGO_TARGET_DIR || join(root, "target", ...(kind === "doc" ? ["static-doc"] : [])),
       ...(kind === "doc" ? { RUSTDOCFLAGS: docFlags(env) } : {}),
     },
     cargo.directory,
@@ -243,7 +239,7 @@ for dependency in config["dependency-groups"]["dev"]:
     kind === "test"
       ? manifests(root).filter((manifest) => manifest !== "Cargo.toml")
       : manifests(root);
-  const formatter = kind === "fmt" || kind === "format" ? edenFmt(toolRoot, env) : "";
+  const formatter = kind === "fmt" || kind === "format" ? edenFmt(root, toolRoot, env) : "";
   if (formatter) {
     const expected = readFileSync(join(root, "rustfmt-toolchain"), "utf8").trim();
     const identity = spawnSync(formatter, ["--version"], { env: rustEnv, encoding: "utf8" });
@@ -304,7 +300,13 @@ for dependency in config["dependency-groups"]["dev"]:
         const directory = dirname(manifest);
         run(
           formatter,
-          [kind === "fmt" ? "check" : "write", directory, ...nested(directory)],
+          [
+            kind === "fmt" ? "check" : "write",
+            directory,
+            ...nested(directory),
+            "--jobs",
+            String(cpuBudget(env)),
+          ],
           root,
           rustEnv,
         );

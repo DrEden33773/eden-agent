@@ -38,3 +38,10 @@ undocumented_unsafe_blocks = "deny"
 # compression routine optimized in development, including installed verifiers.
 [profile.dev.package.sha2]
 opt-level = 3
+
+# Keep stack diagnostics inexpensive; use scripts/full-debug.mjs for debugger locals.
+[profile.dev]
+debug = 1
+
+[profile.test]
+debug = 1

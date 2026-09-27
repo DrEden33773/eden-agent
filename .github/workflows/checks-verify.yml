@@ -70,6 +70,23 @@ jobs:
             ~/.rustup/toolchains/${{ steps.toolchain-config.outputs.formatter }}-*
             ~/.rustup/update-hashes/${{ steps.toolchain-config.outputs.formatter }}-*
           key: toolchain-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rustfmt-toolchain') }}
+      - name: Static build cache identity
+        if: ${{ fromJSON(inputs.selected).rust == true }}
+        id: static-key
+        env:
+          CI_CACHE_OS: ${{ inputs.os }}
+          CI_CACHE_ARCH: ${{ runner.arch }}
+        run: python scripts/ci-cache.py
+      - name: Restore static documentation and formatter objects
+        if: ${{ fromJSON(inputs.selected).rust == true }}
+        id: static-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            target/static-doc
+            target/formatter-build
+            target/formatter
+          key: static-v1-${{ steps.static-key.outputs.key }}-${{ hashFiles('rustfmt-toolchain') }}
       - name: Fixed Rust toolchain
         if: ${{ fromJSON(inputs.selected).rust == true }}
         id: toolchain
@@ -115,7 +132,7 @@ jobs:
       - name: Build the macro formatter
         id: formatter
         if: fromJSON(inputs.selected).rust == true
-        run: node scripts/ci-run.mjs eden-fmt cargo build --locked -p eden-fmt
+        run: node scripts/ci-run.mjs eden-fmt node scripts/formatter-tool.mjs
       - name: Formatting including independent authors
         id: format
         if: fromJSON(inputs.selected).rust == true
@@ -124,6 +141,15 @@ jobs:
         id: doc
         if: fromJSON(inputs.selected).rust == true
         run: node scripts/ci-run.mjs rust-doc node scripts/checks.mjs doc
+      - name: Save trusted static build objects
+        if: ${{ inputs.save-cache && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && success() && steps.static-cache.outcome == 'success' && steps.static-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            target/static-doc
+            target/formatter-build
+            target/formatter
+          key: ${{ steps.static-cache.outputs.cache-primary-key }}
       - name: Require selected static steps
         if: always()
         env:

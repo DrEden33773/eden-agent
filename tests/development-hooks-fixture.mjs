@@ -1,6 +1,7 @@
 // Each scenario owns its Git repositories and Cargo target; installed tools are read-only.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   cpSync,
   existsSync,
@@ -15,24 +16,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { formatterTool } from "../scripts/formatter-tool.mjs";
+
 const source = fileURLToPath(new URL("../", import.meta.url));
 
-// A hook scenario runs in a temporary repository with no build outputs, so the
-// macro formatter is taken from this checkout. It is rebuilt here rather than
-// only when it is missing: a restored build cache can leave a binary from
-// another revision behind, and a scenario must exercise this revision's tool.
-const formatter = join(
-  source,
-  "target",
-  "debug",
-  process.platform === "win32" ? "eden-fmt.exe" : "eden-fmt",
-);
-const build = spawnSync("cargo", ["build", "--locked", "-p", "eden-fmt"], {
-  cwd: source,
-  stdio: "inherit",
-});
-assert.equal(build.status, 0, "cargo build --locked -p eden-fmt");
-assert.ok(existsSync(formatter), "the macro formatter was built");
+// Prepare once in the parent hook runner; direct test invocation prepares too.
+const formatter = formatterTool(source, source, true);
 process.env.EDEN_FMT = formatter;
 export function git(root, ...args) {
   return execFileSync("git", args, {
@@ -46,7 +35,13 @@ export function command(root, program, args, options = {}) {
 }
 export function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), "eden-hooks-test-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  t.after(() => {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(join(tmpdir(), `eden-check-${createHash("sha256").update(root).digest("hex")}`), {
+      recursive: true,
+      force: true,
+    });
+  });
   git(root, "init", "-b", "main");
   git(root, "config", "user.name", "Hook Test");
   git(root, "config", "user.email", "hooks@example.invalid");

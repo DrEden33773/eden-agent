@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -125,7 +127,7 @@ test("pre-commit uses staged lint configuration and checks remaining Markdown on
   writeFileSync(join(root, "extra.md"), "# Extra\n");
   git(root, "add", "extra.md");
   git(root, "-c", "core.hooksPath=", "commit", "-m", "deletable document");
-  git(root, "rm", "extra.md");
+  git(root, "rm", "-f", "extra.md");
   const deletion = command(root, "git", ["commit", "-m", "delete only"]);
   assert.notEqual(deletion.status, 0);
   assert.match(deletion.stdout + deletion.stderr, /MD018/);
@@ -276,4 +278,31 @@ test("editor command from a nested source directory matches CLI stdin", () => {
   assert.equal(cli.status, 0, cli.stderr);
   assert.equal(editor.stdout, cli.stdout);
   assert.match(editor.stdout, /\\\n/);
+});
+
+test("reused snapshots preserve unchanged mtimes and remove deleted files; busy snapshots stay isolated", (t) => {
+  const root = fixture(t);
+  const snapshot = join(tmpdir(), `eden-check-${createHash("sha256").update(root).digest("hex")}`);
+  t.after(() => rmSync(snapshot, { recursive: true, force: true }));
+  writeFileSync(join(root, "README.md"), "# Changed\n");
+  writeFileSync(join(root, "extra.md"), "# Extra\n");
+  git(root, "add", ".");
+  const run = () => command(root, process.execPath, ["scripts/hooks.mjs", "pre-commit"]);
+  const first = run();
+  assert.equal(first.status, 0, first.stdout + first.stderr);
+  const before = statSync(join(snapshot, "src/lib.rs")).mtimeMs;
+  git(root, "rm", "-f", "extra.md");
+  const second = run();
+  assert.equal(second.status, 0, second.stdout + second.stderr);
+  assert.equal(statSync(join(snapshot, "src/lib.rs")).mtimeMs, before);
+  assert.equal(existsSync(join(snapshot, "extra.md")), false);
+  mkdirSync(`${snapshot}.lock`);
+  try {
+    const third = run();
+    assert.equal(third.status, 0, third.stdout + third.stderr);
+    assert.equal(statSync(join(snapshot, "src/lib.rs")).mtimeMs, before);
+    assert.equal(existsSync(`${snapshot}.lock`), true);
+  } finally {
+    rmSync(`${snapshot}.lock`, { recursive: true, force: true });
+  }
 });

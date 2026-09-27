@@ -29,7 +29,7 @@ impl Default for Options {
             edition: "2024".to_string(),
             style_edition: "2024".to_string(),
             max_width: 100,
-            jobs: 1,
+            jobs: std::thread::available_parallelism().map_or(1, usize::from),
         }
     }
 }
@@ -125,17 +125,28 @@ const ROUNDS: usize = 8;
 /// it never is.
 pub fn format_source(source: &str, options: &Options) -> Result<String, Error> {
     validate(source)?;
+    // Identical inputs recur within and between rounds. Cache only this call's
+    // verified rustfmt answers, so configuration and source edits cannot go stale.
+    let mut formatted = std::collections::HashMap::<String, String>::new();
+    let mut format = |text: &str| -> Result<String, Error> {
+        if let Some(output) = formatted.get(text) {
+            return Ok(output.clone());
+        }
+        let output = rustfmt(text, options)?;
+        formatted.insert(text.to_owned(), output.clone());
+        Ok(output)
+    };
     let mut current = source.to_string();
     for _ in 0..ROUNDS {
-        let baseline = rustfmt(&current, options)?;
+        let baseline = format(&current)?;
         let (result, macros) = lower_ranges(&baseline, options)?;
-        let lowered = rustfmt(&result, options)?;
+        let lowered = format(&result)?;
         let (lifted, pieces) = lift_pieces(&lowered, options)?;
         // rustfmt re-indents an opaque macro body to the indentation it tracks
         // at the call, so the spliced text goes through it once more; that pass
         // is what makes the answer stable for `cargo fmt` as well.
         let spliced = splice(&baseline, &lifted, &macros, &pieces)?;
-        let next = rustfmt(&spliced, options)?;
+        let next = format(&spliced)?;
         verify_values(&current, &next)?;
         if next == current {
             return Ok(next);
@@ -319,7 +330,7 @@ fn words(text: &str) -> Result<Vec<String>, Error> {
     Ok(out)
 }
 
-fn validate(text: &str) -> Result<(), Error> {
+fn validate(text: &str) -> Result<Vec<String>, Error> {
     syn::parse_file(text).map_err(|error| Error::Verification {
         line: error.span().start().line,
         message: format!("invalid Rust syntax: {error}"),
@@ -328,13 +339,12 @@ fn validate(text: &str) -> Result<(), Error> {
     words(text).map_err(|error| Error::Verification {
         line: 1,
         message: format!("invalid literal: {error}"),
-    })?;
-    Ok(())
+    })
 }
 
 fn verify_values(before: &str, after: &str) -> Result<(), Error> {
-    validate(after)?;
-    if words(before)? != words(after)? {
+    let after_words = validate(after)?;
+    if words(before)? != after_words {
         return Err(Error::Verification {
             line: 1,
             message: "a literal value, identifier, or protected macro literal spelling changed"

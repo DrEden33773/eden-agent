@@ -7,7 +7,7 @@ use eden_plugin_sdk::{
     CallContext, Package,
     protocol::{
         Descriptor, Fault,
-        coding::{Item, ModelInput, ModelReply, PROVIDER},
+        coding::{Block, Item, ModelInput, ModelReply, PROVIDER},
         models::*,
     },
     serde_json::{self, Value, json},
@@ -73,14 +73,32 @@ fn create(config: Value) -> Result<Package, Fault> {
             .as_str()
             .ok_or_else(|| fault("target_path missing"))?,
     );
+    let provider_wrapper = config["provider_wrapper"].as_bool().unwrap_or(false);
     let manager_path = path.clone();
     let address = config["wire_address"]
         .as_str()
         .unwrap_or("127.0.0.1:1")
         .to_owned();
     Ok(Package::new("model-services")
-        .service(PROVIDER, move |input: ModelInput, cx| {
-            custom_wire(input, cx, address.clone())
+        .service(PROVIDER, move |mut input: ModelInput, cx| {
+            let address = address.clone();
+            async move {
+                if provider_wrapper {
+                    input.items.insert(
+                        0,
+                        Item::Message {
+                            role: "system".into(),
+                            content: vec![Block::Text {
+                                text: "AUTHOR-WRAPPER-PREFIX".into(),
+                            }],
+                        },
+                    );
+                    cx.emit("wrapper_called", json!({ "run": cx.run_id() }))?;
+                    cx.delegate(&input).await
+                } else {
+                    custom_wire(input, cx, address).await
+                }
+            }
         })
         .service(MODEL_CATALOG, move |request: CatalogRequest, _| {
             let path = path.clone();
@@ -110,9 +128,22 @@ fn create(config: Value) -> Result<Package, Fault> {
                 })
             }
         })
-        .service(MODEL_MANAGER, move |request: ManagerRequest, _| {
+        .service(MODEL_MANAGER, move |request: ManagerRequest, cx| {
             let path = manager_path.clone();
             async move {
+                // The wrapper fixture uses this route to exercise the public, policy-neutral
+                // projection commit barrier without implementing a compaction strategy.
+                if provider_wrapper && matches!(request, ManagerRequest::Reconnect) {
+                    let revision = cx.invalidate_snapshot().await?;
+                    cx.emit(
+                        "author_projection_committed",
+                        json!({ "revision": revision }),
+                    )?;
+                    return Ok(ManagerReply {
+                        status: "projection-invalidated".into(),
+                        ..Default::default()
+                    });
+                }
                 let mut target: ModelTarget =
                     serde_json::from_slice(&std::fs::read(&path).map_err(fault)?).map_err(fault)?;
                 if let ManagerRequest::Load { model, .. } = request {

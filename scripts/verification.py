@@ -19,6 +19,7 @@ from typing import Any
 from install import ROOT, Composition, build_target, install, library, target
 
 AUTHORS = (
+    "cache-warmer",
     "runtime",
     "loop-a",
     "context-b",
@@ -36,6 +37,7 @@ AUTHORS = (
 )
 INVALID = ("wrong-abi", "wrong-sdk", "short-table", "metadata-panic", "init-panic")
 EXAMPLES = (
+    "cache_warm_probe",
     "runtime_probe",
     "embedded",
     "contract_probe",
@@ -243,6 +245,13 @@ def export_authors(destination: pathlib.Path) -> None:
                 if path.name == "Cargo.toml":
                     data = data.replace(b"../../../crates/", b"../../sdk/crates/")
                 files[pathlib.Path("authors") / name / path.relative_to(base)] = data
+    files[pathlib.Path("authors/cache-warmer/src/lib.rs")] = (
+        ROOT / "plugins/cache-warmer/src/lib.rs"
+    ).read_bytes()
+    cache_manifest = pathlib.Path("authors/cache-warmer/Cargo.toml")
+    files[cache_manifest] = files[cache_manifest].replace(
+        b'path = "../../../plugins/cache-warmer/src/lib.rs"', b'path = "src/lib.rs"'
+    )
     sync_files(files, destination)
 
 

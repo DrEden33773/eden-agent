@@ -480,6 +480,7 @@ impl Session {
         let cancel = Cancellation::default();
         state.active = Some((run_id, cancel.clone()));
         if !management {
+            self.0.events.invalidate_snapshots();
             self.0.presentation.begin_run(run_id);
         }
         state.management = management;
@@ -490,6 +491,9 @@ impl Session {
         );
         let session = self.clone();
         tokio::spawn(async move {
+            if !management {
+                session.0.events.settle_auxiliary().await;
+            }
             let mut terminal = operation(session.clone(), run_id, cancel.clone()).await;
             session.0.presentation.drain_actions(run_id, &cancel).await;
             let attempt_events = session.0.events.take_attempts(run_id);
@@ -535,6 +539,9 @@ impl Session {
             }
             if let Err(error) = session.persist_static_presentation(run_id).await {
                 terminal.cleanup_errors.push(error);
+            }
+            if !management {
+                session.0.events.settle_streaming(run_id).await;
             }
             let mut state = session.0.state.lock().unwrap_or_else(|e| e.into_inner());
             state.terminals.insert(run_id, terminal.clone());
@@ -823,6 +830,7 @@ impl Session {
                 ));
             }
             self.configuration_admission(c::QUEUE, false)?;
+            self.0.events.invalidate_snapshots();
             state.pending_inputs += 1;
             state.active.as_ref().map(|(id, _)| *id).unwrap_or(0)
         };
@@ -831,6 +839,7 @@ impl Session {
         let owner = InputOwner(session.clone());
         tokio::spawn(async move {
             let _owner = owner;
+            session.0.events.settle_auxiliary().await;
             let mut entries: Vec<c::QueueEntry> = session
                 .service_input(
                     run_id,

@@ -4,6 +4,7 @@ use p::runtime::{CallIdentity, EventBatch, HostRequest, InstanceIdentity, JobSta
 use std::collections::BTreeSet;
 
 pub(super) struct LiveCall {
+    pub snapshot_revision: u64,
     pub identity: CallIdentity,
     pub request: Request,
     pub chain: Vec<String>,
@@ -174,6 +175,115 @@ impl Router {
                         next: (index + 1 < chain.len()).then_some(call),
                         job,
                     };
+                    // The lease spans the native terminal, including its cleanup barrier.
+                    let policy = if request.contract == p::auxiliary::PROVIDER {
+                        match serde_json::from_value::<p::auxiliary::Request>(
+                            request.payload.clone(),
+                        ) {
+                            Ok(p::auxiliary::Request::Replay {
+                                snapshot,
+                                streaming,
+                                timeout_ms,
+                                max_age_ms,
+                                max_output_tokens,
+                            }) => {
+                                if snapshot.owner != unit.identity
+                                    || max_age_ms == 0
+                                    || max_age_ms > 3_600_000
+                                    || max_output_tokens == 0
+                                    || max_output_tokens > 4096
+                                {
+                                    return Terminal::failed(Fault::new(
+                                        "StaleSnapshot",
+                                        "auxiliary",
+                                        "provider incarnation or replay budget is invalid",
+                                    ));
+                                }
+                                Some((
+                                    snapshot.revision,
+                                    timeout_ms,
+                                    streaming.then_some(snapshot.origin_run),
+                                ))
+                            }
+                            Ok(p::auxiliary::Request::Generate {
+                                input, timeout_ms, ..
+                            }) => {
+                                if input
+                                    .max_output_tokens
+                                    .is_none_or(|tokens| tokens == 0 || tokens > 4096)
+                                {
+                                    return Terminal::failed(Fault::new(
+                                        "InvalidInput",
+                                        "auxiliary",
+                                        "a bounded positive output budget is required",
+                                    ));
+                                }
+                                Some((router.events.auxiliary.revision(), timeout_ms, None))
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    let revision = policy.map(|(revision, _, _)| revision);
+                    let lease = match policy {
+                        Some((revision, timeout_ms, streaming_run)) => {
+                            if timeout_ms == 0
+                                || timeout_ms > 120_000
+                                || streaming_run.is_some_and(|run| {
+                                    router.events.event_position().foreground_run != Some(run)
+                                })
+                            {
+                                return Terminal::failed(Fault::new(
+                                    "InvalidInput",
+                                    "auxiliary",
+                                    "invalid timeout or settled streaming owner",
+                                ));
+                            }
+                            match router.events.auxiliary.admit(
+                                revision,
+                                cancel.clone(),
+                                streaming_run,
+                            ) {
+                                Ok(lease) => Some(lease),
+                                Err(error) => return Terminal::failed(error),
+                            }
+                        }
+                        None => None,
+                    };
+                    if request.contract == p::coding::PROVIDER
+                        && stack
+                            .iter()
+                            .any(|(_, contract)| contract == p::auxiliary::PROVIDER)
+                    {
+                        return Terminal::failed(Fault::new(
+                            "InvalidInput",
+                            "auxiliary",
+                            "auxiliary inference cannot enter the foreground provider chain",
+                        ));
+                    }
+                    let prepared_revision = if index == 0 && request.contract == p::coding::PROVIDER
+                    {
+                        let revision = router.events.invalidate_snapshots();
+                        router.events.settle_auxiliary().await;
+                        Some(revision)
+                    } else {
+                        None
+                    };
+                    let snapshot_revision = request
+                        .execution
+                        .as_ref()
+                        .and_then(|parent| {
+                            router
+                                .calls
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .get(&parent.call)
+                                .filter(|parent| parent.request.contract == request.contract)
+                                .map(|parent| parent.snapshot_revision)
+                        })
+                        .or(prepared_revision)
+                        .unwrap_or_else(|| router.events.auxiliary.revision());
                     request.execution = Some(identity.clone());
                     router
                         .calls
@@ -182,6 +292,7 @@ impl Router {
                         .insert(
                             call,
                             LiveCall {
+                                snapshot_revision,
                                 identity,
                                 request: request.clone(),
                                 chain,
@@ -193,7 +304,37 @@ impl Router {
                     router
                         .events
                         .push(request.run_id, "service_called", request.public_trace());
-                    let result = unit.instance.call(request, cancel).await;
+                    let invocation = unit.instance.call(request, cancel.clone());
+                    tokio::pin!(invocation);
+                    let mut result = if let Some((_, timeout_ms, _)) = policy {
+                        tokio::select! {
+                            result = &mut invocation => result,
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(
+                                timeout_ms
+                            )) => {
+                                cancel.cancel();
+                                let mut result = invocation.await;
+                                result.outcome = p::Outcome::Failed(Fault::new(
+                                    "Timeout",
+                                    "auxiliary",
+                                    "host auxiliary budget expired",
+                                ));
+                                result
+                            }
+                        }
+                    } else {
+                        invocation.await
+                    };
+                    if revision
+                        .is_some_and(|revision| revision != router.events.auxiliary.revision())
+                    {
+                        result.outcome = p::Outcome::Failed(Fault::new(
+                            "StaleSnapshot",
+                            "auxiliary",
+                            "context changed during auxiliary inference",
+                        ));
+                    }
+                    drop(lease);
                     router
                         .calls
                         .lock()
@@ -240,6 +381,17 @@ impl Router {
         request: Request,
         cancel: Cancellation,
     ) -> Terminal {
+        if request.contract != p::runtime::HOST {
+            let (identity, stack) = match self.parent(&owner, &request) {
+                Ok(parent) => parent,
+                Err(error) => return Terminal::failed(error),
+            };
+            // Preserve cleanup classification across the byte bridge. The typed SDK
+            // convenience call may reduce it, but resource owners can inspect the terminal.
+            return self
+                .route(request, identity.scope, cancel, stack, identity.job)
+                .await;
+        }
         let result = self.author_call(&owner, request, cancel).await;
         match result {
             Ok(value) => Terminal {
@@ -257,15 +409,40 @@ impl Router {
         cancel: Cancellation,
     ) -> Result<serde_json::Value, Fault> {
         let (identity, stack) = self.parent(owner, &request)?;
-        if request.contract != p::runtime::HOST {
-            return self
-                .route(request, identity.scope, cancel, stack, identity.job)
-                .await
-                .into_result();
-        }
         let command: HostRequest = serde_json::from_value(request.payload.clone())
             .map_err(|e| Fault::new("InvalidInput", "runtime", e.to_string()))?;
         match command {
+            HostRequest::InvocationSnapshotRevision => {
+                let calls = self.calls.lock().unwrap_or_else(|e| e.into_inner());
+                let revision = calls
+                    .get(&identity.call)
+                    .ok_or_else(|| Fault::new("ExpiredCall", "runtime", "invocation has settled"))?
+                    .snapshot_revision;
+                Ok(serde_json::json!(revision))
+            }
+            HostRequest::EventPosition => {
+                serde_json::to_value(self.events.event_position()).map_err(codec)
+            }
+            HostRequest::SnapshotRevision => {
+                Ok(serde_json::json!(self.events.auxiliary.revision()))
+            }
+            HostRequest::InvalidateSnapshot => {
+                if request.contract == p::auxiliary::PROVIDER
+                    || stack
+                        .iter()
+                        .any(|(_, contract)| contract == p::auxiliary::PROVIDER)
+                {
+                    return Err(Fault::new(
+                        "InvalidInput",
+                        "auxiliary",
+                        "auxiliary calls cannot invalidate their own context",
+                    ));
+                }
+                let revision = self.events.invalidate_snapshots();
+                self.events.settle_auxiliary().await;
+                Ok(serde_json::json!(revision))
+            }
+
             HostRequest::Environment => serde_json::to_value(&self.environment).map_err(codec),
             HostRequest::Call {
                 scope,

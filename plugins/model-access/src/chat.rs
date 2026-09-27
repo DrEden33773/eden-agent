@@ -3,6 +3,50 @@
 mod tests {
     use super::*;
     #[test]
+    fn auxiliary_length_waits_for_usage_and_discards_partial_tools() {
+        let mut decoder = Decoder::auxiliary(crate::projection::test_target("openai-completions"));
+        assert!(
+            decoder
+                .consume(json!({
+                    "choices": [{
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": "partial",
+                                "function": { "name": "read", "arguments": "{" },
+                            }],
+                        },
+                        "finish_reason": "length",
+                    }],
+                }))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            decoder
+                .consume(json!({
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": 42,
+                        "completion_tokens": 1,
+                        "prompt_tokens_details": { "cached_tokens": 40 },
+                    },
+                }))
+                .unwrap()
+                .is_none()
+        );
+        let reply = decoder
+            .consume(json!({ "type": "eden.done" }))
+            .unwrap()
+            .unwrap();
+        assert!(reply.items.is_empty());
+        assert_eq!(reply.usage["raw"]["prompt_tokens"], 42);
+        assert_eq!(
+            reply.usage["raw"]["prompt_tokens_details"]["cached_tokens"],
+            40
+        );
+    }
+    #[test]
     fn fragmented_tools_wait_for_done_and_usage_tail() {
         let mut decoder = Decoder::new(crate::projection::test_target("openai-completions"));
         assert!(
@@ -344,6 +388,7 @@ struct Call {
     arguments: String,
 }
 pub(crate) struct Decoder {
+    auxiliary: bool,
     target: ModelTarget,
     text: String,
     reasoning: String,
@@ -357,6 +402,7 @@ pub(crate) struct Decoder {
 impl Decoder {
     pub(crate) fn new(target: ModelTarget) -> Self {
         Self {
+            auxiliary: false,
             target,
             text: String::new(),
             reasoning: String::new(),
@@ -366,6 +412,12 @@ impl Decoder {
             raw_usage: Value::Null,
             stop: None,
             deltas: Vec::new(),
+        }
+    }
+    pub(crate) fn auxiliary(target: ModelTarget) -> Self {
+        Self {
+            auxiliary: true,
+            ..Self::new(target)
         }
     }
     pub(crate) fn take_deltas(&mut self) -> Vec<(&'static str, Value)> {
@@ -455,7 +507,9 @@ impl Decoder {
                     }
                 }
                 if let Some(reason) = choice["finish_reason"].as_str() {
-                    if !matches!(reason, "stop" | "tool_calls" | "function_call") {
+                    if !matches!(reason, "stop" | "tool_calls" | "function_call")
+                        && !(self.auxiliary && reason == "length")
+                    {
                         return Err(failure("Chat response did not complete"));
                     }
                     self.stop = Some(reason.into());
@@ -467,6 +521,14 @@ impl Decoder {
     pub(crate) fn finish(&mut self) -> Result<ModelReply, Fault> {
         if self.stop.is_none() {
             return Err(failure("Chat stream ended before finish_reason"));
+        }
+        if self.auxiliary && self.stop.as_deref() == Some("length") {
+            // Budget exhaustion is expected for auxiliary probes; consume usage to [DONE]
+            // but never expose an incomplete tool or message as successful model output.
+            return Ok(ModelReply {
+                items: vec![],
+                usage: usage::normalize(&self.raw_usage, &self.target, self.stop.as_deref()),
+            });
         }
         let mut items = Vec::new();
         if !self.reasoning.is_empty() || !self.details.is_empty() {

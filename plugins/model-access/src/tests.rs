@@ -1414,3 +1414,320 @@ async fn opencode_google_route_uses_gemini_protocol_from_model_identity() {
     assert!(body.get("contents").is_some());
     assert!(body.get("messages").is_none());
 }
+
+#[tokio::test]
+async fn prepared_replay_preserves_tools_prefix_and_uses_fresh_credentials() {
+    let stream = event(json!({
+        "choices": [{ "delta": { "content": "hidden" }, "finish_reason": "stop" }],
+    })) + "data: [DONE]\r\n\r\n";
+    let (endpoint, received) = server("200 OK", stream.clone()).await;
+    let mut target = crate::projection::test_target("openai-completions");
+    target.provider = "openai".into();
+    target.base_url = endpoint.trim_end_matches("/responses").into();
+    let mut input = input();
+    input.target = Some(target.clone());
+    input.items = vec![Item::Message {
+        role: "user".into(),
+        content: vec![Block::Text {
+            text: "prefix once".into(),
+        }],
+    }];
+    input.tools = vec![ToolDefinition {
+        name: "read".into(),
+        description: "read".into(),
+        parameters: json!({ "type": "object" }),
+        execution: Default::default(),
+    }];
+    let prepared = targeted::prepare(&target, &input).unwrap();
+    let credential = |key: &str| {
+        serde_json::from_value::<eden_protocol::models::CredentialReply>(json!({
+            "api_key": key,
+            "headers": {},
+            "source": "test",
+        }))
+        .unwrap()
+    };
+    targeted::send(
+        &target,
+        &credential("first-key"),
+        &input,
+        &prepared,
+        |_, _| Ok(()),
+    )
+    .await
+    .unwrap();
+    let (first_headers, first_body) = received.await.unwrap();
+    let (endpoint, received) = server("200 OK", stream).await;
+    target.base_url = endpoint.trim_end_matches("/responses").into();
+    let mut replay = prepared.clone();
+    replay.set_output_limit(1).unwrap();
+    // Mutating the logical input after preparation must never affect the replay prefix.
+    input.items.clear();
+    input.tools.clear();
+    targeted::send(
+        &target,
+        &credential("refreshed-key"),
+        &input,
+        &replay,
+        |_, _| Ok(()),
+    )
+    .await
+    .unwrap();
+    let (second_headers, second_body) = received.await.unwrap();
+    assert!(first_headers.contains("Bearer first-key"));
+    assert!(second_headers.contains("Bearer refreshed-key"));
+    let mut expected = first_body;
+    expected["max_completion_tokens"] = json!(1);
+    assert_eq!(second_body, expected);
+    assert_eq!(second_body["tools"][0]["function"]["name"], "read");
+    assert!(second_body["messages"].to_string().contains("prefix once"));
+}
+
+#[tokio::test]
+async fn auxiliary_generation_emits_only_purpose_events_and_keeps_tool_output_private() {
+    use eden_plugin_sdk::{
+        Cancellation,
+        abi::{Bytes, HostApi, Reply},
+        local::LocalInstance,
+    };
+    use std::sync::Mutex;
+    unsafe extern "C" fn request(_: usize, bytes: Bytes, reply: Reply) -> u64 {
+        // SAFETY: The SDK borrows this span for the duration of this callback.
+        let request: eden_protocol::Request = unsafe { bytes.decode().unwrap() };
+        assert_eq!(request.contract, eden_protocol::models::CREDENTIAL_SOURCE);
+        assert_eq!(request.payload["purpose"], "test_summary");
+        // SAFETY: Acceptance consumes the SDK reply token exactly once, synchronously.
+        unsafe {
+            reply.send(&eden_protocol::Terminal {
+                outcome: eden_protocol::Outcome::Completed(json!({
+                    "api_key": "fresh",
+                    "headers": {},
+                    "source": "test",
+                })),
+                cleanup_errors: vec![],
+                partial_result: None,
+            })
+        };
+        1
+    }
+    unsafe extern "C" fn cancel(_: usize, _: u64) {}
+    unsafe extern "C" fn event(context: usize, bytes: Bytes) {
+        // SAFETY: The test retains this mutex until instance stop completes; decoding copies the span.
+        let events = unsafe { &*(context as *const Mutex<Vec<eden_protocol::Request>>) };
+        // SAFETY: The SDK borrows this span for the duration of this callback.
+        events
+            .lock()
+            .unwrap()
+            .push(unsafe { bytes.decode().unwrap() });
+    }
+    let stream = event_json_for_auxiliary();
+    let (endpoint, received) = server("200 OK", stream).await;
+    let mut target = crate::projection::test_target("openai-completions");
+    target.provider = "openai".into();
+    target.base_url = endpoint.trim_end_matches("/responses").into();
+    let mut input = input();
+    input.target = Some(target);
+    input.max_output_tokens = Some(8);
+    let events = Box::new(Mutex::new(Vec::<eden_protocol::Request>::new()));
+    let package = auxiliary::register(Package::new("test"), Arc::new(auxiliary::State::default()));
+    // SAFETY: Static callbacks and the boxed event storage outlive all operations and stop.
+    let instance = unsafe {
+        LocalInstance::new(
+            package,
+            HostApi {
+                context: (&*events as *const Mutex<Vec<eden_protocol::Request>>) as usize,
+                request,
+                cancel,
+                event,
+            },
+        )
+    };
+    let terminal = instance
+        .call(
+            eden_protocol::Request {
+                execution: None,
+                session_id: 1,
+                run_id: 0,
+                contract: eden_protocol::auxiliary::PROVIDER.into(),
+                payload: json!(eden_protocol::auxiliary::Request::Generate {
+                    purpose: "test_summary".into(),
+                    input,
+                    timeout_ms: 1000
+                }),
+            },
+            Cancellation::default(),
+        )
+        .await;
+    let reply: ModelReply = serde_json::from_value(terminal.into_result().unwrap()).unwrap();
+    assert!(
+        reply
+            .items
+            .iter()
+            .any(|item| matches!(item, Item::ToolCall { .. }))
+    );
+    received.await.unwrap();
+    instance.stop().await.unwrap();
+    let events = events.lock().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.contract.as_str())
+            .collect::<Vec<_>>(),
+        vec!["auxiliary_started", "auxiliary_usage", "auxiliary_finished"]
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| event.payload["purpose"] == "test_summary")
+    );
+    assert!(
+        !serde_json::to_string(&*events)
+            .unwrap()
+            .contains("private-tool")
+    );
+}
+fn event_json_for_auxiliary() -> String {
+    event(json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "private-tool",
+                    "function": { "name": "read", "arguments": "{}" },
+                }],
+            },
+            "finish_reason": "tool_calls",
+        }],
+    })) + "data: [DONE]\r\n\r\n"
+}
+
+#[tokio::test]
+async fn auxiliary_transport_keeps_length_usage_tail_without_partial_tool_calls() {
+    let stream = event(json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "partial",
+                    "function": { "name": "read", "arguments": "{" },
+                }],
+            },
+            "finish_reason": "length",
+        }],
+    })) + &event(json!({
+        "choices": [],
+        "usage": {
+            "prompt_tokens": 42,
+            "completion_tokens": 1,
+            "prompt_tokens_details": { "cached_tokens": 40 },
+        },
+    })) + "data: [DONE]\r\n\r\n";
+    let (endpoint, received) = server("200 OK", stream).await;
+    let mut target = crate::projection::test_target("openai-completions");
+    target.provider = "openai".into();
+    target.base_url = endpoint.trim_end_matches("/responses").into();
+    let input = input();
+    let mut prepared = targeted::prepare(&target, &input).unwrap();
+    prepared.set_output_limit(1).unwrap();
+    let credential = serde_json::from_value(json!({
+        "api_key": "fresh",
+        "headers": {},
+        "source": "test",
+    }))
+    .unwrap();
+    let reply = targeted::send_auxiliary(&target, &credential, &input, &prepared)
+        .await
+        .unwrap();
+    assert!(reply.items.is_empty());
+    assert_eq!(reply.usage["raw"]["completion_tokens"], 1);
+    assert_eq!(
+        reply.usage["raw"]["prompt_tokens_details"]["cached_tokens"],
+        40
+    );
+    assert_eq!(received.await.unwrap().1["max_completion_tokens"], 1);
+}
+
+#[tokio::test]
+async fn snapshot_capture_cannot_promote_an_old_invocation_to_current_revision() {
+    use eden_plugin_sdk::{
+        Cancellation,
+        abi::{Bytes, HostApi, Reply},
+        local::LocalInstance,
+    };
+    use eden_protocol::runtime::{CallIdentity, InstanceIdentity};
+    use std::sync::atomic::AtomicUsize;
+    unsafe extern "C" fn request(_: usize, bytes: Bytes, reply: Reply) -> u64 {
+        // SAFETY: The SDK keeps the borrowed span valid during this callback.
+        let request: eden_protocol::Request = unsafe { bytes.decode().unwrap() };
+        let revision = match request.payload["op"].as_str() {
+            Some("invocation_snapshot_revision") => 7,
+            Some("snapshot_revision") => 8,
+            _ => panic!("unexpected host call"),
+        };
+        // SAFETY: This accepted host request consumes its unique callback exactly once.
+        unsafe {
+            reply.send(&eden_protocol::Terminal {
+                outcome: eden_protocol::Outcome::Completed(json!(revision)),
+                cleanup_errors: vec![],
+                partial_result: None,
+            })
+        };
+        1
+    }
+    unsafe extern "C" fn cancel(_: usize, _: u64) {}
+    unsafe extern "C" fn event(context: usize, _: Bytes) {
+        // SAFETY: The boxed counter remains live through LocalInstance::stop.
+        unsafe { &*(context as *const AtomicUsize) }.fetch_add(1, Ordering::Relaxed);
+    }
+    let state = Arc::new(auxiliary::State::default());
+    let package = auxiliary::register(Package::new("test"), state);
+    let events = Box::new(AtomicUsize::new(0));
+    // SAFETY: Static callbacks and event storage outlive the instance and cleanup barrier.
+    let instance = unsafe {
+        LocalInstance::new(
+            package,
+            HostApi {
+                context: (&*events as *const AtomicUsize) as usize,
+                request,
+                cancel,
+                event,
+            },
+        )
+    };
+    let mut target = crate::projection::test_target("openai-completions");
+    target.provider = "openai".into();
+    let mut input = input();
+    input.target = Some(target);
+    let terminal = instance
+        .call(
+            eden_protocol::Request {
+                execution: Some(CallIdentity {
+                    owner: InstanceIdentity {
+                        id: "provider".into(),
+                        generation: 1,
+                    },
+                    scope: String::new(),
+                    call: 2,
+                    next: None,
+                    job: None,
+                }),
+                session_id: 1,
+                run_id: 1,
+                contract: eden_protocol::auxiliary::PROVIDER.into(),
+                payload: json!(eden_protocol::auxiliary::Request::Prepare { input }),
+            },
+            Cancellation::default(),
+        )
+        .await;
+    assert_eq!(terminal.into_result().unwrap(), Value::Null);
+    assert_eq!(events.load(Ordering::Relaxed), 0);
+    instance.stop().await.unwrap();
+}
+
+#[test]
+fn exported_descriptor_matches_registered_service_order() {
+    assert_eq!(
+        serde_json::json!(super::descriptor()),
+        serde_json::json!(super::create(serde_json::json!({})).unwrap().descriptor())
+    );
+}

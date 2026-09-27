@@ -23,6 +23,7 @@ from verification import (
 )
 
 SUITES = {
+    "cache-warmer": ("verify-cache-warmer.py", "cache-warmer-verification.json"),
     "delivery": ("verify-delivery.py", "delivery-verification.json"),
     "native": ("verify.py", "verification.json"),
     "presentation": ("verify-presentation.py", "presentation-verification.json"),
@@ -103,6 +104,7 @@ def suite_order() -> list[str]:
             "cloud-models",
             "oauth-models",
             "presentation",
+            "cache-warmer",
             "native",
         ]
     if sys.platform == "darwin":
@@ -117,6 +119,7 @@ def suite_order() -> list[str]:
             "delivery",
             "cloud-models",
             "oauth-models",
+            "cache-warmer",
             "native",
         ]
     return [
@@ -130,6 +133,7 @@ def suite_order() -> list[str]:
         "router-models",
         "cloud-models",
         "oauth-models",
+        "cache-warmer",
         "native",
     ]
 

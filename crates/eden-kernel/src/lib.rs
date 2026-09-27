@@ -1,5 +1,6 @@
 //! Composition preflight, native loading, explicit role selection, the event
 //! ledger, and host-owned lifecycle.
+mod auxiliary;
 mod graph;
 pub mod history;
 mod native;
@@ -98,12 +99,14 @@ pub fn preflight(composition: &Composition) -> Result<(), Fault> {
 }
 /// In-memory ordered event ledger, shared by native routes and session callers.
 pub struct Events {
+    pub(crate) auxiliary: auxiliary::AuxiliaryGate,
     session_id: u64,
     ledger: Mutex<EventLedger>,
     closed: AtomicBool,
     changed: tokio::sync::Notify,
 }
 struct EventLedger {
+    foreground_run: Option<u64>,
     entries: std::collections::VecDeque<Event>,
     next: u64,
     bytes: usize,
@@ -114,8 +117,10 @@ impl Events {
     /// Older cursors report lag explicitly; public history remains the durable source.
     pub fn new(session_id: u64) -> Arc<Self> {
         Arc::new(Self {
+            auxiliary: auxiliary::AuxiliaryGate::default(),
             session_id,
             ledger: Mutex::new(EventLedger {
+                foreground_run: None,
                 entries: Default::default(),
                 next: 1,
                 bytes: 0,
@@ -125,9 +130,37 @@ impl Events {
             changed: tokio::sync::Notify::new(),
         })
     }
+    /// Retire prepared context synchronously, including queued auxiliary admission.
+    /// This identity is policy-neutral and changes for input, branch, resource or projection changes.
+    pub fn invalidate_snapshots(&self) -> u64 {
+        self.auxiliary.invalidate()
+    }
+    /// Wait until invalidated auxiliary invocations have completed native cleanup.
+    pub async fn settle_auxiliary(&self) {
+        self.auxiliary.settle().await;
+    }
+    /// Close streaming replay admission before publishing foreground settlement, then
+    /// wait for those native calls. Idle replay remains independent of the turn.
+    pub async fn settle_streaming(&self, run_id: u64) {
+        self.auxiliary.stop_streaming(run_id);
+        self.auxiliary.settle_streaming(run_id).await;
+    }
+    pub(crate) fn event_position(&self) -> p::runtime::EventPosition {
+        let ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
+        p::runtime::EventPosition {
+            cursor: ledger.next - 1,
+            foreground_run: ledger.foreground_run,
+        }
+    }
     /// Append an observation using a session-local monotonically increasing sequence.
     pub fn push(&self, run_id: u64, kind: &str, payload: serde_json::Value) {
         let mut ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
+        if kind == "accepted" && payload["management"] == false {
+            ledger.foreground_run = Some(run_id);
+        }
+        if kind == "settled" && ledger.foreground_run == Some(run_id) {
+            ledger.foreground_run = None;
+        }
         let event = Event {
             sequence: ledger.next,
             session_id: self.session_id,
@@ -1011,6 +1044,7 @@ async fn stop_unit(router: Arc<Router>, id: String) -> Result<(), Fault> {
         .insert(
             call,
             routing::LiveCall {
+                snapshot_revision: router.events.auxiliary.revision(),
                 identity,
                 request: request.clone(),
                 chain: vec![id.clone()],

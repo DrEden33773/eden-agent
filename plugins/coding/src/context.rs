@@ -735,6 +735,12 @@ pub(crate) async fn context(
             }
             cx.emit("model_usage", reply.usage)?;
             append(&cx, kind, payload).await?;
+            let _: u64 = cx
+                .call(
+                    eden_plugin_sdk::protocol::runtime::HOST,
+                    &eden_plugin_sdk::protocol::runtime::HostRequest::InvalidateSnapshot,
+                )
+                .await?;
             let history: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
             projected = project_records(&history.records)?;
         }

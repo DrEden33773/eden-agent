@@ -52,6 +52,16 @@ impl CallContext {
         contract: &str,
         input: &I,
     ) -> Result<O, Fault> {
+        let value = self.call_terminal(contract, input).await?.into_result()?;
+        serde_json::from_value(value).map_err(serialization)
+    }
+    /// Preserve cleanup errors separately from inference failures. Resource-owning callers
+    /// must inspect this terminal before deciding whether replacement work is safe.
+    pub async fn call_terminal<I: Serialize>(
+        &self,
+        contract: &str,
+        input: &I,
+    ) -> Result<Terminal, Fault> {
         let request = Request {
             execution: self.request.execution.clone(),
             session_id: self.session_id(),
@@ -103,9 +113,8 @@ impl CallContext {
                         receiver.await
                     }
                 };
-                let result = reply
-                    .map_err(|_| Fault::new("Unavailable", "host", "host completion lost"))
-                    .and_then(Terminal::into_result);
+                let result =
+                    reply.map_err(|_| Fault::new("Unavailable", "host", "host completion lost"));
                 let _ = result_sender.send(result);
                 Ok(())
             })
@@ -115,10 +124,23 @@ impl CallContext {
                     Box::from_raw(token as *mut tokio::sync::oneshot::Sender<Terminal>)
                 });
             })?;
-        let value = result_receiver
+        result_receiver
             .await
-            .map_err(|_| Fault::new("Unavailable", "bridge", "bridge lost"))??;
-        serde_json::from_value(value).map_err(serialization)
+            .map_err(|_| Fault::new("Unavailable", "bridge", "bridge lost"))?
+    }
+    /// Read the host's policy-neutral context identity before preparing an auxiliary request.
+    pub async fn snapshot_revision(&self) -> Result<u64, Fault> {
+        self.call(p::runtime::HOST, &p::runtime::HostRequest::SnapshotRevision)
+            .await
+    }
+    /// Retire prepared context and wait for auxiliary cleanup after committing a new projection.
+    /// This is independent of any particular summary, checkpoint or history record format.
+    pub async fn invalidate_snapshot(&self) -> Result<u64, Fault> {
+        self.call(
+            p::runtime::HOST,
+            &p::runtime::HostRequest::InvalidateSnapshot,
+        )
+        .await
     }
     /// Read host-authoritative paths and trust without requiring object-shaped factory config.
     pub async fn host_environment(&self) -> Result<Option<p::environment::HostEnvironment>, Fault> {

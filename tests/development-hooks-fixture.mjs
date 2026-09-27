@@ -36,11 +36,15 @@ export function command(root, program, args, options = {}) {
 export function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), "eden-hooks-test-"));
   t.after(() => {
+    const canonicalRoot = git(root, "rev-parse", "--show-toplevel").trim();
     rmSync(root, { recursive: true, force: true });
-    rmSync(join(tmpdir(), `eden-check-${createHash("sha256").update(root).digest("hex")}`), {
-      recursive: true,
-      force: true,
-    });
+    rmSync(
+      join(tmpdir(), `eden-check-${createHash("sha256").update(canonicalRoot).digest("hex")}`),
+      {
+        recursive: true,
+        force: true,
+      },
+    );
   });
   git(root, "init", "-b", "main");
   git(root, "config", "user.name", "Hook Test");

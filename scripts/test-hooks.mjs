@@ -18,7 +18,10 @@ const result = spawnSync(process.execPath, ["--test", `--test-concurrency=${work
   env: {
     ...process.env,
     EDEN_CPU_BUDGET: String(Math.max(1, Math.floor(budget / workers))),
-    ...(!process.env.CARGO_BUILD_JOBS && !process.env.CARGO_MAKEFLAGS
+    ...(!process.env.CARGO_BUILD_JOBS &&
+    !process.env.CARGO_MAKEFLAGS &&
+    !process.env.MAKEFLAGS &&
+    !process.env.MFLAGS
       ? { CARGO_BUILD_JOBS: String(Math.max(1, Math.floor(budget / workers))) }
       : {}),
   },

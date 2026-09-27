@@ -293,7 +293,12 @@ test("editor command from a nested source directory matches CLI stdin", () => {
 
 test("reused snapshots preserve unchanged mtimes and remove deleted files; busy snapshots stay isolated", (t) => {
   const root = fixture(t);
-  const snapshot = join(tmpdir(), `eden-check-${createHash("sha256").update(root).digest("hex")}`);
+  const snapshot = join(
+    tmpdir(),
+    `eden-check-${createHash("sha256")
+      .update(git(root, "rev-parse", "--show-toplevel").trim())
+      .digest("hex")}`,
+  );
   t.after(() => rmSync(snapshot, { recursive: true, force: true }));
   writeFileSync(join(root, "README.md"), "# Changed\n");
   writeFileSync(join(root, "extra.md"), "# Extra\n");

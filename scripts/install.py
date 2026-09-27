@@ -38,7 +38,7 @@ class Composition(TypedDict):
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-CONTRACT = "eden-native-0.9.0"
+CONTRACT = "eden-native-0.10.0"
 ROLES = ["eden.agent-loop.v1", "eden.context.v1", "eden.provider.v1", "eden.tool.v1"]
 
 
@@ -112,6 +112,7 @@ def install(
                 [
                     "eden.coding-control.v1",
                     "eden.coding-loop.v2",
+                    "eden.compaction-policy.v1",
                     "eden.coding-context.v2",
                     "eden.submission-queue.v2",
                 ],
@@ -137,6 +138,23 @@ def install(
                     "eden.cache-warmer.work.v1",
                     "eden.cache-warmer.v1",
                     "eden.configuration.v1",
+                ],
+            ),
+            (
+                "notes",
+                [
+                    "eden.compaction-policy.v1",
+                    "eden.record-interpreter.v1",
+                    "eden.state-migrator.v1",
+                    "eden.configuration.v1",
+                ],
+            ),
+            (
+                "recall",
+                [
+                    "eden.history-recall.v1",
+                    "eden.history-recall-tools.v1",
+                    "eden.history-recall-tool.v1",
                 ],
             ),
             ("local-history", ["eden.session-store.v2"]),
@@ -172,6 +190,8 @@ def install(
             relative = f"plugins/{pkg}/0.1.0/{lib}"
             (destination / relative).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(build_target() / profile / lib, destination / relative)
+            if pkg in {"notes", "recall"}:
+                continue
             config = None
             if pkg == "coding-tools":
                 config = {

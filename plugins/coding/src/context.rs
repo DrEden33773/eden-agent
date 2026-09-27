@@ -1,5 +1,7 @@
 //! Record projection and compact or summary requests for the default context role.
 use super::*;
+use eden_plugin_sdk::protocol::compaction as c;
+
 use eden_plugin_sdk::protocol::history::active_path;
 use std::collections::BTreeMap;
 
@@ -548,7 +550,16 @@ pub(crate) async fn context(
     cx: CallContext,
     settings: Settings,
 ) -> Result<ModelInput, Fault> {
-    if !["", "project", "compact", "branch_summary"].contains(&input.action.as_str()) {
+    if ![
+        "",
+        "project",
+        "compact",
+        "overflow",
+        "post_response",
+        "branch_summary",
+    ]
+    .contains(&input.action.as_str())
+    {
         return Err(Fault::new(
             "InvalidInput",
             "context",
@@ -572,7 +583,7 @@ pub(crate) async fn context(
     if input.action != "branch_summary" {
         validate_compactions(&path)?;
     }
-    let extension_items = interpreted(&path, &cx).await?;
+    let mut extension_items = interpreted(&path, &cx).await?;
     let mut projected = project_path(&path, &input.records)?;
     projected.extend(input.items.clone());
     let threshold = settings.auto_compaction()
@@ -588,161 +599,170 @@ pub(crate) async fn context(
             .limits
             .context_window
             .saturating_sub(settings.reserve_tokens);
-    if input.action == "compact"
-        || input.action == "branch_summary"
+    if matches!(
+        input.action.as_str(),
+        "compact" | "overflow" | "post_response"
+    ) || input.action == "branch_summary"
         || ((input.action.is_empty() || input.action == "project") && threshold)
     {
-        let path = if input.action == "branch_summary" {
-            input.records.clone()
-        } else {
-            active_path(&input.records)?
+        let before: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
+        if input.action != "branch_summary"
+            && serde_json::to_value(&before.records).ok()
+                != serde_json::to_value(&input.records).ok()
+        {
+            return Err(Fault::new(
+                "CheckpointConflict",
+                "context",
+                "projection input is stale",
+            ));
+        }
+        let reason = match input.action.as_str() {
+            "compact" => c::Reason::Manual,
+            "overflow" => c::Reason::Overflow,
+            "post_response" => c::Reason::PostResponse,
+            "branch_summary" => c::Reason::BranchSummary,
+            _ => c::Reason::Threshold,
         };
-        let mut cut = compaction_cut(&path, &input.action, &settings)?;
-        if input.action != "branch_summary" {
-            let statuses = queue::statuses(&input.records);
-            if let Some(index) = path.iter().position(|record| {
-                record.kind == "queue_delivered"
-                    && statuses
-                        .get(&record.payload["id"].as_u64().unwrap_or(0))
-                        .is_some_and(|(state, last)| {
-                            *state == "queue_delivered" && last.sequence == record.sequence
-                        })
-            }) {
-                cut = cut.min(index);
-            }
-        }
-        if cut == 0 && input.action == "compact" {
-            cx.emit(
-                "compaction_skipped",
-                json!({ "reason": "no_older_context" }),
-            )?;
-        }
-        if cut > 0 {
-            let split = cut < path.len()
-                && path[cut].kind != "user_shell"
-                && !(path[cut].kind == "message"
-                    && matches!(decode(&path[cut]), Ok(Item::Message { role, .. }) if role == "user"))
-                && path[..cut].iter().any(|record| {
-                    (record.kind == "user_shell" && record.payload["exclude_from_context"] != true)
-                        || (record.kind == "message"
-                        && matches!(decode(record), Ok(Item::Message { role, .. }) if role == "user"))
-                });
-            let allowance = settings.summary_allowance(split, input.limits.max_output_tokens);
-            let mut summary_items = vec![Item::Message {
-                role: "system".into(),
-                content: vec![Block::Text {
-                    text: format!(
-                        "Summarize this coding conversation for continuation. Use headings: Goal, \
-                         Constraints, Progress (Done/In Progress/Blocked), Key Decisions, Next \
-                         Steps, Critical Context. Preserve user requirements, exact \
-                         paths/functions/errors, failed checks, pending work, and unknown \
-                         external tool effects. Update previous summaries rather than discarding \
-                         them. Do not continue the task. {}",
-                        input.instructions
-                    ),
-                }],
-            }];
-            let summary_projection =
-                summary_safe_items(summary_prefix(&path, cut, &input.records)?);
-            summary_items.push(text_item(format!(
-                "Conversation to summarize (attachments remain in raw history):\n{}",
-                serde_json::to_string(&summary_projection).map_err(|e| Fault::new(
-                    "InvalidInput",
-                    "context",
-                    e.to_string()
-                ))?
-            )));
-            summary_items.extend(extension_items.clone());
-            let before_summary: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
-            let request_id = format!("{}:{}", cx.run_id(), before_summary.sequence + 1);
-            let request_record = json!({
-                "request_id": request_id,
-                "purpose": "summary",
-                "target": input.target,
-            });
-            append(&cx, "model_request", request_record.clone()).await?;
-            cx.emit("model_request", request_record)?;
-            let reply = super::provider_retry(
-                &cx,
-                &ModelInput {
-                    target: input.target.clone(),
-                    max_output_tokens: Some(allowance),
-                    items: summary_items,
-                    tools: vec![],
-                },
-                &settings,
-            )
-            .await?;
-            if reply
-                .items
-                .iter()
-                .any(|item| matches!(item, Item::ToolCall { .. }))
-            {
+        let statuses = queue::statuses(&input.records);
+        let max_cut = if reason == c::Reason::BranchSummary {
+            path.len()
+        } else {
+            path.iter()
+                .position(|record| {
+                    record.kind == "queue_delivered"
+                        && statuses
+                            .get(&record.payload["id"].as_u64().unwrap_or(0))
+                            .is_some_and(|(state, last)| {
+                                *state == "queue_delivered" && last.sequence == record.sequence
+                            })
+                })
+                .unwrap_or(path.len())
+        };
+        let request_id = format!("{}:{}:compaction", cx.run_id(), before.sequence + 1);
+        let request = c::Request {
+            request_id: request_id.clone(),
+            projected: summary_safe_items(projected.clone()),
+            input: input.clone(),
+            reason,
+            suggested_cut: compaction_cut(&path, &input.action, &settings)?,
+            max_cut,
+        };
+        let plan: Option<c::Plan> = cx.call(c::POLICY, &request).await?;
+        if let Some(plan) = plan {
+            if plan.cut == 0 || plan.cut > max_cut || plan.summary.trim().is_empty() {
                 return Err(Fault::new(
-                    "ProviderFailure",
+                    "InvalidCheckpoint",
                     "context",
-                    "summary attempted a tool call",
+                    "policy returned an invalid cut or empty summary",
                 ));
             }
-            let summary: String = reply
-                .items
-                .iter()
-                .filter_map(|item| {
-                    if let Item::Message { role, content } = item {
-                        if role == "assistant" {
-                            Some(content)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                })
-                .flatten()
-                .filter_map(|block| {
-                    if let Block::Text { text } = block {
-                        Some(text.as_str())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            if summary.trim().is_empty() {
-                return Err(Fault::new("ProviderFailure", "context", "empty summary"));
+            let sources: BTreeSet<_> = path.iter().map(|r| r.sequence).collect();
+            let mut namespaces = BTreeSet::new();
+            for state in &plan.states {
+                if state.namespace.trim().is_empty()
+                    || !namespaces.insert(state.namespace.clone())
+                    || state.references.iter().any(|id| !sources.contains(id))
+                {
+                    return Err(Fault::new(
+                        "InvalidCheckpoint",
+                        "context",
+                        "invalid extension namespace or source reference",
+                    ));
+                }
+            }
+            if plan.states.iter().any(|state| state.required) {
+                let _: InterpretReply = cx
+                    .call(
+                        INTERPRETER,
+                        &InterpretRequest {
+                            states: plan.states.clone(),
+                        },
+                    )
+                    .await?;
             }
             let (read, modified, uncertainties) = evidence(&path);
-            let kind = if input.action == "branch_summary" {
+            let kind = if reason == c::Reason::BranchSummary {
                 "branch_summary"
             } else {
                 "compaction"
             };
             let mut payload = json!({
-                "summary": summary,
-                "usage": reply.usage,
+                "summary": plan.summary,
                 "request_id": request_id,
+                "usage": plan.usage,
+                "reason": reason,
                 "read_files": read,
                 "modified_files": modified,
                 "uncertainties": uncertainties,
             });
             if kind == "compaction" {
-                payload["first_kept"] = json!(path.get(cut).map_or(0, |r| r.sequence));
-                payload["source_ids"] =
-                    json!(path[..cut].iter().map(|r| r.sequence).collect::<Vec<_>>());
+                payload["first_kept"] = json!(path.get(plan.cut).map_or(0, |r| r.sequence));
+                payload["source_ids"] = json!(
+                    path[..plan.cut]
+                        .iter()
+                        .map(|r| r.sequence)
+                        .collect::<Vec<_>>()
+                );
             } else {
                 payload["origin_session"] =
                     json!(path.first().map_or(cx.session_id(), |r| r.session_id));
                 payload["origin_ids"] = json!(path.iter().map(|r| r.sequence).collect::<Vec<_>>());
             }
-            cx.emit("model_usage", reply.usage)?;
-            append(&cx, kind, payload).await?;
-            let _: u64 = cx
+            let mut entries: Vec<_> = plan
+                .states
+                .into_iter()
+                .map(|state| RecordDraft {
+                    kind: "extension_state".into(),
+                    payload: json!(state),
+                })
+                .collect();
+            entries.insert(
+                0,
+                RecordDraft {
+                    kind: "model_request".into(),
+                    payload: json!({
+                        "request_id": request_id,
+                        "purpose": "compaction",
+                        "target": input.target,
+                    }),
+                },
+            );
+            entries.push(RecordDraft {
+                kind: kind.into(),
+                payload,
+            });
+            if cx.scope.cancellation().is_cancelled() {
+                return Err(Fault::new(
+                    "Cancelled",
+                    "context",
+                    "checkpoint cancelled before commit",
+                ));
+            }
+            let committed: StoreReply = cx
                 .call(
-                    eden_plugin_sdk::protocol::runtime::HOST,
-                    &eden_plugin_sdk::protocol::runtime::HostRequest::InvalidateSnapshot,
+                    STORE,
+                    &StoreRequest::AppendChecked {
+                        run_id: cx.run_id(),
+                        session_id: before.session_id,
+                        sequence: before.sequence,
+                        head: before.active_head,
+                        branch: before.active_branch,
+                        entries,
+                    },
                 )
                 .await?;
-            let history: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
-            projected = project_records(&history.records)?;
+            cx.invalidate_snapshot().await?;
+            cx.emit(
+                "committed",
+                json!({ "sequence": committed.sequence, "kind": kind }),
+            )?;
+            projected = project_records(&committed.records)?;
+            extension_items = interpreted(&active_path(&committed.records)?, &cx).await?;
+        } else {
+            cx.emit(
+                "compaction_skipped",
+                json!({ "reason": "no_older_context" }),
+            )?;
         }
     }
     let mut items = vec![system_item(&input)];
@@ -756,9 +776,126 @@ pub(crate) async fn context(
     })
 }
 
+pub(crate) async fn summary_policy(
+    request: c::Request,
+    cx: CallContext,
+    settings: Settings,
+) -> Result<Option<c::Plan>, Fault> {
+    let request_id = request.request_id;
+    let input = request.input;
+    let path = if request.reason == c::Reason::BranchSummary {
+        input.records.clone()
+    } else {
+        active_path(&input.records)?
+    };
+    let cut = request.suggested_cut.min(request.max_cut);
+    if cut == 0 {
+        return Ok(None);
+    }
+    let extension_items = interpreted(&path, &cx).await?;
+    let split = cut < path.len()
+        && path[cut].kind != "user_shell"
+        && !(path[cut].kind == "message"
+            && matches!(decode(&path[cut]), Ok(Item::Message { role, .. }) if role == "user"))
+        && path[..cut].iter().any(|record| {
+            (record.kind == "user_shell" && record.payload["exclude_from_context"] != true)
+                || (record.kind == "message"
+                    && matches!(decode(record), Ok(Item::Message { role, .. }) if role == "user"))
+        });
+    let allowance = settings.summary_allowance(split, input.limits.max_output_tokens);
+    let mut summary_items = vec![Item::Message {
+        role: "system".into(),
+        content: vec![Block::Text {
+            text: format!(
+                "Summarize this coding conversation for continuation. Use headings: Goal, \
+                 Constraints, Progress (Done/In Progress/Blocked), Key Decisions, Next Steps, \
+                 Critical Context. Preserve user requirements, exact paths/functions/errors, \
+                 failed checks, pending work, and unknown external tool effects. Update previous \
+                 summaries rather than discarding them. Do not continue the task. {}",
+                input.instructions
+            ),
+        }],
+    }];
+    let summary_projection = summary_safe_items(summary_prefix(&path, cut, &input.records)?);
+    summary_items.push(text_item(format!(
+        "Conversation to summarize (attachments remain in raw history):\n{}",
+        serde_json::to_string(&summary_projection).map_err(|e| Fault::new(
+            "InvalidInput",
+            "context",
+            e.to_string()
+        ))?
+    )));
+    summary_items.extend(extension_items.clone());
+    cx.emit(
+        "model_request",
+        json!({ "request_id": request_id, "purpose": "summary", "target": input.target }),
+    )?;
+    let reply = super::provider_retry_with_history(
+        &cx,
+        &ModelInput {
+            target: input.target.clone(),
+            max_output_tokens: Some(allowance),
+            items: summary_items,
+            tools: vec![],
+        },
+        &settings,
+        false,
+    )
+    .await?;
+    cx.emit(
+        "compaction_usage",
+        json!({ "request_id": request_id, "purpose": "summary", "usage": reply.usage }),
+    )?;
+    if reply
+        .items
+        .iter()
+        .any(|item| matches!(item, Item::ToolCall { .. }))
+    {
+        return Err(Fault::new(
+            "ProviderFailure",
+            "context",
+            "summary attempted a tool call",
+        ));
+    }
+    let summary: String = reply
+        .items
+        .iter()
+        .filter_map(|item| {
+            if let Item::Message { role, content } = item {
+                if role == "assistant" {
+                    Some(content)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .flatten()
+        .filter_map(|block| {
+            if let Block::Text { text } = block {
+                Some(text.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    if summary.trim().is_empty() {
+        return Err(Fault::new("ProviderFailure", "context", "empty summary"));
+    }
+
+    Ok(Some(c::Plan {
+        cut,
+        summary,
+        states: vec![],
+        usage: reply.usage,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
     fn record(sequence: u64, kind: &str, payload: Value) -> Record {
         Record {
             sequence,

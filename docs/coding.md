@@ -144,3 +144,7 @@ If one line alone exceeds the byte budget, `details.partial_line` is true and th
 `edit` accepts either the existing `old_text`/`new_text` pair or an `edits` array containing those pairs, with one shared `path` and optional `mode`. Every nonempty match is checked against the original file; missing, ambiguous, or overlapping matches reject the entire batch before writing. After validation, Eden writes the replacement once. This validation guarantee is not a crash-atomic filesystem transaction. UTF-8 BOM bytes are preserved, CRLF and LF compare equivalently, and replacement newlines follow the original file's first newline style.
 
 The default `mode: "strict"` requires exact text after newline normalization. Explicit `mode: "tolerant"` additionally maps U+2018/U+2019 to a straight single quote, U+201C/U+201D to a straight double quote, and U+2010–U+2014/U+2212 to `-`, and ignores trailing ASCII spaces and tabs at line ends. It performs no spelling, indentation, or approximate-distance search. Multiple matches after normalization remain errors even if one is exact. `details.mode` reports the requested mode; each entry in `details.edits` reports its original batch index, original half-open byte range, 1-based line positions, and `diff.before`/`diff.after` text.
+
+## Replaceable compaction
+
+Default summaries and optional notes now use the same [public compaction policy and checkpoint contract](compaction.md). The context coordinator owns conditional durable commits; the selected policy owns preparation.

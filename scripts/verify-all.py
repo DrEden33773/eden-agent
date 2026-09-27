@@ -23,6 +23,7 @@ from verification import (
 )
 
 SUITES = {
+    "notes": ("verify-notes.py", "notes-verification.json"),
     "cache-warmer": ("verify-cache-warmer.py", "cache-warmer-verification.json"),
     "delivery": ("verify-delivery.py", "delivery-verification.json"),
     "native": ("verify.py", "verification.json"),
@@ -104,6 +105,7 @@ def suite_order() -> list[str]:
             "cloud-models",
             "oauth-models",
             "presentation",
+            "notes",
             "cache-warmer",
             "native",
         ]
@@ -119,6 +121,7 @@ def suite_order() -> list[str]:
             "delivery",
             "cloud-models",
             "oauth-models",
+            "notes",
             "cache-warmer",
             "native",
         ]
@@ -133,6 +136,7 @@ def suite_order() -> list[str]:
         "router-models",
         "cloud-models",
         "oauth-models",
+        "notes",
         "cache-warmer",
         "native",
     ]

@@ -201,6 +201,14 @@ async fn provider_retry(
     input: &ModelInput,
     settings: &Settings,
 ) -> Result<ModelReply, Fault> {
+    provider_retry_with_history(cx, input, settings, true).await
+}
+async fn provider_retry_with_history(
+    cx: &CallContext,
+    input: &ModelInput,
+    settings: &Settings,
+    persist_errors: bool,
+) -> Result<ModelReply, Fault> {
     for attempt in 0..=settings.max_retries {
         match cx.call(PROVIDER, input).await {
             Ok(reply) => return Ok(reply),
@@ -208,12 +216,13 @@ async fn provider_retry(
                 if error.code == "Cancelled" {
                     return Err(error);
                 }
-                append(
-                    cx,
-                    "model_error",
-                    json!({ "attempt": attempt, "error": error }),
-                )
-                .await?;
+                let diagnostic = json!({ "attempt": attempt, "error": error });
+                if persist_errors {
+                    append(cx, "model_error", diagnostic).await?;
+                } else {
+                    // Preparation must retain its captured commit precondition through retries.
+                    cx.emit("compaction_error", diagnostic)?;
+                }
                 if error.code != "RetryableProviderFailure" || attempt == settings.max_retries {
                     return Err(error);
                 }
@@ -437,7 +446,7 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
                             target: input.target.clone(),
                             resources: resources.clone(),
                             tools: selected_tools.clone(),
-                            action: "compact".into(),
+                            action: "overflow".into(),
                             records: history.records,
                             instructions: String::new(),
                             limits: limits.clone(),
@@ -564,7 +573,7 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
                         target: input.target.clone(),
                         resources: resources.clone(),
                         tools: selected_tools.clone(),
-                        action: "compact".into(),
+                        action: "post_response".into(),
                         records: history.records,
                         instructions: String::new(),
                         limits: limits.clone(),
@@ -588,6 +597,7 @@ fn descriptor() -> Descriptor {
         provides: vec![
             CODING_CONTROL.into(),
             LOOP.into(),
+            eden_plugin_sdk::protocol::compaction::POLICY.into(),
             CONTEXT.into(),
             QUEUE.into(),
         ],
@@ -596,6 +606,7 @@ fn descriptor() -> Descriptor {
 fn create(config: Value) -> Result<Package, Fault> {
     let settings = Settings::parse(config)?;
     let loop_settings = settings.clone();
+    let policy_settings = settings.clone();
     let control_settings = settings.clone();
     let queue_lock = Arc::new(tokio::sync::Mutex::new(()));
     Ok(Package::new("coding")
@@ -604,6 +615,10 @@ fn create(config: Value) -> Result<Package, Fault> {
             async move { Ok(state) }
         })
         .service(LOOP, move |input, cx| run(input, cx, loop_settings.clone()))
+        .service(
+            eden_plugin_sdk::protocol::compaction::POLICY,
+            move |input, cx| context::summary_policy(input, cx, policy_settings.clone()),
+        )
         .service(CONTEXT, move |input, cx| {
             context(input, cx, settings.clone())
         })

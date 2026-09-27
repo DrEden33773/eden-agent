@@ -201,6 +201,16 @@ fn copy_records(
                 );
             }
         }
+        if copy.kind == "extension_state"
+            && let Some(references) = copy.payload["references"].as_array()
+        {
+            copy.payload["references"] = json!(
+                references
+                    .iter()
+                    .filter_map(|v| v.as_u64().and_then(|id| mapping.get(&id).copied()))
+                    .collect::<Vec<_>>()
+            );
+        }
         if copy.kind == "presentation_static" {
             eden_protocol::presentation::remap_static_record(&mut copy.payload, &mapping);
         }
@@ -1268,6 +1278,34 @@ mod tests {
         .unwrap_err();
         assert!(error.message.contains("fork"), "{error}");
         std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn notes_sources_follow_fork_identity_and_drop_omitted_siblings() {
+        let records = vec![
+            r(1, None, "session", json!({})),
+            r(2, Some(1), "message", json!({ "sibling": true })),
+            r(3, Some(1), "message", json!({ "kept": true })),
+            r(
+                4,
+                Some(3),
+                "extension_state",
+                json!({
+                    "namespace": "eden.notes",
+                    "version": 1,
+                    "required": true,
+                    "summary": "notes",
+                    "references": [1, 2, 3],
+                    "value": { "text": "notes" },
+                }),
+            ),
+        ];
+        let copied = copy_records(&records, &CopyKind::Fork, Some(4), 99, false).unwrap();
+        assert_eq!(copied.len(), 3);
+        assert_eq!(copied[2].payload["references"], json!([1, 2]));
+        assert_eq!(copied[1].payload["kept"], true);
+        assert!(copied.iter().all(|r| r.session_id == 99));
+        let public = copy_records(&records, &CopyKind::Migrate, None, 100, true).unwrap();
+        assert!(!public.iter().any(|r| r.kind == "extension_state"));
     }
     #[test]
     fn copied_compaction_boundary_stays_on_its_branch() {

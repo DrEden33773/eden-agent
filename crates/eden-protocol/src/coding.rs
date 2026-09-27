@@ -124,8 +124,8 @@ pub struct ContextInput {
     #[serde(default)]
     pub tools: Option<Vec<ToolDefinition>>,
     /// `""` or `"project"` for a normal projection, `"compact"` for compaction,
-    /// and `"branch_summary"` to carry work across a branch change. A producer
-    /// that sends anything else is refused by the context role.
+    /// `"overflow"` or `"post_response"` for automatic recovery, and `"branch_summary"`
+    /// to carry work across a branch change. Other actions are refused.
     #[serde(default)]
     pub action: String,
     #[serde(default)]
@@ -303,6 +303,17 @@ pub enum StoreRequest {
         run_id: u64,
         entries: Vec<RecordDraft>,
     },
+    /// Commit a checkpoint only against the exact history used to generate it.
+    /// The store checks these identities under the same lock as its atomic append.
+    /// A conflict leaves every entry uncommitted, including extension state.
+    AppendChecked {
+        run_id: u64,
+        session_id: u64,
+        sequence: u64,
+        head: Option<u64>,
+        branch: String,
+        entries: Vec<RecordDraft>,
+    },
     Navigate {
         target: u64,
         branch: String,
@@ -415,6 +426,10 @@ pub struct ModelLimits {
 // Field and variant names state the payload; see docs/development-checks.md#doc-comments.
 #[allow(missing_docs)]
 pub struct ExtensionState {
+    /// Same-session source record identities, remapped during copy/fork. Missing
+    /// sources are omitted; opaque value must not carry hidden history pointers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<u64>,
     pub namespace: String,
     pub version: u32,
     pub required: bool,

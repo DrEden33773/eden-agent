@@ -1,0 +1,33 @@
+# Compaction policies and durable notes
+
+The default coding context coordinates `eden.compaction-policy.v1`. Selecting another policy leaves the loop, provider, context and store roles in place. The bundled `coding` package supplies the default summary policy; the optional `notes` package supplies fresh-window notes, and the separate `recall` package supplies original-history retrieval. The installer ships both optional libraries without enabling them.
+
+## Selection and configuration
+
+Mount the `notes` and `recall` packages using their native descriptors and the matching SDK release. Bind `eden.compaction-policy.v1`, `eden.record-interpreter.v1` and `eden.state-migrator.v1` to `notes`. Bind `eden.history-recall.v1`, `eden.history-recall-tools.v1` and `eden.history-recall-tool.v1` to `recall`. Keep the existing coding loop/context, provider and store bindings. Add the [recall tool contribution](../plugins/recall/README.md#tool-contribution) to coding-tools and include `history_recall` among selected tools. Use the existing explicit composition switch when changing a saved session's binding; installing a package alone does not select it.
+
+Notes exposes the A2 configuration description and validation contract. Its defaults are `max_output_tokens: 2048`, `timeout_ms: 60000`, and `max_input_bytes: 262144`. Valid ranges are 128–16384 output tokens, 1–300000 milliseconds and 1024–4194304 input bytes. Changes rebuild the notes instance through the existing configuration manager. Provider limits may impose a smaller output budget. Notes uses the existing auxiliary Generate support: catalog-selected OpenAI or DeepSeek Chat Completions. Unsupported targets fail without committing a checkpoint. The default summary retains its existing provider support.
+
+Manual, threshold, provider-overflow and post-response triggers select the same policy. The coding control's auto-compaction setting gates all automatic triggers. Notes permits one bounded auxiliary preparation attempt; it does not retry indefinitely or execute generated tools. A hard input-budget refusal, timeout, empty answer, generated tool call or inference failure leaves the old projection. Branch-summary explicitly returns Unsupported for notes; navigate without carrying a summary, or select the summary policy. The default summary supports branch-summary and keeps its recent-context retention behavior.
+
+## Preparation and commit
+
+The public request carries the reason, captured history, current projected items, a suggested retention cut and the maximum safe cut before pending queue delivery. A policy returns an optional plan with a cut, public summary, required extension states and usage. Preparation must not write history. The coordinator validates the cut, nonempty summary, unique state namespaces, declared source references and required interpretation before committing.
+
+`StoreRequest::AppendChecked` atomically compares session identity, committed revision, active head and branch under the store's append lock. Notes state and the compaction checkpoint are one durable transaction. A mismatch rejects the complete batch as `CheckpointConflict`, including duplicate submissions. The public checkpoint owns the source range and retained boundary; there is no in-memory projection activation before the store receipt. A successful commit invalidates B's old provider snapshots before returning the new projection. Cancellation before commit does not submit the checkpoint; a commit that has already durably completed remains a committed transaction, even if the caller disconnects while observing its completion. Historical tools are never replayed by projection or recall.
+
+The default store persists a synced transaction envelope and updates its memory only after successful persistence. A storage failure with an uncertain tail makes the writer unavailable until explicit recovery. This is Eden's local transaction guarantee; the fixed Codex notes/history reference does not establish an atomic save-before-window-switch guarantee for its backend.
+
+## Recovery, branches and copies
+
+On reopen, the current ancestor path determines both the checkpoint and the latest state per namespace. `eden.notes` version 1 requires an interpreter; missing or unsupported required state rejects model continuation before a provider request. Its public summary remains readable without the plugin. The interpreter supplies a recall hint, while the checkpoint supplies the notes; the original history is not automatically reinserted into the model request.
+
+`ExtensionState.references` declares same-session source record identities. Copy and fork remap surviving references to the new session's sequence numbers and omit removed records. Opaque state values must not hide history pointers; human text is not parsed as an identifier. Notes stores its text in the value and its sources in the declared reference list. Recall defaults to the selected ancestor path, excluding sibling branches. Full backups preserve notes state; filtered reading JSONL includes the public summary when extensions are selected and omits opaque values. Reading JSONL is not a restore format.
+
+Existing v2 summary history remains readable and can continue under the selected policy. Version 1 history uses the existing explicit upgrade-copy flow. The notes migrator retains version 1 state; unknown notes versions require an explicit preview that reports replacement of opaque state by its public summary. Preview and apply must agree before creating the destination. A public-only migration can discard required notes state and retain the public compaction summary for the default policy, with the existing loss preview. Source history is never rewritten. Unrelated required namespaces are rejected by the notes migrator.
+
+## Usage and acceptance
+
+Notes inference uses auxiliary purpose `notes`; cache warming retains its separate purpose and budget. Neither feeds foreground model-response calibration or recursively publishes a warming snapshot. Checkpoint revision is independent of strategy choice. The NT-01–06 and CO-01 installed scenarios are exercised by `scripts/verify-notes.py`, alongside store, copy/export, notes and recall behavior tests. Native authors compile against the frozen SDK after the host is built. Provider cache benefits and real-account model quality are separate from these controlled mechanism checks.
+
+This release uses host/SDK pairing `eden-native-0.10.0`, with the C ABI table still at version 1. Rebuild native authors and manifests together. The serialized policy contract, conditional store operation and declared extension references are new; older binaries are refused by exact pairing rather than silently ignoring them.

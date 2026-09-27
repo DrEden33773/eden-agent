@@ -1,0 +1,15 @@
+[package]
+name = "eden-cache-warmer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+[lib]
+crate-type = ["cdylib", "rlib"]
+[dependencies]
+eden-plugin-sdk.workspace = true
+serde.workspace = true
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+[lints]
+workspace = true

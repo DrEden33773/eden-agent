@@ -72,6 +72,15 @@ pub struct Binding {
 #[serde(tag = "op", rename_all = "snake_case")]
 #[allow(missing_docs)]
 pub enum HostRequest {
+    /// Current policy-neutral context identity, independent of summary record sequences.
+    SnapshotRevision,
+    /// Context identity captured when this invocation was admitted, before any asynchronous preparation.
+    InvocationSnapshotRevision,
+    /// Atomically bootstrap a subscription at the current cursor and foreground run.
+    EventPosition,
+    /// Invalidate prepared context and cancel/join auxiliary calls before publishing a
+    /// new projection. Strategies call this at their successful projection commit boundary.
+    InvalidateSnapshot,
     Environment,
     Call {
         scope: String,
@@ -117,4 +126,12 @@ pub struct JobStatus {
 pub struct EventBatch {
     pub cursor: u64,
     pub events: Vec<Event>,
+}
+
+/// A subscription can start after retained history without losing the current foreground state.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct EventPosition {
+    pub cursor: u64,
+    pub foreground_run: Option<u64>,
 }

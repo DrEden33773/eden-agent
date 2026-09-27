@@ -14,11 +14,32 @@ pub(crate) async fn request(
     target: &ModelTarget,
     credential: &CredentialReply,
     input: &ModelInput,
-    mut emit: impl FnMut(&str, Value) -> Result<(), Fault>,
+    emit: impl FnMut(&str, Value) -> Result<(), Fault>,
 ) -> Result<ModelReply, Fault> {
     if target.api == "bedrock-converse-stream" {
         return crate::bedrock::request(target, credential, input, emit).await;
     }
+    let prepared = prepare(target, input)?;
+    send(target, credential, input, &prepared, emit).await
+}
+
+#[derive(Clone)]
+pub(crate) struct Prepared {
+    suffix: &'static str,
+    output_key: String,
+    pub(crate) body: Value,
+    options: RequestOptions,
+}
+impl Prepared {
+    pub(crate) fn set_output_limit(&mut self, limit: u32) -> Result<(), Fault> {
+        if limit == 0 {
+            return Err(wire::failure("auxiliary output limit must be positive"));
+        }
+        self.body[&self.output_key] = serde_json::json!(limit);
+        Ok(())
+    }
+}
+pub(crate) fn prepare(target: &ModelTarget, input: &ModelInput) -> Result<Prepared, Fault> {
     let options = RequestOptions {
         profile: if target.provider == "deepseek" {
             Profile::Deepseek
@@ -37,8 +58,7 @@ pub(crate) async fn request(
                 }
             }),
     };
-    let mut projected = input.clone();
-    projected.items = projection::items(input, target)?;
+
     let (suffix, mut body) = match target.api.as_str() {
         "openai-completions" => ("chat/completions", chat::project(input, target)?),
         "mistral-conversations" => ("chat/completions", mistral::project(input, target)?),
@@ -46,6 +66,8 @@ pub(crate) async fn request(
         "anthropic-messages" => ("v1/messages", anthropic::project(input, target)?),
         "pi-messages" => ("messages", crate::pi_messages::project(input, target)?),
         "openai-responses" | "azure-openai-responses" | "openai-codex-responses" => {
+            let mut projected = input.clone();
+            projected.items = projection::items(input, target)?;
             for item in &mut projected.items {
                 if let Item::ProviderState { provider, value } = item {
                     *provider = options.profile.state().into();
@@ -69,12 +91,58 @@ pub(crate) async fn request(
     if target.api == "openai-codex-responses" {
         crate::subscription::codex_body(&mut body);
     }
+    let output_key = target.compat["maxTokensField"]
+        .as_str()
+        .unwrap_or(if body.get("max_tokens").is_some() {
+            "max_tokens"
+        } else {
+            "max_completion_tokens"
+        })
+        .to_owned();
+    Ok(Prepared {
+        suffix,
+        output_key,
+        body,
+        options,
+    })
+}
+
+pub(crate) async fn send(
+    target: &ModelTarget,
+    credential: &CredentialReply,
+    input: &ModelInput,
+    prepared: &Prepared,
+    emit: impl FnMut(&str, Value) -> Result<(), Fault>,
+) -> Result<ModelReply, Fault> {
+    send_inner(target, credential, input, prepared, false, emit).await
+}
+pub(crate) async fn send_auxiliary(
+    target: &ModelTarget,
+    credential: &CredentialReply,
+    input: &ModelInput,
+    prepared: &Prepared,
+) -> Result<ModelReply, Fault> {
+    send_inner(target, credential, input, prepared, true, |_, _| Ok(())).await
+}
+async fn send_inner(
+    target: &ModelTarget,
+    credential: &CredentialReply,
+    input: &ModelInput,
+    prepared: &Prepared,
+    auxiliary: bool,
+    mut emit: impl FnMut(&str, Value) -> Result<(), Fault>,
+) -> Result<ModelReply, Fault> {
+    let Prepared {
+        suffix,
+        body,
+        options,
+        ..
+    } = prepared;
     let url = routes::endpoint(target, credential, suffix)?;
     if target.api == "openai-codex-responses"
-        && let Some(reply) = crate::codex_socket::request(
-            target, credential, input, &options, &body, &url, &mut emit,
-        )
-        .await?
+        && let Some(reply) =
+            crate::codex_socket::request(target, credential, input, options, body, &url, &mut emit)
+                .await?
     {
         return Ok(reply);
     }
@@ -159,7 +227,11 @@ pub(crate) async fn request(
     let mut sse = wire::Sse::default();
     let mut responses = wire::ResponseOutput::default();
     let mut pi = crate::pi_messages::Decoder::new(target.clone());
-    let mut chat = chat::Decoder::new(target.clone());
+    let mut chat = if auxiliary {
+        chat::Decoder::auxiliary(target.clone())
+    } else {
+        chat::Decoder::new(target.clone())
+    };
     let mut anthropic = anthropic::Decoder::new(target.clone());
     let mut gemini = gemini::Decoder::new(target.clone());
     let mut mistral = mistral::Decoder::new(target.clone());
@@ -239,7 +311,7 @@ pub(crate) async fn request(
                         return Ok(reply);
                     }
                     Some("response.incomplete") => {
-                        return Err(wire::incomplete(&event["response"], input, &options));
+                        return Err(wire::incomplete(&event["response"], input, options));
                     }
                     Some("response.failed" | "error") => {
                         return Err(wire::provider_fault(None, &event));
@@ -284,6 +356,28 @@ fn retry_delay_at(headers: &reqwest::header::HeaderMap, now: std::time::SystemTi
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn replay_changes_only_output_limit_and_keeps_projected_prefix() {
+        let target = crate::projection::test_target("openai-completions");
+        let input = ModelInput {
+            target: Some(target.clone()),
+            max_output_tokens: None,
+            items: vec![Item::Message {
+                role: "user".into(),
+                content: vec![eden_protocol::coding::Block::Text {
+                    text: "stable prefix".into(),
+                }],
+            }],
+            tools: vec![],
+        };
+        let prepared = prepare(&target, &input).unwrap();
+        let mut replay = prepared.clone();
+        replay.set_output_limit(1).unwrap();
+        let mut expected = prepared.body.clone();
+        expected["max_completion_tokens"] = serde_json::json!(1);
+        assert_eq!(replay.body, expected);
+        assert!(replay.body.to_string().contains("stable prefix"));
+    }
     #[test]
     fn retry_after_accepts_seconds_and_http_dates_without_exposing_header() {
         let mut headers = reqwest::header::HeaderMap::new();

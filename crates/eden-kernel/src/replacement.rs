@@ -233,6 +233,25 @@ impl Kernel {
                 "unknown instance",
             ));
         }
+        if enabled
+            && [
+                p::coding::PROVIDER,
+                p::coding::CONTEXT,
+                p::resources::SOURCE,
+            ]
+            .iter()
+            .any(|contract| {
+                self.router
+                    .graph
+                    .binding("", contract)
+                    .is_ok_and(|binding| {
+                        ids.contains(&binding.tail)
+                            || binding.wrappers.iter().any(|id| ids.contains(id))
+                    })
+            })
+        {
+            self.router.events.invalidate_snapshots();
+        }
         let mut gated = self
             .router
             .reconfiguring

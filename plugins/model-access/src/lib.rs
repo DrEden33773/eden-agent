@@ -23,6 +23,7 @@ use std::sync::{
 };
 use wire::{Sse, failure};
 mod anthropic;
+mod auxiliary;
 mod bedrock;
 mod catalog;
 mod chat;
@@ -61,7 +62,7 @@ impl Profile {
         }
     }
 }
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct RequestOptions {
     profile: Profile,
     max_output_tokens: Option<u32>,
@@ -182,6 +183,7 @@ fn descriptor() -> Descriptor {
             eden_protocol::models::MODEL_MANAGER.into(),
             eden_protocol::models::CREDENTIAL_SOURCE.into(),
             eden_protocol::models::AUTH.into(),
+            eden_protocol::auxiliary::PROVIDER.into(),
             MODEL_INFO.into(),
             PROVIDER.into(),
         ],
@@ -208,6 +210,8 @@ fn create(mut config: Value) -> Result<Package, Fault> {
         config
     })
     .map_err(|_| failure("invalid model-access configuration"))?;
+    let auxiliary_state = Arc::new(auxiliary::State::default());
+    let package = auxiliary::register(package, auxiliary_state.clone());
     let config = Arc::new(config);
     let info_config = config.clone();
     Ok(package
@@ -217,6 +221,7 @@ fn create(mut config: Value) -> Result<Package, Fault> {
         })
         .service(PROVIDER, move |input: ModelInput, cx| {
             let config = config.clone();
+            let auxiliary_state = auxiliary_state.clone();
             async move {
                 let cancel = cx.scope.cancellation();
                 let attempt_id = format!(
@@ -238,6 +243,22 @@ fn create(mut config: Value) -> Result<Package, Fault> {
                                 cx.emit(kind, payload)
                             };
                             if let Some(target) = &input.target {
+                                if input.max_output_tokens.is_none()
+                                    && !(target.api == "openai-completions"
+                                        && matches!(
+                                            target.provider.as_str(),
+                                            "openai" | "deepseek"
+                                        ))
+                                {
+                                    cx.emit(
+                                        "auxiliary_unavailable",
+                                        serde_json::json!({
+                                            "reason": "unsupported",
+                                            "provider": target.provider,
+                                            "api": target.api,
+                                        }),
+                                    )?;
+                                }
                                 let credentials: eden_protocol::models::CredentialReply = cx
                                     .call(
                                         eden_protocol::models::CREDENTIAL_SOURCE,
@@ -248,8 +269,29 @@ fn create(mut config: Value) -> Result<Package, Fault> {
                                         },
                                     )
                                     .await?;
-                                targeted::request(target, &credentials, &input, emit).await
+                                if input.max_output_tokens.is_none()
+                                    && target.api == "openai-completions"
+                                    && matches!(target.provider.as_str(), "openai" | "deepseek")
+                                {
+                                    let prepared = targeted::prepare(target, &input)?;
+                                    auxiliary::capture(&auxiliary_state, &cx, target, &prepared)
+                                        .await?;
+                                    targeted::send(target, &credentials, &input, &prepared, emit)
+                                        .await
+                                } else {
+                                    targeted::request(target, &credentials, &input, emit).await
+                                }
                             } else {
+                                if input.max_output_tokens.is_none() {
+                                    cx.emit(
+                                        "auxiliary_unavailable",
+                                        serde_json::json!({
+                                            "reason": "unsupported",
+                                            "provider": "legacy",
+                                            "api": "responses",
+                                        }),
+                                    )?;
+                                }
                                 let settings = config.settings()?;
                                 request(
                                     &settings.endpoint,

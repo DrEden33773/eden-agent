@@ -1277,6 +1277,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "eden-cache-warmer"
+version = "0.1.0"
+dependencies = [
+ "eden-plugin-sdk",
+ "serde",
+ "tokio",
+]
+
+[[package]]
 name = "eden-cli"
 version = "0.1.0"
 dependencies = [

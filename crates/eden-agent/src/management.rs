@@ -645,6 +645,8 @@ impl Session {
                     },
                     _ = std::future::ready(()) => {}
                 }
+                session.0.events.invalidate_snapshots();
+                session.0.events.settle_auxiliary().await;
                 let _: c::StoreReply = session
                     .service(
                         run_id,
@@ -774,6 +776,8 @@ impl Session {
     /// Atomically reload text resources while the session is idle.
     pub fn reload_resources(&self) -> Result<u64, Fault> {
         self.start(true, move |session, run_id, _| async move {
+            session.0.events.invalidate_snapshots();
+            session.0.events.settle_auxiliary().await;
             as_terminal(
                 session
                     .service::<_, eden_protocol::resources::ResourceReply>(

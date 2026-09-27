@@ -38,7 +38,7 @@ class Composition(TypedDict):
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-CONTRACT = "eden-native-0.8.0"
+CONTRACT = "eden-native-0.9.0"
 ROLES = ["eden.agent-loop.v1", "eden.context.v1", "eden.provider.v1", "eden.tool.v1"]
 
 
@@ -124,8 +124,19 @@ def install(
                     "eden.model-manager.v1",
                     "eden.credential-source.v1",
                     "eden.auth.v1",
+                    "eden.auxiliary-model.v1",
                     "eden.model-info.v1",
                     "eden.coding-provider.v1",
+                ],
+            ),
+            (
+                "cache-warmer",
+                [
+                    "eden.instance-ready.v1",
+                    "eden.cache-warmer.watch.v1",
+                    "eden.cache-warmer.work.v1",
+                    "eden.cache-warmer.v1",
+                    "eden.configuration.v1",
                 ],
             ),
             ("local-history", ["eden.session-store.v2"]),
@@ -192,9 +203,20 @@ def install(
                     "eden.session-store.v2",
                     "eden.submission-queue.v2",
                 ]
+            if pkg == "cache-warmer":
+                manifest["requires"] = ["eden.auxiliary-model.v1"]
             composition["packages"].append(manifest)
             composition["roles"].update(
-                {role: pkg for role in roles if role != "eden.instance-stop.v1"}
+                {
+                    role: pkg
+                    for role in roles
+                    if role
+                    not in {
+                        "eden.instance-stop.v1",
+                        "eden.instance-ready.v1",
+                        "eden.configuration.v1",
+                    }
+                }
             )
     if not controlled:
         shutil.copy2(

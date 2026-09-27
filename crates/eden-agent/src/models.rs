@@ -107,6 +107,8 @@ impl Session {
                     let target = reply.target.ok_or_else(|| {
                         Fault::new("Unavailable", "model-selection", "model is not selectable")
                     })?;
+                    session.0.events.invalidate_snapshots();
+                    session.0.events.settle_auxiliary().await;
                     session
                         .commit(
                             run_id,

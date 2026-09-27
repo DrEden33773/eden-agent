@@ -1,0 +1,17 @@
+[package]
+name = "author-cache-warmer"
+version = "0.1.0"
+edition = "2024"
+[lib]
+crate-type = ["cdylib"]
+path = "../../../plugins/cache-warmer/src/lib.rs"
+[workspace]
+[dependencies]
+eden-plugin-sdk = { path = "../../../crates/eden-plugin-sdk", version = "0.1.0" }
+serde = { version = "1.0.229", features = ["derive"] }
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["test-util"] }
+[profile.dev]
+debug = 1
+[profile.test]
+debug = 1

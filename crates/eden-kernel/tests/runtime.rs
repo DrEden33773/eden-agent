@@ -7,6 +7,13 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::Path};
 
 async fn mount(packages: Vec<Package>, graph: Value) -> Kernel {
+    mount_events(packages, graph, Events::new(1)).await
+}
+async fn mount_events(
+    packages: Vec<Package>,
+    graph: Value,
+    events: std::sync::Arc<Events>,
+) -> Kernel {
     let manifests: Vec<_> = packages
         .iter()
         .map(|package| {
@@ -34,7 +41,7 @@ async fn mount(packages: Vec<Package>, graph: Value) -> Kernel {
         "runtime": graph,
     }))
     .unwrap();
-    Kernel::load_embedded(composition, Path::new("."), 1, Events::new(1), local)
+    Kernel::load_embedded(composition, Path::new("."), 1, events, local)
         .await
         .unwrap()
 }
@@ -316,5 +323,251 @@ async fn lr_management_gate_retains_unrelated_calls_and_rejects_retained_handle(
     );
     kernel.set_reconfiguring(&["tail".into()], false).unwrap();
     assert_eq!(invoke(&kernel, "x").await, "tail(x)");
+    kernel.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn auxiliary_author_cannot_reenter_foreground_and_wait_on_itself() {
+    let package = tail()
+        .service(p::coding::PROVIDER, |_: Value, _| async { Ok(Value::Null) })
+        .service(
+            p::auxiliary::PROVIDER,
+            |_: p::auxiliary::Request, cx| async move {
+                cx.call::<_, Value>(p::coding::PROVIDER, &Value::Null).await
+            },
+        );
+    let kernel = mount(
+        vec![package],
+        json!({
+            "scopes": {
+                "": {
+                    "bindings": {
+                        (p::coding::PROVIDER): { "tail": "tail" },
+                        (p::auxiliary::PROVIDER): { "tail": "tail" },
+                    },
+                },
+            },
+        }),
+    )
+    .await;
+    let request = Request {
+        execution: None,
+        session_id: 1,
+        run_id: 0,
+        contract: p::auxiliary::PROVIDER.into(),
+        payload: json!({
+            "op": "generate",
+            "purpose": "test",
+            "timeout_ms": 1000,
+            "input": { "target": null, "items": [], "tools": [], "max_output_tokens": 1 },
+        }),
+    };
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        kernel.invoke(request, Cancellation::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.into_result().unwrap_err().code, "InvalidInput");
+    kernel.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn provider_preparation_keeps_admitted_revision_after_new_input() {
+    let events = Events::new(1);
+    let entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    let resume = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    let provider_entered = entered.clone();
+    let provider_resume = resume.clone();
+    let package = tail().service(p::coding::PROVIDER, move |_: Value, cx| {
+        let entered = provider_entered.clone();
+        let resume = provider_resume.clone();
+        async move {
+            entered.add_permits(1);
+            resume.acquire().await.unwrap().forget();
+            let admitted: u64 = cx
+                .call(
+                    p::runtime::HOST,
+                    &p::runtime::HostRequest::InvocationSnapshotRevision,
+                )
+                .await?;
+            let current = cx.snapshot_revision().await?;
+            Ok::<_, p::Fault>(json!({ "admitted": admitted, "current": current }))
+        }
+    });
+    let kernel = std::sync::Arc::new(
+        mount_events(
+            vec![package],
+            json!({
+                "scopes": { "": { "bindings": { (p::coding::PROVIDER): { "tail": "tail" } } } },
+            }),
+            events.clone(),
+        )
+        .await,
+    );
+    let worker_kernel = kernel.clone();
+    let worker = tokio::spawn(async move {
+        worker_kernel
+            .invoke(
+                Request {
+                    execution: None,
+                    session_id: 1,
+                    run_id: 1,
+                    contract: p::coding::PROVIDER.into(),
+                    payload: Value::Null,
+                },
+                Cancellation::default(),
+            )
+            .await
+    });
+    entered.acquire().await.unwrap().forget();
+    events.invalidate_snapshots();
+    resume.add_permits(1);
+    let result = worker.await.unwrap().into_result().unwrap();
+    assert!(result["admitted"].as_u64().unwrap() < result["current"].as_u64().unwrap());
+    kernel.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn auxiliary_consumers_receive_cleanup_failure_separately_from_the_reply() {
+    let package = tail()
+        .service(
+            p::auxiliary::PROVIDER,
+            |_: p::auxiliary::Request, cx| async move {
+                cx.scope.cleanup(async {
+                    Err(p::Fault::new(
+                        "CustomCleanup",
+                        "provider",
+                        "socket cleanup failed",
+                    ))
+                })?;
+                Ok::<_, p::Fault>(json!({ "items": [], "usage": { "tokens": 1 } }))
+            },
+        )
+        .service("test.auxiliary-consumer", |_: (), cx| async move {
+            let terminal = cx
+                .call_terminal(
+                    p::auxiliary::PROVIDER,
+                    &json!({
+                        "op": "generate",
+                        "purpose": "notes",
+                        "timeout_ms": 1000,
+                        "input": {
+                            "target": null,
+                            "items": [],
+                            "tools": [],
+                            "max_output_tokens": 1,
+                        },
+                    }),
+                )
+                .await?;
+            Ok::<_, p::Fault>(json!(terminal))
+        });
+    let kernel = mount(
+        vec![package],
+        json!({
+            "scopes": {
+                "": {
+                    "bindings": {
+                        (p::auxiliary::PROVIDER): { "tail": "tail" },
+                        "test.auxiliary-consumer": { "tail": "tail" },
+                    },
+                },
+            },
+        }),
+    )
+    .await;
+    let value = kernel
+        .invoke(
+            Request {
+                execution: None,
+                session_id: 1,
+                run_id: 0,
+                contract: "test.auxiliary-consumer".into(),
+                payload: Value::Null,
+            },
+            Cancellation::default(),
+        )
+        .await
+        .into_result()
+        .unwrap();
+    assert_eq!(value["cleanup_errors"][0]["code"], "CleanupFailure");
+    assert!(
+        value["cleanup_errors"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("socket cleanup failed")
+    );
+    assert_eq!(value["outcome"]["status"], "completed");
+    kernel.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn host_auxiliary_timeout_waits_for_the_author_cleanup_barrier() {
+    let cleanup_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    let entered = cleanup_entered.clone();
+    let provider_release = release.clone();
+    let package = tail().service(
+        p::auxiliary::PROVIDER,
+        move |_: p::auxiliary::Request, cx| {
+            let entered = entered.clone();
+            let release = provider_release.clone();
+            async move {
+                cx.scope.cleanup(async move {
+                    entered.add_permits(1);
+                    release.acquire().await.unwrap().forget();
+                    Ok(())
+                })?;
+                cx.scope.cancellation().cancelled().await;
+                Ok::<_, p::Fault>(Value::Null)
+            }
+        },
+    );
+    let kernel = std::sync::Arc::new(
+        mount(
+            vec![package],
+            json!({
+                "scopes": { "": { "bindings": { (p::auxiliary::PROVIDER): { "tail": "tail" } } } },
+            }),
+        )
+        .await,
+    );
+    let worker_kernel = kernel.clone();
+    let worker = tokio::spawn(async move {
+        worker_kernel
+            .invoke(
+                Request {
+                    execution: None,
+                    session_id: 1,
+                    run_id: 0,
+                    contract: p::auxiliary::PROVIDER.into(),
+                    payload: json!({
+                        "op": "generate",
+                        "purpose": "test",
+                        "timeout_ms": 10,
+                        "input": {
+                            "target": null,
+                            "items": [],
+                            "tools": [],
+                            "max_output_tokens": 1,
+                        },
+                    }),
+                },
+                Cancellation::default(),
+            )
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), cleanup_entered.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
+    assert!(!worker.is_finished());
+    release.add_permits(1);
+    assert_eq!(
+        worker.await.unwrap().into_result().unwrap_err().code,
+        "Timeout"
+    );
     kernel.shutdown().await.unwrap();
 }

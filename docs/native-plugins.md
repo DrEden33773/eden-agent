@@ -1,6 +1,6 @@
 # Native plugin contract
 
-The current development release pairs host and SDK exactly as `eden-native-0.8.0`, ABI version 1, on the same target triple. Authors use Rust 1.98.1. The host and each library own their Rust dependencies and runtimes. Libraries are trusted native code running with the host's permissions.
+The current development release pairs host and SDK exactly as `eden-native-0.9.0`, ABI version 1, on the same target triple. Authors use Rust 1.98.1. The host and each library own their Rust dependencies and runtimes. Libraries are trusted native code running with the host's permissions.
 
 ## Installation and selection
 
@@ -53,3 +53,7 @@ Every author can read `CallContext::host_environment()`. Object-shaped factory c
 Host/SDK pairing changed from `eden-native-0.7.0` to `eden-native-0.8.0`; rebuild native authors and manifests together. The C table remains ABI 1. Rust `Request` now has optional `execution` metadata, `Composition` has defaulted `runtime` and optional `host_environment`, and `Session::role` returns a generation-bound `ServiceHandle`. Legacy flat JSON compositions remain readable; stored composition bindings include graph identity without configuration values. Installed native acceptance lives in `tests/contract-authors/runtime`, `runtime_probe`, and `scripts/verify.py`, including a TCP acknowledgement that must precede job join completion.
 
 `Kernel::composition()` returns an owned declaration snapshot because local configuration commits can replace it. `instance_service` captures an owner generation for delayed actions. `replace_instances` preserves unrelated publications and classifies initialization failure separately from a cleanup barrier failure; Session owns durable commit and recovery. Native code-version replacements use distinct immutable library paths. Routing topology or service-declaration changes continue to use explicit composition switching; already-created embedded contributions can support declared live updates but have no native recreation factory.
+
+## Auxiliary inference pairing
+
+Version `eden-native-0.9.0` adds auxiliary request preparation/replay, host snapshot revision and event-position operations, plus streaming cancellation and budget enforcement. Rebuild native authors and manifests together; the C ABI table remains version 1. Old binaries are rejected by the exact pairing check. Existing flat configurations and history remain readable. See [auxiliary inference](auxiliary-models.md) for supported routes, ephemeral handles, configuration and accounting boundaries.

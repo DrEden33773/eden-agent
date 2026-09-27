@@ -134,12 +134,27 @@ def identities(files: Mapping[str, str], environment: Mapping[str, str]) -> tupl
         if pathlib.PurePosixPath(name).name == "rust-toolchain.toml"
         or pathlib.PurePosixPath(name).parent.name == ".cargo"
     }
-    profiles = {
-        name: profile
-        for name, text in normalized.items()
-        if pathlib.PurePosixPath(name).name == "Cargo.toml"
-        and (profile := tomllib.loads(text).get("profile"))
-    }
+    profiles = {}
+    for name, text in normalized.items():
+        if pathlib.PurePosixPath(name).name != "Cargo.toml":
+            continue
+        profile = tomllib.loads(text).get("profile", {})
+        # A newly explicit local debug default does not change CI when its
+        # existing environment already enforces that exact value. Keep all
+        # other profile and package overrides conservative, and retain the
+        # complete manifest in the input key below for Cargo to revalidate.
+        for kind in ("dev", "test"):
+            settings = profile.get(kind)
+            if (
+                settings
+                and "debug" in settings
+                and str(settings["debug"]) == environment.get(f"CARGO_PROFILE_{kind.upper()}_DEBUG")
+            ):
+                settings.pop("debug")
+                if not settings:
+                    profile.pop(kind)
+        if profile:
+            profiles[name] = profile
     build_env = build_environment(environment)
     context = digest({"configs": configs, "profiles": profiles, "environment": build_env})
     inputs = digest({"files": normalized, "environment": build_env})

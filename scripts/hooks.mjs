@@ -1,6 +1,18 @@
 // Snapshot checks never rewrite the contributor's worktree or index.
+
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { check } from "./checks.mjs";
@@ -33,7 +45,13 @@ const web = (path) =>
 const infrastructure = (path) =>
   path.startsWith(".githooks/") ||
   path.startsWith("tests/development-hooks-") ||
-  ["scripts/checks.mjs", "scripts/hooks.mjs"].includes(path);
+  [
+    "scripts/checks.mjs",
+    "scripts/hooks.mjs",
+    "scripts/formatter-tool.mjs",
+    "scripts/cpu-budget.mjs",
+    "scripts/test-hooks.mjs",
+  ].includes(path);
 function kindsFor(changed, push = false) {
   const all = changed.some(infrastructure);
   return [
@@ -48,15 +66,38 @@ function kindsFor(changed, push = false) {
   ];
 }
 function environment() {
-  const env = { ...process.env, CARGO_TARGET_DIR: join(root, "target", "hooks") };
+  const env = {
+    ...process.env,
+    CARGO_TARGET_DIR: join(root, "target", "hooks"),
+    GIT_CEILING_DIRECTORIES: join(root, "target"),
+  };
   // Cargo/build scripts in the snapshot must not accidentally discover the real Git index.
   for (const name of git("rev-parse", "--local-env-vars").toString().trim().split("\n"))
     delete env[name];
   return env;
 }
+const releases = new Map();
+function releaseSnapshot(directory) {
+  releases.get(directory)?.();
+  releases.delete(directory);
+}
 function snapshot(entries, isTree = false, omitted = new Set()) {
-  const directory = mkdtempSync(join(tmpdir(), "eden-check-index-"));
+  // A busy/crashed owner gets an isolated fallback, never another owner's tree.
+  const stable = join(tmpdir(), `eden-check-${createHash("sha256").update(root).digest("hex")}`);
+  const lock = `${stable}.lock`;
+  mkdirSync(dirname(stable), { recursive: true });
+  let directory;
   try {
+    mkdirSync(lock);
+    directory = stable;
+    releases.set(directory, () => rmSync(lock, { recursive: true, force: true }));
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+    directory = mkdtempSync(join(tmpdir(), "eden-check-index-"));
+    releases.set(directory, () => rmSync(directory, { recursive: true, force: true }));
+  }
+  try {
+    const files = [];
     for (const entry of paths(entries)) {
       const tab = entry.indexOf("\t");
       const fields = entry.slice(0, tab).split(" ");
@@ -65,15 +106,47 @@ function snapshot(entries, isTree = false, omitted = new Set()) {
       if (omitted.has(path) || mode === "160000") continue;
       if (stage !== "0" || !["100644", "100755"].includes(mode))
         throw new Error(`Cannot check unresolved or non-file index entry: ${path}`);
+      files.push({ path, object, mode });
+    }
+    const wanted = new Set(files.map(({ path }) => path));
+    function prune(path, relative = "") {
+      if (!existsSync(path)) return;
+      for (const entry of readdirSync(path, { withFileTypes: true })) {
+        const name = relative ? `${relative}/${entry.name}` : entry.name;
+        const full = join(path, entry.name);
+        if (entry.isDirectory()) {
+          prune(full, name);
+          if (!readdirSync(full).length) rmSync(full, { recursive: true });
+        } else if (entry.isSymbolicLink() || !wanted.has(name)) rmSync(full, { force: true });
+      }
+    }
+    prune(directory);
+    const blobs = execFileSync("git", ["cat-file", "--batch"], {
+      input: files.map(({ object }) => `${object}\n`).join(""),
+      maxBuffer: 128 * 1024 * 1024,
+    });
+    let offset = 0;
+    for (const { path, mode, object } of files) {
+      const end = blobs.indexOf(10, offset);
+      const [actual, type, size] = blobs.subarray(offset, end).toString().split(" ");
+      if (actual !== object || type !== "blob" || !/^\d+$/.test(size))
+        throw new Error(`Cannot read blob ${object}`);
+      const length = Number(size);
+      const content = blobs.subarray(end + 1, end + 1 + length);
+      if (content.length !== length || blobs[end + 1 + length] !== 10)
+        throw new Error("Truncated Git batch");
+      offset = end + length + 2;
       const destination = join(directory, path);
       mkdirSync(dirname(destination), { recursive: true });
-      writeFileSync(destination, git("cat-file", "blob", object), {
-        mode: mode === "100755" ? 0o755 : 0o644,
-      });
+      if (existsSync(destination) && !lstatSync(destination).isFile())
+        rmSync(destination, { recursive: true, force: true });
+      if (!existsSync(destination) || !readFileSync(destination).equals(content))
+        writeFileSync(destination, content);
+      chmodSync(destination, mode === "100755" ? 0o755 : 0o644);
     }
     return directory;
   } catch (error) {
-    rmSync(directory, { recursive: true, force: true });
+    releaseSnapshot(directory);
     throw error;
   }
 }
@@ -118,7 +191,7 @@ function preCommit() {
     console.log("Checking the staged snapshot (no source or index writes).");
     for (const kind of kinds) check(kind, { root: directory, toolRoot: root, env: environment() });
   } finally {
-    rmSync(directory, { recursive: true, force: true });
+    releaseSnapshot(directory);
   }
 }
 function prePush() {
@@ -147,7 +220,7 @@ function prePush() {
       for (const kind of kinds) completed.add(kind);
       checked.set(commit, completed);
     } finally {
-      rmSync(directory, { recursive: true, force: true });
+      releaseSnapshot(directory);
     }
   }
 }

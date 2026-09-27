@@ -7,6 +7,7 @@ import json
 import os
 import pathlib
 import shutil
+import subprocess
 import sys
 import time
 from typing import Any
@@ -68,17 +69,101 @@ def execute(name: str, script: str, receipt_file: str, output: pathlib.Path) -> 
     return record
 
 
+def cpu_budget() -> int:
+    explicit = os.environ.get("EDEN_CPU_BUDGET")
+    if explicit is not None:
+        if not explicit.isdecimal() or int(explicit) < 1:
+            raise ValueError("EDEN_CPU_BUDGET must be a positive integer")
+        return int(explicit)
+    try:
+        return max(
+            1,
+            int(
+                subprocess.check_output(
+                    ["node", "-p", "require('node:os').availableParallelism()"], text=True
+                )
+            ),
+        )
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        return max(1, os.cpu_count() or 1)
+
+
+def suite_order() -> list[str]:
+    # A2 observed durations; priorities start the release-build and other tails
+    # early, without pretending that a scheduling thread reserves a CPU core.
+    if sys.platform == "win32":
+        return [
+            "workspace",
+            "context",
+            "models",
+            "coding",
+            "sessions",
+            "delivery",
+            "router-models",
+            "cloud-models",
+            "oauth-models",
+            "presentation",
+            "native",
+        ]
+    if sys.platform == "darwin":
+        return [
+            "workspace",
+            "presentation",
+            "sessions",
+            "models",
+            "context",
+            "coding",
+            "router-models",
+            "delivery",
+            "cloud-models",
+            "oauth-models",
+            "native",
+        ]
+    return [
+        "workspace",
+        "presentation",
+        "coding",
+        "context",
+        "sessions",
+        "models",
+        "delivery",
+        "router-models",
+        "cloud-models",
+        "oauth-models",
+        "native",
+    ]
+
+
+def choose_schedule(budget: int, requested: int | None, order: str) -> tuple[int, list[str]]:
+    # Five suites helped the 16-CPU comparison, but not consistently the 3/4-CPU
+    # hosted runners. Retain their established queue and four-suite ceiling.
+    ceiling = 5 if budget > 4 else 4
+    workers = min(requested or min(budget + 1, ceiling), len(SUITES))
+    longest = order == "longest" or (order == "auto" and budget > 4)
+    return workers, suite_order() if longest else list(SUITES)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    # Four workers leave one core of a four-vCPU runner to the suites themselves,
-    # and the default stays a fixed number so local and CI timings are comparable.
-    parser.add_argument("--workers", type=int, choices=range(1, 6), default=4)
+    parser.add_argument("--workers", type=int, help="positive suite limit (capped by suite count)")
+    parser.add_argument("--order", choices=("auto", "longest", "declared"), default="auto")
     parser.add_argument("--output", type=pathlib.Path, default=ROOT / "artifacts/verification")
     args = parser.parse_args()
+    budget = cpu_budget()
+    if args.workers is not None and args.workers < 1:
+        parser.error("--workers must be positive")
+    workers, order = choose_schedule(budget, args.workers, args.order)
     output = args.output.resolve()
     reset_output(output)
     start = time.monotonic()
-    report: dict[str, Any] = {"status": "failed", "suites": []}
+    report: dict[str, Any] = {
+        "status": "failed",
+        "suites": [],
+        "cpu_budget": budget,
+        "requested_workers": args.workers,
+        "workers": workers,
+        "order": order,
+    }
     try:
         openssl()
         receipt = prepare(output)
@@ -86,11 +171,8 @@ def main() -> None:
             key: receipt[key]
             for key in ("commit", "dirty", "source_fingerprint", "phases", "compilation", "seconds")
         }
-        with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
-            pending = [
-                executor.submit(execute, name, script, artifact, output)
-                for name, (script, artifact) in SUITES.items()
-            ]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            pending = [executor.submit(execute, name, *SUITES[name], output) for name in order]
             for future in concurrent.futures.as_completed(pending):
                 report["suites"].append(future.result())
         validate_receipt(receipt, source_fingerprint())

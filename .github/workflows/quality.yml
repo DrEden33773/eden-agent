@@ -75,7 +75,7 @@ jobs:
           CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: node scripts/ci-scope.mjs
       - name: Scope and gate regression tests
-        run: node --test scripts/ci-scope.test.mjs scripts/ci-proof.test.mjs scripts/ci-run.test.mjs
+        run: node --test scripts/ci-scope.test.mjs scripts/ci-proof.test.mjs scripts/ci-run.test.mjs scripts/formatter-tool.test.mjs
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -118,6 +118,17 @@ jobs:
     with:
       selected: ${{ needs.scope.outputs.selected }}
       cache-only: true
+      save-cache: true
+  cache-static:
+    name: Maintain main static caches
+    needs: [prove, scope]
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prove.outputs.verified == 'true' && needs.scope.result == 'success' && needs.scope.outputs.rust == 'true' }}
+    cache-mode: write
+    uses: ./.github/workflows/checks-verify.yml
+    with:
+      kind: static
+      os: ubuntu-24.04
+      selected: '{"rust":true}'
       save-cache: true
   quality:
     name: Quality

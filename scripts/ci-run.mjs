@@ -1,7 +1,11 @@
 // Persist each executed phase's duration, command, compiler counts and raw log.
 import { spawn } from "node:child_process";
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { availableParallelism } from "node:os";
 import { join } from "node:path";
+import { cpuBudget } from "./cpu-budget.mjs";
+
+const budget = cpuBudget();
 
 const [label, program, ...args] = process.argv.slice(2);
 if (!/^[a-z0-9-]+$/.test(label ?? "") || !program) {
@@ -23,7 +27,10 @@ const windowsPnpm = process.platform === "win32" && program === "pnpm";
 const child = spawn(
   windowsPnpm ? process.env.ComSpec || "cmd.exe" : program,
   windowsPnpm ? ["/d", "/s", "/c", "pnpm", ...args] : args,
-  { stdio: ["inherit", "pipe", "pipe"], env: { ...process.env, CARGO_TERM_COLOR: "never" } },
+  {
+    stdio: ["inherit", "pipe", "pipe"],
+    env: { ...process.env, CARGO_TERM_COLOR: "never", EDEN_CPU_BUDGET: String(budget) },
+  },
 );
 for (const [stream, destination] of [
   [child.stdout, process.stdout],
@@ -48,6 +55,9 @@ child.on("close", (code, signal) => {
         label,
         status: code === 0 ? "passed" : "failed",
         command: [program, ...args],
+        cpu_budget: budget,
+        detected_cpu_budget: availableParallelism(),
+        requested_cpu_budget: process.env.EDEN_CPU_BUDGET ?? null,
         started_at: startedAt,
         duration_seconds: (performance.now() - started) / 1000,
         exit_code: code,

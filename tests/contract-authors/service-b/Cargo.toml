@@ -9,3 +9,10 @@ crate-type = ["cdylib"]
 [dependencies]
 eden-plugin-sdk = { path = "../../../crates/eden-plugin-sdk", version = "0.1.0" }
 [workspace]
+
+# Keep stack diagnostics inexpensive; use scripts/full-debug.mjs for debugger locals.
+[profile.dev]
+debug = 1
+
+[profile.test]
+debug = 1

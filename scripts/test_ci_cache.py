@@ -184,6 +184,28 @@ class CacheKeyTests(CacheKeyCase):
             self.keys(runner_os="macos-14")["restore_keys"],
         )
 
+    def test_redundant_debug_defaults_keep_the_ci_context_but_not_the_exact_key(self) -> None:
+        implicit = {**FILES, "Cargo.toml": "[workspace]\nmembers = []\n"}
+        explicit = {
+            **implicit,
+            "Cargo.toml": implicit["Cargo.toml"]
+            + "[profile.dev]\ndebug = 1\n[profile.test]\ndebug = 1\n",
+            "tests/contract-authors/a/Cargo.toml": "[package]\nname = 'a'\n[profile.dev]\ndebug = 1\n[profile.test]\ndebug = 1\n",
+        }
+        before = self.keys(implicit)
+        after = self.keys(explicit)
+        self.assertEqual(before["restore_keys"], after["restore_keys"])
+        self.assertNotEqual(before["key"], after["key"])
+        self.assertNotEqual(
+            self.keys(implicit, environment={"CARGO_INCREMENTAL": "0"})["context"],
+            self.keys(explicit, environment={"CARGO_INCREMENTAL": "0"})["context"],
+        )
+        package_override = {
+            **explicit,
+            "Cargo.toml": explicit["Cargo.toml"] + "[profile.dev.package.a]\ndebug = 2\n",
+        }
+        self.assertNotEqual(after["context"], self.keys(package_override)["context"])
+
     def test_lock_changes_reuse_only_the_same_environment_context(self) -> None:
         before = self.keys()
         changed = self.keys(

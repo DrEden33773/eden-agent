@@ -82,8 +82,14 @@ class Router:
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
+                try:
+                    self.end_headers()
+                    self.wfile.write(data)
+                except ConnectionAbortedError:
+                    # Shutdown can cancel a pending JSON poll or POST response.
+                    # Keep the exception local to socket I/O so handler failures
+                    # still reach the fixture's error assertion.
+                    pass
 
             def authorize(self) -> bool:
                 if owner.disconnected:

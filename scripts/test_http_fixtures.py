@@ -1,6 +1,7 @@
 """A provider failure must remain observable even when close races its handler."""
 
 import http.client
+import io
 import json
 import pathlib
 import runpy
@@ -49,6 +50,45 @@ class HttpFixtureTests(unittest.TestCase):
                 finally:
                     router.errors.clear()
                     router.close()
+
+    def test_router_json_reply_accepts_peer_abort_at_response_io_boundaries(self):
+        namespace = runpy.run_path(str(ROOT / "scripts" / "verify-router-models.py"))
+        for method, path in (("GET", "/models"), ("POST", "/models/unload")):
+            for stage in ("headers", "body"):
+                with self.subTest(method=method, stage=stage):
+                    router = namespace["Router"]()
+                    router.models["shutdown"] = {"status": {"value": "loaded"}}
+                    failure = ConnectionAbortedError(10053, "peer cancelled during shutdown")
+                    handler = router.http.RequestHandlerClass.__new__(
+                        router.http.RequestHandlerClass
+                    )
+                    body = json.dumps({"model": "shutdown"}).encode()
+                    handler.path = path
+                    handler.headers = {"Content-Length": str(len(body))}
+                    handler.rfile = io.BytesIO(body)
+                    handler.send_response = lambda _status: None
+                    handler.send_header = lambda _name, _value: None
+
+                    def fail_io(error: BaseException = failure) -> None:
+                        raise error
+
+                    class Writer:
+                        def write(self, _data: bytes, error: BaseException = failure) -> None:
+                            raise error
+
+                    handler.end_headers = fail_io if stage == "headers" else lambda: None
+                    handler.wfile = Writer()
+                    try:
+                        getattr(handler, "do_" + method)()
+                        self.assertEqual(router.errors, [])
+                        router.no_watchers()
+                        if method == "POST":
+                            self.assertEqual(
+                                router.models["shutdown"]["status"]["value"], "unloaded"
+                            )
+                    finally:
+                        router.errors.clear()
+                        router.close()
 
     def test_close_joins_active_handlers_before_asserting_errors(self):
         for script, key in (

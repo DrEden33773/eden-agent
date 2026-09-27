@@ -83,6 +83,7 @@ async fn live_apply_survives_waiter_drop_and_rejects_stale_revision_and_secrets(
         revision: before.revision,
         patch: json!({ "limit": 2 }),
         replacement: None,
+        edits: vec![],
     };
     let plan = session.preview_configuration(change.clone()).await.unwrap();
     assert_eq!(plan.application, Application::Live);
@@ -108,6 +109,7 @@ async fn live_apply_survives_waiter_drop_and_rejects_stale_revision_and_secrets(
         revision: before.revision,
         patch: json!({ "limit": 0 }),
         replacement: None,
+        edits: vec![],
     };
     assert!(
         !session
@@ -122,6 +124,7 @@ async fn live_apply_survives_waiter_drop_and_rejects_stale_revision_and_secrets(
         revision: before.revision,
         patch: json!({ "token": "replacement" }),
         replacement: None,
+        edits: vec![],
     };
     assert!(session.preview_configuration(secret).await.is_err());
     let unchanged_secret = Change {
@@ -129,6 +132,7 @@ async fn live_apply_survives_waiter_drop_and_rejects_stale_revision_and_secrets(
         revision: before.revision,
         patch: json!({ "token": "private-canary" }),
         replacement: None,
+        edits: vec![],
     };
     assert_eq!(
         session
@@ -252,6 +256,7 @@ async fn unrelated_update_does_not_wait_for_foreground_but_related_update_keeps_
             revision: 0,
             patch: json!({ "limit": 2 }),
             replacement: None,
+            edits: vec![],
         };
         let preview = session.preview_configuration(change.clone()).await.unwrap();
         assert_eq!(
@@ -303,6 +308,7 @@ async fn explicit_cancel_settles_affected_run_before_update_and_detached_waiter_
                 revision: 0,
                 patch: json!({ "limit": 3 }),
                 replacement: None,
+                edits: vec![],
             },
             ApplyMode::Cancel,
         )
@@ -347,6 +353,7 @@ async fn unrelated_pending_control_input_does_not_block_configuration() {
                 revision: 0,
                 patch: json!({ "limit": 5 }),
                 replacement: None,
+                edits: vec![],
             },
             ApplyMode::Wait,
         )
@@ -360,4 +367,165 @@ async fn unrelated_pending_control_input_does_not_block_configuration() {
     session.shutdown().await.unwrap();
     assert!(pending.await.unwrap().is_err());
     assert_eq!(result.unwrap().unwrap().status, Status::Applied);
+}
+
+#[tokio::test]
+async fn management_forms_repeat_apply_validate_and_inherit_without_a_chat_run() {
+    use eden_protocol::{configuration_form as f, presentation as p};
+    let package = Package::new("form-author")
+        .service(AGENT_LOOP, |_: Value, _| async {
+            Ok::<_, Fault>(Value::Null)
+        })
+        .service(CONTEXT, |_: Value, _| async { Ok::<_, Fault>(Value::Null) })
+        .service(PROVIDER, |_: Value, _| async {
+            Ok::<_, Fault>(Value::Null)
+        })
+        .service(TOOL, |_: Value, _| async { Ok::<_, Fault>(Value::Null) })
+        .service(
+            cfg::CONFIGURATION,
+            |request: cfg::PluginRequest, _| async move {
+                Ok::<_, Fault>(match request {
+                    cfg::PluginRequest::Describe => json!(cfg::Description {
+                        schema: Some(json!({
+                            "type": "object",
+                            "properties": {
+                                "limit": { "type": "integer", "minimum": 1 },
+                                "key": { "type": "string" },
+                                "nested": {
+                                    "type": "object",
+                                    "properties": { "n": { "type": "integer" } },
+                                },
+                            },
+                        })),
+                        live_paths: vec!["/limit".into(), "/nested".into()],
+                        secret_paths: vec!["/key".into()],
+                        ..Default::default()
+                    }),
+                    _ => json!(cfg::Validation::default()),
+                })
+            },
+        );
+    let cwd = std::env::current_dir().unwrap();
+    let composition: Composition = serde_json::from_value(json!({
+        "packages": [],
+        "roles": {},
+        "runtime": {
+            "instances": [{
+                "id": "form-author",
+                "package": "form-author",
+                "config": { "limit": 7, "key": "D1-CANARY", "unknown": true, "nested": { "n": 1 } },
+            }],
+        },
+    }))
+    .unwrap();
+    let session = Embedded::new(composition, cwd.clone())
+        .package(package, "forms-v1")
+        .unwrap()
+        .open(
+            SessionOptions { cwd, history: None },
+            WorkspaceOptions {
+                global_dir: std::env::temp_dir().join(format!("eden-d1-{}", std::process::id())),
+                project_trust: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    session.enable_shared_presentation();
+    session.open_configuration("form-author").await.unwrap();
+    assert!(session.state().active_run.is_none());
+    let original = session.presentation_snapshot();
+    assert!(
+        !serde_json::to_string(&original)
+            .unwrap()
+            .contains("D1-CANARY")
+    );
+    let mut custom = original.views[0].view.clone();
+    custom.id = "custom-settings".into();
+    custom.title = "Author layout".into();
+    if let p::Node::ConfigurationForm { fields, .. } = &mut custom.nodes[0] {
+        fields.retain(|field| !field.path.starts_with("/nested/"));
+        fields.push(f::Field {
+            path: "/nested".into(),
+            label: "Whole object".into(),
+            description: None,
+            control: f::Control::Json,
+            value: Some(json!({ "n": 1 })),
+            options: vec![],
+            item_kind: None,
+            source: None,
+            writable: true,
+            configured: false,
+        });
+    }
+    session.publish_configuration(custom).await.unwrap();
+    let mut previous: Option<p::ActionRequest> = None;
+    for (n, edit) in [
+        f::Edit::Set {
+            path: "/nested".into(),
+            value: json!({ "n": 2 }),
+        },
+        f::Edit::Set {
+            path: "/limit".into(),
+            value: json!(8),
+        },
+        f::Edit::Set {
+            path: "/limit".into(),
+            value: json!(9),
+        },
+        f::Edit::Inherit {
+            path: "/limit".into(),
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let snapshot = session.presentation_snapshot();
+        let view = snapshot
+            .views
+            .iter()
+            .find(|view| view.view.id == "custom-settings")
+            .unwrap();
+        assert_eq!(view.view.title, "Author layout");
+        assert_eq!(view.scope, p::ViewScope::Management);
+        let p::Node::ConfigurationForm {
+            binding, fields, ..
+        } = &view.view.nodes[0]
+        else {
+            panic!("form")
+        };
+        assert!(
+            fields
+                .iter()
+                .any(|field| field.path == "/nested" && field.writable && field.value.is_some())
+        );
+        let request = p::ActionRequest {
+            session_id: session.id(),
+            owner: view.owner.clone(),
+            view_id: view.view.id.clone(),
+            revision: view.revision,
+            action: "settings:apply".into(),
+            request_id: format!("apply-{n}"),
+            values: json!(f::Submission {
+                binding: binding.clone(),
+                edits: vec![edit]
+            }),
+        };
+        let result = session.presentation_action(request.clone()).await.unwrap();
+        assert_eq!(result["status"], "applied");
+        assert_eq!(
+            session.presentation_action(request.clone()).await.unwrap(),
+            result
+        );
+        if let Some(mut stale) = previous {
+            stale.request_id = format!("stale-{n}");
+            assert!(session.presentation_action(stale).await.is_err());
+        }
+        previous = Some(request);
+    }
+    let inspect = session.inspect_configuration().await.unwrap();
+    assert_eq!(inspect.instances[0].effective["limit"], 7);
+    assert_eq!(inspect.instances[0].effective["unknown"], true);
+    assert!(session.state().active_run.is_none());
+    session.shutdown().await.unwrap();
 }

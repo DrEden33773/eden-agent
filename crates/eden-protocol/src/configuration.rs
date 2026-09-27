@@ -12,6 +12,8 @@ pub const CONFIGURATION: &str = "eden.configuration.v1";
 #[serde(default)]
 #[allow(missing_docs)] // Names carry the payload; semantics are documented below and in docs/configuration.md.
 pub struct Description {
+    /// None denotes the original profile; unsupported explicit versions remain inspectable.
+    pub profile: Option<u32>,
     /// None accepts raw JSON; an explicit schema uses only the documented subset.
     pub schema: Option<Value>,
     /// Informational defaults; validation never silently modifies the candidate.
@@ -74,6 +76,9 @@ impl Validation {
 /// Rejects invalid descriptors before checking values, including unused nested schemas.
 /// An unsupported keyword is a descriptor Fault rather than a silently ignored constraint.
 pub fn validate(description: &Description, config: &Value) -> Result<Validation, Fault> {
+    if description.profile.is_some_and(|version| version != 1) {
+        return Err(schema_fault());
+    }
     for path in description
         .secret_paths
         .iter()
@@ -311,6 +316,38 @@ fn live_change_at(paths: &[String], old: &Value, new: &Value, path: &str) -> boo
         });
     }
     false
+}
+
+/// Strip secret defaults and choices from descriptors before public inspection or form construction.
+/// Ancestor defaults can embed private children, so they are removed rather than partially inferred.
+pub fn public_description(description: &Description) -> Description {
+    fn scrub(schema: &mut Value, path: &str, secrets: &[String]) {
+        let overlaps = secrets.iter().any(|secret| {
+            secret == path
+                || secret.starts_with(&format!("{path}/"))
+                || path.starts_with(&format!("{secret}/"))
+        });
+        if let Some(object) = schema.as_object_mut() {
+            if overlaps {
+                object.remove("default");
+                object.remove("enum");
+            }
+            if let Some(properties) = object.get_mut("properties").and_then(Value::as_object_mut) {
+                for (key, schema) in properties {
+                    scrub(schema, &child_path(path, key), secrets);
+                }
+            }
+            if overlaps && let Some(items) = object.get_mut("items") {
+                scrub(items, "", &[String::new()]);
+            }
+        }
+    }
+    let mut public = description.clone();
+    public.defaults = redact(&public.defaults, &public.secret_paths);
+    if let Some(schema) = &mut public.schema {
+        scrub(schema, "", &public.secret_paths);
+    }
+    public
 }
 
 #[cfg(test)]

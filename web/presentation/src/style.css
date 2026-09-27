@@ -113,3 +113,23 @@ form {
   align-items: flex-start;
   gap: 12px;
 }
+.configuration fieldset {
+  max-width: 100%;
+  box-sizing: border-box;
+}
+.configuration label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.configuration input,
+.configuration select {
+  max-width: 100%;
+  padding: 8px;
+}
+.configuration button {
+  min-height: 44px;
+}
+.configuration [role="alert"] {
+  color: #ffb9b9;
+}

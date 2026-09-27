@@ -87,6 +87,11 @@ pub enum Node {
         action: String,
         fields: Vec<Field>,
     },
+    ConfigurationForm {
+        id: String,
+        binding: crate::configuration_form::Binding,
+        fields: Vec<crate::configuration_form::Field>,
+    },
     Button {
         id: String,
         action: String,
@@ -105,6 +110,7 @@ impl Node {
             | Self::Attachment { id, .. }
             | Self::Status { id, .. }
             | Self::Form { id, .. }
+            | Self::ConfigurationForm { id, .. }
             | Self::Button { id, .. } => id,
         }
     }
@@ -246,6 +252,8 @@ impl View {
 #[allow(missing_docs)]
 pub struct LiveView {
     pub owner: String,
+    #[serde(default)]
+    pub scope: ViewScope,
     pub run_id: u64,
     pub revision: u64,
     pub active: bool,
@@ -253,6 +261,15 @@ pub struct LiveView {
     pub handled_actions: Vec<String>,
     #[serde(flatten)]
     pub view: View,
+}
+/// Management views survive chat settlement and never become static chat history.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(missing_docs)]
+pub enum ViewScope {
+    #[default]
+    Run,
+    Management,
 }
 /// Host request sent through the serialized SDK service bridge.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -442,6 +459,7 @@ pub fn static_views(records: &[Record], selection: &Selection) -> Vec<LiveView> 
                 .and_then(|value| serde_json::from_value::<Vec<String>>(value.clone()).ok())
                 .unwrap_or_default();
             let view = LiveView {
+                scope: ViewScope::Run,
                 owner: raw
                     .get("owner")
                     .and_then(Value::as_str)
@@ -643,7 +661,7 @@ fn static_node(
         Node::Attachment {
             record_sequence, ..
         } if !selection.attachments || !attachments.contains(&record_sequence) => None,
-        Node::Form { .. } | Node::Button { .. } => None,
+        Node::Form { .. } | Node::ConfigurationForm { .. } | Node::Button { .. } => None,
         _ => Some(node),
     }
 }
@@ -688,6 +706,7 @@ mod static_tests {
     }
     fn history() -> Vec<Record> {
         let view = LiveView {
+            scope: ViewScope::Run,
             owner: "removed-plugin".into(),
             run_id: 1,
             revision: 9,
@@ -801,6 +820,7 @@ mod static_tests {
     #[test]
     fn summary_and_complete_output_views_have_separate_selection() {
         let summary = LiveView {
+            scope: ViewScope::Run,
             owner: "author".into(),
             run_id: 1,
             revision: 1,
@@ -818,6 +838,7 @@ mod static_tests {
                 }),
         };
         let complete = LiveView {
+            scope: ViewScope::Run,
             owner: "author".into(),
             run_id: 1,
             revision: 2,

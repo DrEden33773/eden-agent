@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 sha2 = "0.10.9"
 eden-protocol.workspace = true
+eden-presentation.workspace = true
 eden-kernel.workspace = true
 eden-plugin-sdk.workspace = true
 eden-workspace.workspace = true

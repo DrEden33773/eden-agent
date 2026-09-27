@@ -23,6 +23,10 @@ from verification import (
 )
 
 SUITES = {
+    "configuration-forms": (
+        "verify-configuration-forms.py",
+        "configuration-forms-verification.json",
+    ),
     "notes": ("verify-notes.py", "notes-verification.json"),
     "cache-warmer": ("verify-cache-warmer.py", "cache-warmer-verification.json"),
     "delivery": ("verify-delivery.py", "delivery-verification.json"),
@@ -105,6 +109,7 @@ def suite_order() -> list[str]:
             "cloud-models",
             "oauth-models",
             "presentation",
+            "configuration-forms",
             "notes",
             "cache-warmer",
             "native",
@@ -113,6 +118,7 @@ def suite_order() -> list[str]:
         return [
             "workspace",
             "presentation",
+            "configuration-forms",
             "sessions",
             "models",
             "context",
@@ -128,6 +134,7 @@ def suite_order() -> list[str]:
     return [
         "workspace",
         "presentation",
+        "configuration-forms",
         "coding",
         "context",
         "sessions",

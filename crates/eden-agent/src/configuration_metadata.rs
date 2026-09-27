@@ -156,6 +156,31 @@ pub(crate) fn installed(
     Ok(result)
 }
 
+pub(crate) fn edit_origins(
+    origins: &mut BTreeMap<String, String>,
+    inherited: &BTreeMap<String, String>,
+    edits: &[eden_protocol::configuration_form::Edit],
+) {
+    use eden_protocol::configuration_form::Edit;
+    for edit in edits {
+        let path = edit.path();
+        origins.retain(|key, _| key != path && !key.starts_with(&format!("{path}/")));
+        match edit {
+            Edit::Set { value, .. } => mark(value, path, "explicit_session", origins),
+            Edit::Clear { .. } => {
+                origins.insert(path.into(), "explicit_session_clear".into());
+            }
+            Edit::Inherit { .. } => {
+                for (key, source) in inherited {
+                    if key == path || key.starts_with(&format!("{path}/")) {
+                        origins.insert(key.clone(), source.clone());
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

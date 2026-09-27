@@ -14,6 +14,7 @@ fn change(args: &ConfigChangeArgs) -> Result<Change, Box<dyn Error>> {
         revision: args.revision,
         patch,
         replacement: args.replacement.clone(),
+        edits: vec![],
     })
 }
 

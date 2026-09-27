@@ -11,6 +11,7 @@ license = "Apache-2.0"
 repository = "https://github.com/DrEden33773/eden-agent"
 
 [workspace.dependencies]
+eden-presentation = { path = "crates/eden-presentation", version = "0.1.0" }
 eden-process = { path = "crates/eden-process", version = "0.1.0" }
 eden-protocol = { path = "crates/eden-protocol", version = "0.1.0" }
 eden-plugin-sdk = { path = "crates/eden-plugin-sdk", version = "0.1.0" }

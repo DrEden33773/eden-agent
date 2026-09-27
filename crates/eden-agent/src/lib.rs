@@ -13,6 +13,7 @@ pub use control::SessionState;
 mod composition;
 pub mod configuration;
 mod configuration_metadata;
+mod configuration_presentation;
 mod generation;
 mod models;
 mod workspace_setup;
@@ -208,6 +209,7 @@ impl Session {
         let mut selected = embedded.composition;
         let sources = configuration_metadata::origins(&selected, &workspace_options)?;
         let mut configuration = configuration::replay(&mut selected, &previous)?;
+        configuration.inherited_sources = sources.clone();
         configuration.sources = sources;
         configuration::replay_sources(&mut configuration, &previous);
         let local = embedded.packages;

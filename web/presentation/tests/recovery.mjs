@@ -211,7 +211,7 @@ try {
   assert.equal(await evaluate('sessionStorage.getItem("eden-live-attempts")'), pendingBefore);
   assert.deepEqual(
     await evaluate('Array.from(document.querySelectorAll("input")).map(input => input.value)'),
-    ["edited during recovery", "composer draft"],
+    ["", "edited during recovery", "composer draft"],
   );
   await browser("find", "role", "button", "click", "--name", "Retry last request", "--exact");
   await waitFor('document.body.innerText.includes("Retry resolved")');

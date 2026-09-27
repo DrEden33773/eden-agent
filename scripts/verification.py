@@ -19,6 +19,8 @@ from typing import Any
 from install import ROOT, Composition, build_target, install, library, target
 
 AUTHORS = (
+    "configuration-forms",
+    "configuration-custom",
     "notes",
     "recall",
     "cache-warmer",
@@ -221,7 +223,14 @@ def sync_files(files: dict[pathlib.Path, bytes], destination: pathlib.Path) -> N
 
 def export_authors(destination: pathlib.Path) -> None:
     files: dict[pathlib.Path, bytes] = {}
-    for name in ("eden-protocol", "eden-plugin-sdk", "eden-kernel", "eden-workspace", "eden-agent"):
+    for name in (
+        "eden-protocol",
+        "eden-plugin-sdk",
+        "eden-kernel",
+        "eden-workspace",
+        "eden-presentation",
+        "eden-agent",
+    ):
         base = ROOT / "crates" / name
         for path in base.rglob("*"):
             if path.is_file() and "target" not in path.relative_to(base).parts:

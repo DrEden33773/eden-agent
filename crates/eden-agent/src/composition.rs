@@ -265,6 +265,13 @@ impl Session {
         }
         let sources =
             configuration_metadata::origins(&kernel.composition(), &self.0.workspace_options)?;
+        let inherited = configuration::specs(&kernel.composition())
+            .into_iter()
+            .map(|spec| {
+                configuration::config(&kernel.composition(), &spec.id)
+                    .map(|(_, value)| (spec.id, value))
+            })
+            .collect::<Result<_, _>>()?;
         self.0.kernel.install(kernel);
         *self
             .0
@@ -272,6 +279,8 @@ impl Session {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = configuration::Manager {
             revision: configuration_revision,
+            inherited,
+            inherited_sources: sources.clone(),
             sources,
             ..Default::default()
         };

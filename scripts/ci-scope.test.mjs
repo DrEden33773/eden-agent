@@ -309,3 +309,33 @@ test("front-end extensions and nested configuration have explicit coverage", () 
     assert.equal(selection.hooks, true);
   }
 });
+
+test("static cache maintenance supplies the complete selection contract", () => {
+  const workflow = readFileSync(
+    new URL("../.github/workflows/quality.yml", import.meta.url),
+    "utf8",
+  );
+  const block = workflow.match(/ {2}cache-static:\n([\s\S]*?)(?=\n {2}[a-z][a-z-]*:)/);
+  assert.ok(block, "main static cache job exists");
+  const input = block[1].match(/^\s+selected: '([^']+)'$/m);
+  assert.ok(input, "cache maintenance declares its selection");
+  const selected = JSON.parse(input[1]);
+  const steps = Object.fromEntries(
+    [
+      "markdown",
+      "python",
+      "javascript",
+      "web_types",
+      "web_build",
+      "formatter",
+      "format",
+      "doc",
+    ].map((id) => [
+      id,
+      { outcome: ["formatter", "format", "doc"].includes(id) ? "success" : "skipped" },
+    ]),
+  );
+  assert.equal(staticPass(selected, steps), true);
+  assert.deepEqual(checksMatrix(selected), { include: [{ kind: "static", os: "ubuntu-24.04" }] });
+  assert.equal(staticPass(selected, { ...steps, doc: { outcome: "failure" } }), false);
+});

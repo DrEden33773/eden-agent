@@ -128,7 +128,7 @@ jobs:
     with:
       kind: static
       os: ubuntu-24.04
-      selected: '{"rust":true}'
+      selected: '{"markdown":false,"python":false,"javascript":false,"rust":true,"native":false,"hooks":false}'
       save-cache: true
   quality:
     name: Quality

@@ -105,6 +105,7 @@ pub async fn run_host(
         session.shutdown().await?;
         return Err(Box::new(error));
     }
+    let _ = session.refresh_models_in_background().await;
     let (stop, mut stopped) = watch::channel(false);
     let shared = Arc::new(Shared {
         session: session.clone(),

@@ -55,6 +55,8 @@ Templates come from global `prompts/`, trusted `.eden/prompts/`, and explicit pa
 
 ## FFF search
 
+The default composition mounts the search plugin but does not select its `find` or `grep` tools. `ls` belongs to coding-tools and is also opt-in. Set the complete `tools` list in global settings or trusted project settings, for example `["read", "write", "edit", "bash", "skill", "find", "grep", "ls"]`; this replaces the selection rather than appending to it. Unselected tools are omitted from model requests and rejected by the coding-tool execution entry. The search worker starts lazily; with the default nonpersistent history setting, mounting search does not start an index scan. Explicit persistent history can start the worker through the read observer independently of tool selection.
+
 `find` and `grep` are provided by the search plugin using `fff-search 0.10.6` Rust libraries, with the Rust ignore walker and no dependency on an installed `rg` executable. The plugin owns a helper process containing FFF's scans, indexing threads and watchers. Cancellation and instance stop kill and wait for that process before returning; reopening creates a new instance and invalidates old cursors.
 
 | Parameter | Behavior |

@@ -1,5 +1,5 @@
 [package]
-name = "eden-notes"
+name = "eden-note-style-context-management"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

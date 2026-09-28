@@ -1426,7 +1426,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "eden-notes"
+name = "eden-note-style-context-management"
 version = "0.1.0"
 dependencies = [
  "eden-plugin-sdk",
@@ -1469,14 +1469,6 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "eden-recall"
-version = "0.1.0"
-dependencies = [
- "eden-plugin-sdk",
- "serde",
 ]
 
 [[package]]

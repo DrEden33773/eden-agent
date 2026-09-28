@@ -17,6 +17,7 @@ from typing import Any
 
 from http_fixture import FixtureHTTPServer
 from install import ROOT, library, package, target
+from model_catalog_refresh import verify_background_catalog
 from verification import author_artifact, installed, prepare
 
 CATALOG = "eden.model-catalog.v1"
@@ -365,7 +366,7 @@ def main() -> None:
         f"plugins/model-services/0.1.0/{lib}",
         target(),
     )
-    results: dict[str, Any] = {}
+    results: dict[str, Any] = {"background_catalog": verify_background_catalog(host, composition)}
     with tempfile.TemporaryDirectory(prefix="eden-g1-installed-") as temporary:
         scratch = pathlib.Path(temporary)
         caller = scratch / "unrelated caller"

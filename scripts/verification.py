@@ -257,11 +257,16 @@ def export_authors(destination: pathlib.Path) -> None:
                 if path.name == "Cargo.toml":
                     data = data.replace(b"../../../crates/", b"../../sdk/crates/")
                 files[pathlib.Path("authors") / name / path.relative_to(base)] = data
-    for plugin in ("cache-warmer", "notes"):
-        files[pathlib.Path(f"authors/{plugin}/src/lib.rs")] = (
-            ROOT / f"plugins/{plugin}/src/lib.rs"
-        ).read_bytes()
-        plugin_manifest = pathlib.Path(f"authors/{plugin}/Cargo.toml")
+    for author, plugin in (
+        ("cache-warmer", "cache-warmer"),
+        ("notes", "note-style-context-management"),
+    ):
+        source = ROOT / "plugins" / plugin / "src"
+        for path in source.rglob("*.rs"):
+            files[pathlib.Path("authors") / author / "src" / path.relative_to(source)] = (
+                path.read_bytes()
+            )
+        plugin_manifest = pathlib.Path(f"authors/{author}/Cargo.toml")
         files[plugin_manifest] = files[plugin_manifest].replace(
             f'path = "../../../plugins/{plugin}/src/lib.rs"'.encode(), b'path = "src/lib.rs"'
         )

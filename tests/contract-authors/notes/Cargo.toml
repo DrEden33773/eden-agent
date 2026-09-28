@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 [lib]
 crate-type = ["cdylib"]
-path = "../../../plugins/notes/src/lib.rs"
+path = "../../../plugins/note-style-context-management/src/lib.rs"
 [workspace]
 [dependencies]
 eden-plugin-sdk = { path = "../../../crates/eden-plugin-sdk", version = "0.1.0" }

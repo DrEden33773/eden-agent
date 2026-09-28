@@ -12,6 +12,27 @@ use std::{
 use tokio::sync::Mutex;
 
 const BUNDLED: &str = include_str!("../data/pi-models.json");
+const BUNDLED_SOURCE: &str = include_str!("../data/pi-models-source.json");
+fn bundled_generated_at() -> u64 {
+    serde_json::from_str::<Value>(BUNDLED_SOURCE)
+        .ok()
+        .and_then(|value| value["generated_at"].as_u64())
+        .unwrap_or(u64::MAX)
+}
+fn pi_source(source: &str) -> bool {
+    reqwest::Url::parse(source).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url.host_str() == Some("pi.dev")
+            && url.port_or_known_default() == Some(443)
+    })
+}
+fn usable_cache(source: &str, cache: &Cached) -> bool {
+    // Custom catalogs are deliberate routing overrides; only Pi shares our snapshot clock.
+    !pi_source(source)
+        || cache
+            .last_modified
+            .is_some_and(|date| date > bundled_generated_at())
+}
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct ProviderOverride {
@@ -30,6 +51,7 @@ struct Config {
     source: Option<String>,
     cache_path: Option<PathBuf>,
     offline: bool,
+    auto_refresh: Option<bool>,
     models: Vec<ModelTarget>,
     providers: BTreeMap<String, ProviderOverride>,
     allowed_models: Option<Vec<String>>,
@@ -39,6 +61,8 @@ struct Cached {
     models: Vec<Value>,
     etag: Option<String>,
     updated_at: u64,
+    #[serde(default)]
+    last_modified: Option<u64>,
 }
 #[derive(Default, Serialize, Deserialize)]
 struct Disk {
@@ -53,6 +77,8 @@ struct Inner {
     disk: Disk,
 }
 struct Catalog {
+    refresh_lock: Mutex<()>,
+    background_job: Mutex<Option<u64>>,
     config: Config,
     inner: Mutex<Inner>,
 }
@@ -158,6 +184,8 @@ pub(crate) fn register(package: Package, value: &Value) -> Result<Package, Fault
         .unwrap_or(source);
     validate_source(&source)?;
     let state = Arc::new(Catalog {
+        refresh_lock: Mutex::new(()),
+        background_job: Mutex::new(None),
         config,
         inner: Mutex::new(Inner {
             source,
@@ -408,13 +436,17 @@ impl Catalog {
             serde_json::from_str(BUNDLED).map_err(|_| fault("invalid bundled catalog"))?;
         let mut models = BTreeMap::new();
         for (provider, values) in bundled {
+            // Radius routes must come from the selected gateway and credential account.
+            if provider == "radius" {
+                continue;
+            }
             for v in flatten(&values) {
                 let t = target(
                     &provider,
                     &v,
                     CatalogSource {
                         kind: "bundled".into(),
-                        location: "pi-ai@0.85.1".into(),
+                        location: "pi-ai@0.87.1".into(),
                         updated_at: None,
                     },
                 )?;
@@ -426,6 +458,9 @@ impl Catalog {
         }
         if let Some(cached) = inner.disk.sources.get(&inner.source) {
             for (provider, cache) in cached {
+                if provider == "radius" || !usable_cache(&inner.source, cache) {
+                    continue;
+                }
                 for v in &cache.models {
                     let t = target(
                         provider,
@@ -665,6 +700,7 @@ impl Catalog {
                         models,
                         etag: None,
                         updated_at: now(),
+                        last_modified: None,
                     },
                 )]),
             );
@@ -673,9 +709,14 @@ impl Catalog {
         Ok(success)
     }
     async fn refresh(&self, cx: Option<&CallContext>) -> Result<String, Fault> {
+        self.refresh_public(cx, true).await
+    }
+    async fn refresh_public(&self, cx: Option<&CallContext>, force: bool) -> Result<String, Fault> {
+        use futures_util::{StreamExt, stream};
         if self.config.offline {
             return Ok("offline".into());
         }
+        let _refresh = self.refresh_lock.lock().await;
         let (source, generation, cached) = {
             let inner = self.inner.lock().await;
             (
@@ -691,96 +732,189 @@ impl Catalog {
         };
         let providers: BTreeMap<String, Value> =
             serde_json::from_str(BUNDLED).map_err(|_| fault("invalid bundled catalog"))?;
+        let providers: Vec<_> = providers
+            .into_keys()
+            .filter(|provider| {
+                provider != "radius"
+                    && (force
+                        || !cached.get(provider).is_some_and(|cache| {
+                            cache.updated_at <= now()
+                                && now() - cache.updated_at < 4 * 60 * 60
+                                && (!pi_source(&source) || cache.last_modified.is_some())
+                        }))
+            })
+            .collect();
+        if providers.is_empty() {
+            return Ok("fresh".into());
+        }
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .pool_max_idle_per_host(0)
             .timeout(std::time::Duration::from_secs(4))
             .build()
             .map_err(|_| fault("catalog HTTP client initialization failed"))?;
-        let mut updates = cached.clone();
-        let mut failed = false;
-        for provider in providers.keys() {
-            let mut url =
-                reqwest::Url::parse(&source).map_err(|_| fault("invalid catalog source"))?;
-            url.set_path(&format!("/api/models/providers/{provider}"));
-            url.set_query(None);
-            let mut req = client.get(url).header("Accept", "application/json");
-            if let Some(etag) = cached
-                .get(provider)
-                .filter(|c| !c.models.is_empty())
-                .and_then(|c| c.etag.as_ref())
-            {
-                req = req.header("If-None-Match", etag);
-            }
-            let response = if let Some(cx) = cx {
-                let cancel = cx.scope.cancellation();
-                tokio::select! {
-                    _ = cancel.cancelled() => return Err(fault("catalog refresh cancelled")),
-                    response = req.send() => response,
+        let fetch = async {
+            let results = stream::iter(providers.into_iter().map(|provider| {
+                let client = &client;
+                let source = &source;
+                let previous = cached.get(&provider).cloned();
+                async move {
+                    let result = async {
+                        let mut url = reqwest::Url::parse(source)
+                            .map_err(|_| fault("invalid catalog source"))?;
+                        url.set_path(&format!("/api/models/providers/{provider}"));
+                        url.set_query(None);
+                        let mut request = client.get(url).header("Accept", "application/json");
+                        if let Some(etag) = previous
+                            .as_ref()
+                            .filter(|c| {
+                                !c.models.is_empty()
+                                    && (!pi_source(&source) || c.last_modified.is_some())
+                            })
+                            .and_then(|c| c.etag.as_ref())
+                        {
+                            request = request.header("If-None-Match", etag);
+                        }
+                        let response = request
+                            .send()
+                            .await
+                            .map_err(|_| fault("catalog request failed"))?;
+                        if response.status() == 304 {
+                            let mut previous = previous
+                                .filter(|c| !c.models.is_empty())
+                                .ok_or_else(|| fault("catalog 304 has no cached body"))?;
+                            previous.updated_at = now();
+                            return Ok(previous);
+                        }
+                        if !response.status().is_success() {
+                            return Err(fault("catalog request rejected"));
+                        }
+                        let etag = response
+                            .headers()
+                            .get("etag")
+                            .and_then(|h| h.to_str().ok())
+                            .map(str::to_owned);
+                        let last_modified = response
+                            .headers()
+                            .get("last-modified")
+                            .and_then(|h| h.to_str().ok())
+                            .and_then(|h| httpdate::parse_http_date(h).ok())
+                            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                            .map(|t| t.as_secs());
+                        let body = response
+                            .json::<Value>()
+                            .await
+                            .map_err(|_| fault("invalid catalog response"))?;
+                        let models = flatten(&body);
+                        if models.is_empty()
+                            || models
+                                .iter()
+                                .any(|v| target(&provider, v, CatalogSource::default()).is_err())
+                        {
+                            return Err(fault("invalid catalog models"));
+                        }
+                        Ok(Cached {
+                            models,
+                            etag,
+                            updated_at: now(),
+                            last_modified,
+                        })
+                    }
+                    .await;
+                    (provider, result)
                 }
+            }))
+            .buffer_unordered(8)
+            .collect::<Vec<_>>()
+            .await;
+            let mut updates = cached.clone();
+            let mut failed = false;
+            for (provider, result) in results {
+                match result {
+                    Ok(cache) => {
+                        updates.insert(provider, cache);
+                    }
+                    Err(_) => failed = true,
+                }
+            }
+            let mut inner = self.inner.lock().await;
+            if inner.generation != generation || inner.source != source {
+                return Ok("superseded".into());
+            }
+            inner.disk.sources.insert(source.clone(), updates);
+            self.persist(&mut inner, Persist::Cache(source)).await?;
+            Ok(if failed {
+                "refresh_failed_cached"
             } else {
-                req.send().await
-            };
-            let Ok(response) = response else {
-                failed = true;
-                continue;
-            };
-            if response.status() == 304 {
-                if let Some(c) = updates.get_mut(provider) {
-                    c.updated_at = now();
-                } else {
-                    failed = true;
-                }
-                continue;
+                "refreshed"
             }
-            if !response.status().is_success() {
-                failed = true;
-                continue;
+            .into())
+        };
+        if let Some(cx) = cx {
+            let cancel = cx.scope.cancellation();
+            tokio::select! {
+                _ = cancel.cancelled() => Err(fault("catalog refresh cancelled")),
+                result = fetch => result,
             }
-            let etag = response
-                .headers()
-                .get("etag")
-                .and_then(|h| h.to_str().ok())
-                .map(str::to_owned);
-            let Ok(body) = response.json::<Value>().await else {
-                failed = true;
-                continue;
-            };
-            let models = flatten(&body);
-            if models.is_empty()
-                || models
-                    .iter()
-                    .any(|v| target(provider, v, CatalogSource::default()).is_err())
-            {
-                failed = true;
-                continue;
-            }
-            updates.insert(
-                provider.clone(),
-                Cached {
-                    models,
-                    etag,
-                    updated_at: now(),
-                },
-            );
-        }
-        let mut inner = self.inner.lock().await;
-        if inner.generation != generation || inner.source != source {
-            return Ok("superseded".into());
-        }
-        inner.disk.sources.insert(source.clone(), updates);
-        self.persist(&mut inner, Persist::Cache(source)).await?;
-        Ok(if failed {
-            "refresh_failed_cached"
         } else {
-            "refreshed"
+            fetch.await
         }
-        .into())
+    }
+    async fn refresh_reply(&self, status: &str) -> CatalogReply {
+        CatalogReply {
+            providers: vec![],
+            models: vec![],
+            target: None,
+            source: CatalogSource {
+                kind: "catalog".into(),
+                location: self.inner.lock().await.source.clone(),
+                updated_at: None,
+            },
+            status: status.into(),
+        }
     }
     async fn handle(
         &self,
         request: CatalogRequest,
         cx: CallContext,
     ) -> Result<CatalogReply, Fault> {
+        if matches!(
+            request,
+            CatalogRequest::RefreshInBackground | CatalogRequest::RefreshIfStale
+        ) {
+            let status = if self.config.offline {
+                "offline".to_owned()
+            } else if self.config.auto_refresh == Some(false) {
+                "disabled".to_owned()
+            } else if matches!(request, CatalogRequest::RefreshInBackground) {
+                let mut active = self.background_job.lock().await;
+                if let Some(id) = *active {
+                    if cx.inspect_job(id).await?.terminal.is_none() {
+                        return Ok(self.refresh_reply("running").await);
+                    }
+                    cx.forget_job(id).await?;
+                    *active = None;
+                }
+                let job = cx
+                    .submit_job(MODEL_CATALOG, &CatalogRequest::RefreshIfStale)
+                    .await?;
+                *active = Some(job.id);
+                "started".to_owned()
+            } else {
+                let status = tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    self.refresh_public(Some(&cx), false),
+                )
+                .await
+                .unwrap_or_else(|_| Ok("refresh_timed_out_cached".into()))?;
+                cx.emit(
+                    "model_catalog_refreshed",
+                    serde_json::json!({ "status": status }),
+                )?;
+                status
+            };
+            return Ok(self.refresh_reply(&status).await);
+        }
         let status = if matches!(request, CatalogRequest::Refresh) {
             let status = self.refresh(Some(&cx)).await?;
             if self.refresh_subscriptions(&cx).await? {
@@ -1070,6 +1204,8 @@ mod tests {
     use super::*;
     fn fixture(source: String, path: Option<PathBuf>) -> Catalog {
         Catalog {
+            refresh_lock: Mutex::new(()),
+            background_job: Mutex::new(None),
             config: Config {
                 cache_path: path,
                 ..Default::default()
@@ -1090,7 +1226,7 @@ mod tests {
         let phase = Arc::new(AtomicUsize::new(0));
         let state = phase.clone();
         let server = tokio::spawn(async move {
-            for _ in 0..117 {
+            for _ in 0..120 {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut bytes = vec![0; 8192];
                 let size = stream.read(&mut bytes).await.unwrap();
@@ -1202,7 +1338,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let mut entered = Some(entered);
             let mut released = Some(released);
-            for _ in 0..39 {
+            for _ in 0..40 {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut bytes = [0; 8192];
                 assert!(stream.read(&mut bytes).await.unwrap() > 0);
@@ -1404,6 +1540,8 @@ mod tests {
             disk,
         };
         let catalog = Catalog {
+            refresh_lock: Mutex::new(()),
+            background_job: Mutex::new(None),
             config: Config::default(),
             inner: Mutex::new(Inner {
                 source: String::new(),
@@ -1464,6 +1602,7 @@ mod tests {
                     models,
                     etag: None,
                     updated_at: 1,
+                    last_modified: None,
                 },
             )]),
         );
@@ -1529,3 +1668,7 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 }
+
+#[cfg(test)]
+#[path = "catalog_refresh_tests.rs"]
+mod refresh_tests;

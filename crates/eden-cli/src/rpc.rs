@@ -570,6 +570,8 @@ where
                 "interactions": false,
             }),
         )?;
+        // Catalog authors may decline this optional maintenance request.
+        let _ = session.refresh_models_in_background().await;
         loop {
             tokio::select! {
                 result = &mut writer => {
@@ -692,6 +694,7 @@ where
                                 return Err(e);
                             }
                         };
+                        let _ = session.refresh_models_in_background().await;
                         sequence = 0;
                         pending.clear();
                         runs.clear();

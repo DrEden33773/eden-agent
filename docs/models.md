@@ -36,7 +36,8 @@ Set `plugins.model-access` in the user `settings.json` or an explicitly trusted 
     "model-access": {
       "catalog": {
         "source": "https://pi.dev",
-        "offline": false
+        "offline": false,
+        "auto_refresh": true
       },
       "credentials": {
         "providers": {
@@ -48,6 +49,10 @@ Set `plugins.model-access` in the user `settings.json` or an explicitly trusted 
   }
 }
 ```
+
+RPC and the long-lived live TUI/Web host request a background public catalog refresh after opening. Startup uses the current cache/bundled data immediately; successful provider checks remain fresh for four hours. At most eight public requests run concurrently, each with a four-second timeout and the background operation with a fifteen-second deadline. `catalog.auto_refresh: false` disables automatic updates; `catalog.offline: true` also disables manual catalog network requests. Ordinary SDK opens, print runs and short CLI queries do not start automatic maintenance. SDK clients can opt in with `Session::refresh_models_in_background()`. Catalog plugins may decline this optional request.
+
+Background maintenance is a model-access-owned job, does not occupy the foreground run, and is cancelled and joined on instance replacement or Session shutdown. It refreshes public metadata only: it does not resolve credential commands, log in, refresh account credentials, query account catalogs or enable account model policies. Explicit `eden models refresh` still forces revalidation and refreshes configured account catalogs. The `model_catalog_refreshed` event reports freshness, success, retained-cache failure or timeout; already frozen run targets remain unchanged.
 
 Catalog precedence is explicit configuration, selected remote catalog, then bundled Pi data. Source changes isolate caches. Refresh preserves valid cached data when a provider response fails, and never changes a target already frozen for a run. Offline catalog operations do not contact the network. The selected source supplies routing as well as metadata; remote data is never executed as a credential command. Explicit refresh is an asynchronous managed operation through the SDK and a waiting command through the CLI.
 
@@ -63,7 +68,9 @@ Completed provider reasoning records include their original provider/model/proto
 
 ## Catalog snapshot maintenance
 
-The committed snapshot in `plugins/model-access/data` comes from the fixed `@earendil-works/pi-ai@0.85.1` release. Its provenance and upstream license are stored alongside it. Ordinary Cargo builds consume those resources without fetching a catalog or loading a JavaScript runtime. To update the snapshot, obtain an explicit fixed upstream package or retain the exact response bytes from the selected source, validate provider identities and supported routes, preserve provenance and notices, and submit the candidate data through a normal reviewed PR. Dynamic account-specific models are not fabricated as static entries.
+The committed snapshot in `plugins/model-access/data` comes from the fixed `@earendil-works/pi-ai@0.87.1` release. Its provenance and upstream license are stored alongside it. Ordinary Cargo builds consume those resources without fetching a catalog or loading a JavaScript runtime. To update the snapshot, obtain an explicit fixed upstream package or retain the exact response bytes from the selected source, validate provider identities and supported routes, preserve provenance and notices, and submit the candidate data through a normal reviewed PR. Upstream Radius records are preserved in the resource, but selectable Radius models retain the gateway/account catalog requirement. Pi's `inputLimits` and other unconsumed upstream capability fields are preserved as data; their presence does not imply an image-resizing or dynamic-tool feature in Eden. Explicit thinking-level mappings take precedence over generic Gemini model-family defaults.
+
+A pi.dev cache overlays the bundled snapshot only when its HTTP Last-Modified is newer than the bundled generation time. Old caches without that metadata no longer hide the new snapshot; refresh revalidates them. A custom source is an intentional override and does not share Pi's timestamp baseline. This is an overlay rather than an authoritative deletion list: models absent from the remote response may still be supplied by the bundled baseline. The snapshot also determines public provider enumeration; source selection alone does not discover new providers.
 
 `python scripts/verify-model-access.py` exercises installed consumers and independently compiled catalog/credential authors with controlled HTTP receivers. Real account access is verified separately from those fixtures.
 

@@ -2,7 +2,7 @@
 use eden_plugin_sdk::{
     CallContext, Package,
     protocol::{
-        Descriptor, Fault,
+        Fault,
         coding::{
             STORE, StoreReply, StoreRequest, ToolDefinition, ToolExecution, ToolRequest, ToolResult,
         },
@@ -10,7 +10,7 @@ use eden_plugin_sdk::{
         recall::*,
         resources::{Catalog, CatalogRequest},
     },
-    serde_json::{self, Value, json},
+    serde_json::{self, json},
 };
 use serde::{Deserialize, Serialize};
 
@@ -29,15 +29,8 @@ struct Cursor {
 fn fault(code: &str, message: impl Into<String>) -> Fault {
     Fault::new(code, "history-recall", message)
 }
-fn descriptor() -> Descriptor {
-    Descriptor {
-        package: "recall".into(),
-        version: "0.1.0".into(),
-        provides: vec![RECALL.into(), TOOLS.into(), TOOL.into()],
-    }
-}
-fn create(_: Value) -> Result<Package, Fault> {
-    Ok(Package::new("recall")
+pub(super) fn register(package: Package) -> Package {
+    package
         .service(RECALL, |request: RecallRequest, cx| async move {
             read(&cx, request).await
         })
@@ -60,9 +53,8 @@ fn create(_: Value) -> Result<Package, Fault> {
                 exit_code: None,
                 error: None,
             })
-        }))
+        })
 }
-eden_plugin_sdk::export_plugin!(descriptor, create);
 
 async fn read(cx: &CallContext, request: RecallRequest) -> Result<RecallReply, Fault> {
     let store: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;

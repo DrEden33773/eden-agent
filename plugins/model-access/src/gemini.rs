@@ -178,7 +178,15 @@ pub(crate) fn project(input: &ModelInput, target: &ModelTarget) -> Result<Value,
             || target.model.starts_with("gemini-pro-")
             || target.model.contains("gemma-4");
         let config = if level_model {
-            let level = if effort == "off" {
+            let declared = target
+                .thinking
+                .effective
+                .as_deref()
+                .and_then(|key| target.compat["thinkingLevelMap"][key].as_str())
+                .map(str::to_ascii_uppercase);
+            let level = if let Some(level) = declared.as_deref() {
+                level
+            } else if effort == "off" {
                 if target.model.contains("pro") {
                     "LOW"
                 } else {

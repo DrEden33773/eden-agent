@@ -81,6 +81,14 @@ fn description(config: &Value) -> c::Description {
                     "title": "Legacy Responses API key",
                     "minLength": 1,
                 },
+                "catalog": {
+                    "type": "object",
+                    "properties": {
+                        "source": { "type": "string" },
+                        "offline": { "type": "boolean", "default": false },
+                        "auto_refresh": { "type": "boolean", "default": true },
+                    },
+                },
                 "credentials": {
                     "type": "object",
                     "properties": {

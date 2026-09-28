@@ -98,7 +98,7 @@ def verify_background_catalog(host: pathlib.Path, composition: dict[str, Any]) -
                 if not k.startswith(("OPENAI_", "AWS_", "GOOGLE_"))
             }
 
-            def run(expect: str | None, hold: bool = False) -> None:
+            def run(expect: str | None, hold: bool = False, offline_startup: bool = False) -> None:
                 nonlocal held
                 held = hold
                 manifest.write_text(json.dumps(selected), encoding="utf-8")
@@ -112,6 +112,8 @@ def verify_background_catalog(host: pathlib.Path, composition: dict[str, Any]) -
                     str(global_dir),
                     "rpc",
                 ]
+                if offline_startup:
+                    command.insert(1, "--offline-startup")
                 process = subprocess.Popen(
                     command,
                     env=environment,
@@ -121,11 +123,14 @@ def verify_background_catalog(host: pathlib.Path, composition: dict[str, Any]) -
                     stderr=subprocess.PIPE,
                 )
                 frames: queue.Queue[dict[str, Any]] = queue.Queue()
+                observed: list[dict[str, Any]] = []
 
                 def collect() -> None:
                     assert process.stdout is not None
                     for line in process.stdout:
-                        frames.put(json.loads(line))
+                        frame = json.loads(line)
+                        observed.append(frame)
+                        frames.put(frame)
 
                 reader = threading.Thread(target=collect, daemon=True)
                 reader.start()
@@ -180,6 +185,11 @@ def verify_background_catalog(host: pathlib.Path, composition: dict[str, Any]) -
                         assert closed.wait(2), "shutdown failed to close catalog connection"
                     reader.join(timeout=5)
                     assert not reader.is_alive()
+                    if expect is None and not hold:
+                        assert not any(
+                            frame.get("event", {}).get("kind") == "job_settled"
+                            for frame in observed
+                        ), observed
                     assert process.stderr is not None
                     assert not process.stderr.read(), "unexpected RPC stderr"
                 finally:
@@ -198,6 +208,7 @@ def verify_background_catalog(host: pathlib.Path, composition: dict[str, Any]) -
             assert cache["sources"][source]["openai"]["models"][0]["id"] == "background-fixture"
             run("fresh")
             assert len(requests) == count, "fresh startup fetched the catalog again"
+            (global_dir / "model-catalog.json").unlink()
             model_config["catalog"]["offline"] = True
             run(None)
             assert len(requests) == count
@@ -206,7 +217,16 @@ def verify_background_catalog(host: pathlib.Path, composition: dict[str, Any]) -
             run(None)
             assert len(requests) == count
             model_config["catalog"]["auto_refresh"] = True
-            (global_dir / "model-catalog.json").unlink()
+            run(None, offline_startup=True)
+            assert len(requests) == count
+            settings_path = global_dir / "settings.json"
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+            settings["offline_startup"] = True
+            settings_path.write_text(json.dumps(settings), encoding="utf-8")
+            run(None)
+            assert len(requests) == count
+            settings["offline_startup"] = False
+            settings_path.write_text(json.dumps(settings), encoding="utf-8")
             run(None, hold=True)
             assert not (root / "credential-command-ran").exists()
     finally:
@@ -219,6 +239,7 @@ def verify_background_catalog(host: pathlib.Path, composition: dict[str, Any]) -
         "foreground_idle": True,
         "durable_ttl": True,
         "offline": True,
+        "offline_startup": True,
         "opt_out": True,
         "shutdown_transport_closed": True,
     }

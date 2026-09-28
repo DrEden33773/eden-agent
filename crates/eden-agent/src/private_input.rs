@@ -18,6 +18,12 @@ pub(crate) fn public_fault(error: Fault) -> Fault {
         "Conflict" => "Conflict",
         "Unavailable" => "Unavailable",
         "ValidationFailed" => "ValidationFailed",
+        "InitializationFailure" => "InitializationFailure",
+        "PersistenceFailure" => "PersistenceFailure",
+        "InvalidInput" => "InvalidInput",
+        "MissingDependency" => "MissingDependency",
+        "IncompatibleContract" => "IncompatibleContract",
+        "UnsupportedChange" => "UnsupportedChange",
         _ => "ConfigurationFailure",
     };
     fault(
@@ -250,20 +256,6 @@ pub(crate) fn public_error_path(description: &c::Description, path: &str) -> Str
     path.into()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn private_descendant_names_never_become_public_error_paths() {
-        let description = c::Description {
-            secret_paths: vec!["/token".into()],
-            ..Default::default()
-        };
-        assert_eq!(public_error_path(&description, "/token/CANARY"), "/token");
-        assert_eq!(public_error_path(&description, "/CANARY"), "");
-    }
-}
-
 pub(crate) fn origins(inputs: &[f::Edit]) -> BTreeMap<String, String> {
     inputs
         .iter()
@@ -278,4 +270,18 @@ pub(crate) fn origins(inputs: &[f::Edit]) -> BTreeMap<String, String> {
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn private_descendant_names_never_become_public_error_paths() {
+        let description = c::Description {
+            secret_paths: vec!["/token".into()],
+            ..Default::default()
+        };
+        assert_eq!(public_error_path(&description, "/token/CANARY"), "/token");
+        assert_eq!(public_error_path(&description, "/CANARY"), "");
+    }
 }

@@ -9,10 +9,12 @@ import queue
 import subprocess
 import tempfile
 import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
 from http_fixture import FixtureHTTPServer
+from install import ROOT
 
 
 def verify_background_catalog(host: pathlib.Path, composition: dict[str, Any]) -> dict[str, bool]:
@@ -60,11 +62,7 @@ def verify_background_catalog(host: pathlib.Path, composition: dict[str, Any]) -
             errors.append(f"background catalog attempted POST: {self.path}")
             self.send_error(500)
 
-    class CatalogServer(FixtureHTTPServer):
-        # The client opens eight connections at once; the stdlib default backlog is five.
-        request_queue_size = 16
-
-    server = CatalogServer(("127.0.0.1", 0), Handler)
+    server = FixtureHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     source = f"http://127.0.0.1:{server.server_port}"
@@ -208,10 +206,29 @@ def verify_background_catalog(host: pathlib.Path, composition: dict[str, Any]) -
                         if stream is not None:
                             stream.close()
 
+            def seed_cache() -> None:
+                # Exercise one stale provider; multi-provider refresh is covered in catalog tests.
+                bundled = json.loads(
+                    (ROOT / "plugins/model-access/data/pi-models.json").read_text(encoding="utf-8")
+                )
+                entries = {}
+                for provider, apis in bundled.items():
+                    if provider == "radius":
+                        continue
+                    models = next(iter(apis.values()))
+                    entries[provider] = {
+                        "models": [next(iter(models.values()))],
+                        "etag": "seed",
+                        "updated_at": int(time.time()) - (14401 if provider == "openai" else 0),
+                    }
+                (global_dir / "model-catalog.json").write_text(
+                    json.dumps({"sources": {source: entries}}), encoding="utf-8"
+                )
+
+            seed_cache()
             run("refreshed")
             count = len(requests)
-            assert count > 0
-            assert not any(path.endswith("/radius") for path in requests)
+            assert requests == ["/api/models/providers/openai"], requests
             cache = json.loads((global_dir / "model-catalog.json").read_text(encoding="utf-8"))
             assert cache["sources"][source]["openai"]["models"][0]["id"] == "background-fixture"
             run("fresh")
@@ -235,7 +252,9 @@ def verify_background_catalog(host: pathlib.Path, composition: dict[str, Any]) -
             assert len(requests) == count
             settings["offline_startup"] = False
             settings_path.write_text(json.dumps(settings), encoding="utf-8")
+            seed_cache()
             run(None, hold=True)
+            assert requests == ["/api/models/providers/openai"] * 2, requests
             assert not (root / "credential-command-ran").exists()
     finally:
         server.shutdown()

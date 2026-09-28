@@ -60,7 +60,11 @@ def verify_background_catalog(host: pathlib.Path, composition: dict[str, Any]) -
             errors.append(f"background catalog attempted POST: {self.path}")
             self.send_error(500)
 
-    server = FixtureHTTPServer(("127.0.0.1", 0), Handler)
+    class CatalogServer(FixtureHTTPServer):
+        # The client opens eight connections at once; the stdlib default backlog is five.
+        request_queue_size = 16
+
+    server = CatalogServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     source = f"http://127.0.0.1:{server.server_port}"
@@ -176,7 +180,11 @@ def verify_background_catalog(host: pathlib.Path, composition: dict[str, Any]) -
                             lambda frame: frame.get("event", {}).get("kind")
                             == "model_catalog_refreshed"
                         )
-                        assert event["event"]["payload"]["status"] == expect, event
+                        assert event["event"]["payload"]["status"] == expect, (
+                            event,
+                            requests,
+                            errors,
+                        )
                     send("stop", "shutdown")
                     assert process.stdin is not None
                     process.stdin.close()

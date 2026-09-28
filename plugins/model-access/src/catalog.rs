@@ -379,8 +379,15 @@ impl Catalog {
                 .truncate(false)
                 .open(path.with_extension("lock"))
                 .map_err(|_| fault("cannot open catalog lock"))?;
-            lock.lock()
-                .map_err(|_| fault("cannot lock catalog cache"))?;
+            loop {
+                match lock.try_lock() {
+                    Ok(()) => break,
+                    Err(std::fs::TryLockError::WouldBlock) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    }
+                    Err(_) => return Err(fault("cannot lock catalog cache")),
+                }
+            }
             let mut disk: Disk = if path.exists() {
                 serde_json::from_slice(
                     &std::fs::read(path).map_err(|_| fault("cannot read catalog cache"))?,
@@ -754,7 +761,7 @@ impl Catalog {
             .build()
             .map_err(|_| fault("catalog HTTP client initialization failed"))?;
         let fetch = async {
-            let results = stream::iter(providers.into_iter().map(|provider| {
+            let mut results = stream::iter(providers.into_iter().map(|provider| {
                 let client = &client;
                 let source = &source;
                 let previous = cached.get(&provider).cloned();
@@ -769,7 +776,7 @@ impl Catalog {
                             .as_ref()
                             .filter(|c| {
                                 !c.models.is_empty()
-                                    && (!pi_source(&source) || c.last_modified.is_some())
+                                    && (!pi_source(source) || c.last_modified.is_some())
                             })
                             .and_then(|c| c.etag.as_ref())
                         {
@@ -824,25 +831,32 @@ impl Catalog {
                     (provider, result)
                 }
             }))
-            .buffer_unordered(8)
-            .collect::<Vec<_>>()
-            .await;
-            let mut updates = cached.clone();
+            .buffer_unordered(8);
             let mut failed = false;
-            for (provider, result) in results {
+            while let Some((provider, result)) = results.next().await {
                 match result {
                     Ok(cache) => {
-                        updates.insert(provider, cache);
+                        let mut inner = self.inner.lock().await;
+                        if inner.generation != generation || inner.source != source {
+                            return Ok("superseded".into());
+                        }
+                        // Publish each completed provider so the overall deadline preserves progress.
+                        inner
+                            .disk
+                            .sources
+                            .entry(source.clone())
+                            .or_default()
+                            .insert(provider, cache);
+                        self.persist(&mut inner, Persist::Cache(source.clone()))
+                            .await?;
                     }
                     Err(_) => failed = true,
                 }
             }
-            let mut inner = self.inner.lock().await;
+            let inner = self.inner.lock().await;
             if inner.generation != generation || inner.source != source {
                 return Ok("superseded".into());
             }
-            inner.disk.sources.insert(source.clone(), updates);
-            self.persist(&mut inner, Persist::Cache(source)).await?;
             Ok(if failed {
                 "refresh_failed_cached"
             } else {
@@ -1373,7 +1387,7 @@ mod tests {
         release.send(()).unwrap();
         assert_eq!(refresh.await.unwrap().unwrap(), "superseded");
         assert!(catalog.inner.lock().await.disk.sources.is_empty());
-        server.await.unwrap();
+        server.abort();
     }
     #[tokio::test]
     async fn stale_refresh_preserves_another_instances_saved_default() {

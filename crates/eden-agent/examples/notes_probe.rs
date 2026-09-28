@@ -172,14 +172,19 @@ async fn migration_copies(composition: &Path, scratch: &Path) -> Result<()> {
     Ok(())
 }
 // Model a saved split-package binding without shipping legacy native libraries.
-// Checkpoint records are copied unchanged; only the fixture's package identity differs.
+// Checkpoints are copied unchanged; the synthetic binding and session header
+// identify the legacy packages and the fixture's isolated working directory.
 async fn switch_legacy_binding(composition: &Path, scratch: &Path) -> Result<Value> {
     let history = scratch.join("history.jsonl");
     let mut records = eden_protocol::history::scan_records(&std::fs::read(&history)?).records;
     let merged = "note-style-context-management";
+    let fixture_cwd = std::fs::canonicalize(scratch)?;
+    let header = records.first_mut().ok_or("missing session header")?;
+    assert_eq!(header.kind, "session");
+    header.payload["cwd"] = json!(fixture_cwd.to_string_lossy());
     for record in records.iter_mut().filter(|r| r.kind == "composition_lock") {
         let binding = &mut record.payload;
-        binding["cwd"] = json!(scratch.to_string_lossy());
+        binding["cwd"] = json!(fixture_cwd.to_string_lossy());
         let packages = binding["packages"]
             .as_object_mut()
             .ok_or("missing packages")?;
@@ -243,7 +248,12 @@ async fn switch_legacy_binding(composition: &Path, scratch: &Path) -> Result<Val
     };
     let refused = Session::open_with_workspace(composition, options(), workspace()).await;
     let error = refused.err().ok_or("legacy binding silently replaced")?;
-    assert!(error.message.contains("explicitly switch"), "{error:?}");
+    assert_eq!(error.code, "Unavailable");
+    assert_eq!(error.source, "composition");
+    assert!(
+        error.message.contains("saved package binding differs"),
+        "{error:?}"
+    );
     assert_eq!(std::fs::read(&history)?, original);
     let switched = Session::open_rebound(composition, options(), workspace()).await?;
     let after = switched.history().await?;

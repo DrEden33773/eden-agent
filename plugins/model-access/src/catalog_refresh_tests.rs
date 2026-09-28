@@ -161,3 +161,115 @@ fn bundled_gemini_medium_reaches_the_native_wire() {
         "MEDIUM"
     );
 }
+
+#[tokio::test]
+async fn cache_lock_wait_yields_to_the_refresh_deadline() {
+    use std::time::Duration;
+    let path =
+        std::env::temp_dir().join(format!("eden-catalog-deadline-{}.json", std::process::id()));
+    let lock_path = path.with_extension("lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    lock.lock().unwrap();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let owner = std::thread::spawn(move || {
+        let _ = released.recv_timeout(Duration::from_secs(1));
+        drop(lock);
+    });
+    let catalog = Catalog {
+        refresh_lock: Mutex::new(()),
+        background_job: Mutex::new(None),
+        config: Config {
+            cache_path: Some(path.clone()),
+            ..Default::default()
+        },
+        inner: Mutex::new(Inner {
+            source: "https://pi.dev".into(),
+            generation: 0,
+            disk: Disk::default(),
+        }),
+    };
+    let result = tokio::time::timeout(Duration::from_millis(50), async {
+        let mut inner = catalog.inner.lock().await;
+        catalog.persist(&mut inner, Persist::Default).await
+    })
+    .await;
+    let _ = release.send(());
+    owner.join().unwrap();
+    let written = path.exists();
+    let _ = std::fs::remove_file(path);
+    std::fs::remove_file(lock_path).unwrap();
+    assert!(
+        result.is_err(),
+        "a contended filesystem lock blocked the async deadline"
+    );
+    assert!(!written, "cancelled persistence wrote a catalog");
+}
+
+#[tokio::test]
+async fn refresh_deadline_keeps_providers_that_already_succeeded() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let source = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut handlers = tokio::task::JoinSet::new();
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            handlers.spawn(async move {
+                let mut request = Vec::new();
+                let mut bytes = [0;2048];
+                while !request.windows(4).any(|p| p == b"\r\n\r\n") {
+                    let n = socket.read(&mut bytes).await.unwrap();
+                    if n == 0 { return; }
+                    request.extend_from_slice(&bytes[..n]);
+                }
+                if String::from_utf8_lossy(&request).contains("/api/models/providers/amazon-bedrock ") {
+                    let body = r#"[{"id":"fast-model","api":"openai-responses","baseUrl":"http://localhost/v1"}]"#;
+                    socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+                } else {
+                    // Hold the other requests until the client deadline drops its connections.
+                    let _ = socket.read(&mut bytes).await;
+                }
+            });
+        }
+    });
+    let path =
+        std::env::temp_dir().join(format!("eden-partial-catalog-{}.json", std::process::id()));
+    let catalog = Catalog {
+        refresh_lock: Mutex::new(()),
+        background_job: Mutex::new(None),
+        config: Config {
+            cache_path: Some(path.clone()),
+            ..Default::default()
+        },
+        inner: Mutex::new(Inner {
+            source: source.clone(),
+            generation: 0,
+            disk: Disk::default(),
+        }),
+    };
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        catalog.refresh_public(None, false),
+    )
+    .await;
+    server.abort();
+    let disk = std::fs::read(&path)
+        .ok()
+        .map(|b| serde_json::from_slice::<Value>(&b).unwrap());
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("lock"));
+    assert!(
+        result.is_err(),
+        "slow providers should remain pending at the deadline"
+    );
+    assert_eq!(
+        disk.unwrap_or_default()["sources"][&source]["amazon-bedrock"]["models"][0]["id"],
+        "fast-model"
+    );
+}

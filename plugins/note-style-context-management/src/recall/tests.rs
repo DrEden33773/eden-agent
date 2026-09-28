@@ -215,7 +215,7 @@ fn service_and_tool_only_route_store_reads_even_for_historical_tool_intents() {
             // SAFETY: All callbacks are static; host stays live through stop and each reply is synchronous.
             let instance = unsafe {
                 LocalInstance::new(
-                    create(Value::Null).unwrap(),
+                    crate::create(serde_json::Value::Null).unwrap(),
                     HostApi {
                         context: (&*host as *const Host) as usize,
                         request,

@@ -1,4 +1,5 @@
-//! Optional notes preparation and recovery through the public checkpoint contract.
+//! Optional durable notes and original-history recall through public contracts.
+mod recall;
 use eden_plugin_sdk::{
     CallContext, Package, protocol as p,
     serde_json::{self, Value, json},
@@ -238,39 +239,44 @@ fn description() -> p::configuration::Description {
 }
 fn descriptor() -> p::Descriptor {
     p::Descriptor {
-        package: "notes".into(),
+        package: "note-style-context-management".into(),
         version: "0.1.0".into(),
         provides: vec![
             c::POLICY.into(),
             INTERPRETER.into(),
             MIGRATOR.into(),
             p::configuration::CONFIGURATION.into(),
+            p::recall::RECALL.into(),
+            p::recall::TOOLS.into(),
+            p::recall::TOOL.into(),
         ],
     }
 }
 fn create(value: Value) -> Result<Package, Fault> {
     let settings = config(value)?;
-    Ok(Package::new("notes")
-        .service(c::POLICY, move |request, cx| {
-            prepare(request, cx, settings.clone())
-        })
-        .service(INTERPRETER, |request, _| async move { interpret(request) })
-        .service(MIGRATOR, |request, _| async move { migrate(request) })
-        .service(
-            p::configuration::CONFIGURATION,
-            |request: p::configuration::PluginRequest, _| async move {
-                match request {
-                    p::configuration::PluginRequest::Describe => Ok(json!(description())),
-                    p::configuration::PluginRequest::Validate { config } => {
-                        Ok(json!(p::configuration::validate(&description(), &config)?))
+    Ok(recall::register(
+        Package::new("note-style-context-management")
+            .service(c::POLICY, move |request, cx| {
+                prepare(request, cx, settings.clone())
+            })
+            .service(INTERPRETER, |request, _| async move { interpret(request) })
+            .service(MIGRATOR, |request, _| async move { migrate(request) })
+            .service(
+                p::configuration::CONFIGURATION,
+                |request: p::configuration::PluginRequest, _| async move {
+                    match request {
+                        p::configuration::PluginRequest::Describe => Ok(json!(description())),
+                        p::configuration::PluginRequest::Validate { config } => {
+                            Ok(json!(p::configuration::validate(&description(), &config)?))
+                        }
+                        p::configuration::PluginRequest::Update { .. } => Err(fault(
+                            "Unsupported",
+                            "notes configuration requires local rebuild",
+                        )),
                     }
-                    p::configuration::PluginRequest::Update { .. } => Err(fault(
-                        "Unsupported",
-                        "notes configuration requires local rebuild",
-                    )),
-                }
-            },
-        ))
+                },
+            ),
+    ))
 }
 eden_plugin_sdk::export_plugin!(descriptor, create);
 
@@ -331,6 +337,27 @@ mod tests {
             states: preview.states,
         })
         .unwrap();
+    }
+    #[test]
+    fn one_package_exports_notes_and_recall_services() {
+        let package = create(Value::Null).unwrap();
+        assert_eq!(
+            package.descriptor().package,
+            "note-style-context-management"
+        );
+        let mut services = package.descriptor().provides.clone();
+        services.sort();
+        let mut expected = vec![
+            c::POLICY,
+            INTERPRETER,
+            MIGRATOR,
+            p::configuration::CONFIGURATION,
+            p::recall::RECALL,
+            p::recall::TOOLS,
+            p::recall::TOOL,
+        ];
+        expected.sort();
+        assert_eq!(services, expected);
     }
     #[test]
     fn configuration_limits_and_descriptor_are_real() {

@@ -62,6 +62,23 @@ impl Session {
         })
     }
 
+    /// Ask the selected catalog to schedule public metadata maintenance as its own job.
+    /// Interactive clients call this once after opening; ordinary SDK opens and print commands
+    /// stay network-free. Older catalogs may reject this optional request without affecting use.
+    pub async fn refresh_models_in_background(&self) -> Result<m::CatalogReply, Fault> {
+        let workspace = Workspace::discover(Path::new(self.cwd()), &self.0.workspace_options)?;
+        if workspace.settings["offline_startup"] == true {
+            return Ok(m::CatalogReply {
+                providers: vec![],
+                models: vec![],
+                target: None,
+                source: m::CatalogSource::default(),
+                status: "offline_startup".into(),
+            });
+        }
+        self.service(0, m::MODEL_CATALOG, &m::CatalogRequest::RefreshInBackground)
+            .await
+    }
     /// Read model metadata without inference or authentication side effects.
     pub async fn models(&self) -> Result<m::CatalogReply, Fault> {
         self.service(0, m::MODEL_CATALOG, &m::CatalogRequest::List)

@@ -171,28 +171,134 @@ async fn migration_copies(composition: &Path, scratch: &Path) -> Result<()> {
     assert_eq!(std::fs::read(&future)?, future_bytes);
     Ok(())
 }
+// Model a saved split-package binding without shipping legacy native libraries.
+// Checkpoints are copied unchanged; the synthetic binding and session header
+// identify the legacy packages and the fixture's isolated working directory.
+async fn switch_legacy_binding(composition: &Path, scratch: &Path) -> Result<Value> {
+    let history = scratch.join("history.jsonl");
+    let mut records = eden_protocol::history::scan_records(&std::fs::read(&history)?).records;
+    let merged = "note-style-context-management";
+    let fixture_cwd = std::fs::canonicalize(scratch)?;
+    let header = records.first_mut().ok_or("missing session header")?;
+    assert_eq!(header.kind, "session");
+    header.payload["cwd"] = json!(fixture_cwd.to_string_lossy());
+    for record in records.iter_mut().filter(|r| r.kind == "composition_lock") {
+        let binding = &mut record.payload;
+        binding["cwd"] = json!(fixture_cwd.to_string_lossy());
+        let packages = binding["packages"]
+            .as_object_mut()
+            .ok_or("missing packages")?;
+        let package = packages.remove(merged).ok_or("missing notes package")?;
+        for (name, services) in [
+            (
+                "notes",
+                vec![
+                    "eden.compaction-policy.v1",
+                    "eden.record-interpreter.v1",
+                    "eden.state-migrator.v1",
+                    "eden.configuration.v1",
+                ],
+            ),
+            ("recall", vec![recall::RECALL, recall::TOOLS, recall::TOOL]),
+        ] {
+            let mut legacy = package.clone();
+            legacy["descriptor"]["package"] = json!(name);
+            legacy["descriptor"]["provides"] = json!(services);
+            legacy["sha256"] = json!("0".repeat(64));
+            packages.insert(name.into(), legacy);
+        }
+        for name in binding["roles"]
+            .as_object_mut()
+            .ok_or("missing roles")?
+            .values_mut()
+        {
+            if name == merged {
+                *name = json!("recall");
+            }
+        }
+        for route in binding["runtime"]["scopes"][""]["bindings"]
+            .as_object_mut()
+            .ok_or("missing bindings")?
+            .values_mut()
+        {
+            if route["tail"] == merged {
+                route["tail"] = json!("notes");
+            }
+        }
+        binding["library_locations"] =
+            json!(["legacy/plugins/notes/0.1.0", "legacy/plugins/recall/0.1.0"]);
+    }
+    std::fs::write(
+        &history,
+        eden_protocol::history::encode_transaction(&records)?,
+    )?;
+    let original = std::fs::read(&history)?;
+    let options = || SessionOptions {
+        cwd: scratch.to_owned(),
+        history: Some(history.clone()),
+    };
+    let workspace = || WorkspaceOptions {
+        global_dir: scratch.join("global"),
+        project_trust: Some(false),
+        overrides: json!({
+            "offline_startup": true,
+            "discover_skills": false,
+            "discover_templates": false,
+        }),
+    };
+    let refused = Session::open_with_workspace(composition, options(), workspace()).await;
+    let error = refused.err().ok_or("legacy binding silently replaced")?;
+    assert_eq!(error.code, "Unavailable");
+    assert_eq!(error.source, "composition");
+    assert!(
+        error.message.contains("saved package binding differs"),
+        "{error:?}"
+    );
+    assert_eq!(std::fs::read(&history)?, original);
+    let switched = Session::open_rebound(composition, options(), workspace()).await?;
+    let after = switched.history().await?;
+    assert_eq!(json!(&after[..records.len()]), json!(records));
+    let binding = &after
+        .iter()
+        .rev()
+        .find(|r| r.kind == "composition_lock")
+        .ok_or("missing new binding")?
+        .payload;
+    assert!(binding["packages"].get(merged).is_some());
+    assert!(binding["packages"].get("notes").is_none());
+    assert!(binding["packages"].get("recall").is_none());
+    switched.shutdown().await?;
+    Ok(json!({
+        "legacy_binding_requires_explicit_switch": true,
+        "original_records_preserved": true,
+    }))
+}
 async fn probe(composition: &Path, scratch: &Path, mode: &str) -> Result<Value> {
-    let session = Session::open_rebound(
-        composition,
-        SessionOptions {
-            cwd: if matches!(mode, "missing-interpreter" | "incompatible") {
-                scratch.parent().ok_or("missing original cwd")?.to_owned()
-            } else {
-                scratch.to_owned()
-            },
-            history: Some(scratch.join("history.jsonl")),
+    if mode == "legacy-switch" {
+        return switch_legacy_binding(composition, scratch).await;
+    }
+    let options = SessionOptions {
+        cwd: if matches!(mode, "missing-interpreter" | "incompatible") {
+            scratch.parent().ok_or("missing original cwd")?.to_owned()
+        } else {
+            scratch.to_owned()
         },
-        WorkspaceOptions {
-            global_dir: scratch.join("global"),
-            project_trust: Some(false),
-            overrides: json!({
-                "offline_startup": true,
-                "discover_skills": false,
-                "discover_templates": false,
-            }),
-        },
-    )
-    .await?;
+        history: Some(scratch.join("history.jsonl")),
+    };
+    let workspace = WorkspaceOptions {
+        global_dir: scratch.join("global"),
+        project_trust: Some(false),
+        overrides: json!({
+            "offline_startup": true,
+            "discover_skills": false,
+            "discover_templates": false,
+        }),
+    };
+    let session = if mode == "resume" {
+        Session::open_with_workspace(composition, options, workspace).await?
+    } else {
+        Session::open_rebound(composition, options, workspace).await?
+    };
     if matches!(mode, "missing-interpreter" | "incompatible") {
         let records = session.history().await?;
         assert!(records.iter().any(|r| {

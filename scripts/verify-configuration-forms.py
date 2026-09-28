@@ -294,14 +294,17 @@ def composition() -> dict:
     packages.extend(
         [
             package(
-                "notes",
+                "note-style-context-management",
                 [
                     "eden.compaction-policy.v1",
                     "eden.record-interpreter.v1",
                     "eden.state-migrator.v1",
                     CONFIGURATION,
+                    "eden.history-recall.v1",
+                    "eden.history-recall-tools.v1",
+                    "eden.history-recall-tool.v1",
                 ],
-                str(build_target() / "debug" / library("eden_notes")),
+                str(build_target() / "debug" / library("eden_note_style_context_management")),
                 target(),
                 {"max_output_tokens": 2048, "timeout_ms": 60000, "max_input_bytes": 262144},
             ),
@@ -347,7 +350,7 @@ def composition() -> dict:
             {},
         )
     )
-    roles["eden.record-interpreter.v1"] = "notes"
+    roles["eden.record-interpreter.v1"] = "note-style-context-management"
     roles["eden.cache-warmer.v1"] = "cache-warmer"
     for name, config in [(HELPER, default), (CUSTOM, custom)]:
         state = f"author.{name}.state.v1"
@@ -545,7 +548,10 @@ def exercise(
         terminal.action(b"\x13")
         await_value(endpoint, CUSTOM, "endpoint", "https://customized-tui.invalid")
     browser.screenshot("web-customized-helper")
-    for instance, budgets in [("notes", [256, 384, 512, 640]), ("cache-warmer", [2, 3, 4, 5])]:
+    for instance, budgets in [
+        ("note-style-context-management", [256, 384, 512, 640]),
+        ("cache-warmer", [2, 3, 4, 5]),
+    ]:
         browser.fill("Configuration instance", instance)
         browser.run("find", "role", "button", "click", "--name", "Open settings", "--exact")
         browser.wait(f"document.body.innerText.includes('Instance {instance} ·')")
@@ -592,8 +598,8 @@ def headless(endpoint: dict, terminal: Terminal | None, reason: str) -> dict:
         (HELPER, "/count", 5),
         (CUSTOM, "/endpoint", "https://headless.invalid"),
         (CUSTOM, "/style", "helper"),
-        ("notes", "/max_output_tokens", 256),
-        ("notes", "/max_output_tokens", 384),
+        ("note-style-context-management", "/max_output_tokens", 256),
+        ("note-style-context-management", "/max_output_tokens", 384),
         ("cache-warmer", "/max_output_tokens", 2),
         ("cache-warmer", "/max_output_tokens", 3),
     ]:
@@ -677,7 +683,7 @@ def private_evidence(endpoint: dict, terminal: Terminal | None, browser: Browser
     """PC-06: native material delivery, shared transactions, masking and material-free retry."""
     peer = call(endpoint, "/attach", {"frontend": "web"})["attachment"]
     receipts = []
-    unrelated = configuration(endpoint, "notes")["generation"]
+    unrelated = configuration(endpoint, "note-style-context-management")["generation"]
 
     def public_surfaces() -> None:
         assert_private_absent(call(endpoint, "/snapshot"))
@@ -782,7 +788,10 @@ def private_evidence(endpoint: dict, terminal: Terminal | None, browser: Browser
                     assert after["effective"][path[1:]] == public_value
                     assert after["secrets_configured"][secret_path] == (token is not None)
                     assert after["generation"] != before["generation"]
-                    assert configuration(endpoint, "notes")["generation"] == unrelated
+                    assert (
+                        configuration(endpoint, "note-style-context-management")["generation"]
+                        == unrelated
+                    )
                     public_surfaces()
         # Both native initializers return a diagnostic containing the submitted value.
         # The shared rollback must restore the public edit as well as the secret state.

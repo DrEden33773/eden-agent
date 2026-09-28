@@ -142,17 +142,12 @@ def install(
                 ],
             ),
             (
-                "notes",
+                "note-style-context-management",
                 [
                     "eden.compaction-policy.v1",
                     "eden.record-interpreter.v1",
                     "eden.state-migrator.v1",
                     "eden.configuration.v1",
-                ],
-            ),
-            (
-                "recall",
-                [
                     "eden.history-recall.v1",
                     "eden.history-recall-tools.v1",
                     "eden.history-recall-tool.v1",
@@ -191,7 +186,7 @@ def install(
             relative = f"plugins/{pkg}/0.1.0/{lib}"
             (destination / relative).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(build_target() / profile / lib, destination / relative)
-            if pkg in {"notes", "recall"}:
+            if pkg == "note-style-context-management":
                 continue
             config = None
             if pkg == "coding-tools":

@@ -1,6 +1,28 @@
-# History recall
+# Note-style context management
 
-The `recall` native package serves `eden.history-recall.v1`. It reads the current session through `eden.session-store.v2` (`Read`) and public history's active ancestor path. It never opens another session, mutates history, or executes recorded tools. Records retained before compaction remain eligible.
+The `note-style-context-management` native package combines durable notes and original-history recall in one crate and dynamic library. It is shipped without being mounted by default; the coding summary policy remains the default. Notes preparation, recovery, configuration budgets and explicit migration are described in [Compaction policies and durable notes](../../docs/compaction.md). Independent plugins may call `eden.history-recall.v1` directly without selecting the notes compaction policy. It reads the current session through `eden.session-store.v2` (`Read`) and public history's active ancestor path. It never opens another session, mutates history, or executes recorded tools. Records retained before compaction remain eligible.
+
+## Native package
+
+Use the matching host/SDK pairing and platform target described in [Native plugins](../../docs/native-plugins.md). The package manifest descriptor is:
+
+```json
+{
+  "package": "note-style-context-management",
+  "version": "0.1.0",
+  "provides": [
+    "eden.compaction-policy.v1",
+    "eden.record-interpreter.v1",
+    "eden.state-migrator.v1",
+    "eden.configuration.v1",
+    "eden.history-recall.v1",
+    "eden.history-recall-tools.v1",
+    "eden.history-recall-tool.v1"
+  ]
+}
+```
+
+The crate is `eden-note-style-context-management`; the Linux library is `libeden_note_style_context_management.so`. Internal notes and recall code share the package, while all seven service contracts remain individually routable. Saved notes retain the `eden.notes` v1 namespace and auxiliary generation retains purpose `notes`.
 
 ## Requests and pages
 
@@ -39,4 +61,4 @@ Add the contribution to coding-tools configuration and include `history_recall` 
 }
 ```
 
-This requires routing all three recall services to the mounted recall package and the default store to the same current session. The recall service verifies the call's session identity against the returned store snapshot.
+This requires routing all three recall services to the mounted `note-style-context-management` package and the default store to the same current session. The recall service verifies the call's session identity against the returned store snapshot.

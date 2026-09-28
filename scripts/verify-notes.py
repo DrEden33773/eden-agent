@@ -14,6 +14,8 @@ from http_fixture import FixtureHTTPServer
 from install import ROOT, library, package, target
 from verification import author_artifact, example, installed, prepare, run
 
+NOTES_PACKAGE = "note-style-context-management"
+
 
 class Server:
     """Separate foreground, notes and warming requests and observe cancellation EOF."""
@@ -164,6 +166,19 @@ def main() -> None:
     prepare()
     destination = installed(ROOT / "artifacts/notes-install")
     composition = json.loads((destination / "composition.json").read_text(encoding="utf-8"))
+    assert NOTES_PACKAGE not in {
+        item["descriptor"]["package"] for item in composition["packages"]
+    }, "notes must remain unmounted by default"
+    assert composition["roles"]["eden.compaction-policy.v1"] == "coding"
+    installed_notes_library = (
+        destination
+        / "plugins"
+        / NOTES_PACKAGE
+        / "0.1.0"
+        / library("eden_note_style_context_management")
+    )
+    assert installed_notes_library.is_file()
+    assert not any((destination / "plugins" / name).exists() for name in ("notes", "recall"))
     notes_library = destination / "plugins" / library("author_notes")
     shutil.copy2(author_artifact("notes"), notes_library)
     recall_author_library = destination / "plugins" / library("author_recall")
@@ -193,14 +208,14 @@ def main() -> None:
         try:
             selected = copy.deepcopy(composition)
             bindings = {
-                "eden.compaction-policy.v1": {"tail": "notes"},
-                "eden.record-interpreter.v1": {"tail": "notes"},
-                "eden.state-migrator.v1": {"tail": "notes"},
+                "eden.compaction-policy.v1": {"tail": NOTES_PACKAGE},
+                "eden.record-interpreter.v1": {"tail": NOTES_PACKAGE},
+                "eden.state-migrator.v1": {"tail": NOTES_PACKAGE},
             }
             for item in selected["packages"]:
                 name = item["descriptor"]["package"]
                 item["library"] = str(destination / item["library"])
-                if name == "notes":
+                if name == NOTES_PACKAGE:
                     item["library"] = str(notes_library)
                 elif name == "cache-warmer":
                     item["library"] = str(warmer_library)
@@ -247,27 +262,17 @@ def main() -> None:
                     (scratch / "target.json").write_text(json.dumps(model), encoding="utf-8")
             selected["packages"].append(
                 package(
-                    "notes",
+                    NOTES_PACKAGE,
                     [
                         "eden.compaction-policy.v1",
                         "eden.record-interpreter.v1",
                         "eden.state-migrator.v1",
                         "eden.configuration.v1",
-                    ],
-                    str(notes_library),
-                    target(),
-                    {},
-                )
-            )
-            selected["packages"].append(
-                package(
-                    "recall",
-                    [
                         "eden.history-recall.v1",
                         "eden.history-recall-tools.v1",
                         "eden.history-recall-tool.v1",
                     ],
-                    str(destination / "plugins/recall/0.1.0" / library("eden_recall")),
+                    str(installed_notes_library if mode == "manual" else notes_library),
                     target(),
                     {},
                 )
@@ -301,7 +306,7 @@ def main() -> None:
                 bindings["eden.session-store.v2"] = {"tail": "coding-replacements"}
             selected["roles"].update(
                 {
-                    role: "recall"
+                    role: NOTES_PACKAGE
                     for role in (
                         "eden.history-recall.v1",
                         "eden.history-recall-tools.v1",
@@ -313,8 +318,21 @@ def main() -> None:
             selected["runtime"] = {"scopes": {"": {"bindings": bindings}}}
             default = copy.deepcopy(selected)
             default["packages"] = [
-                item for item in default["packages"] if item["descriptor"]["package"] != "notes"
+                item
+                for item in default["packages"]
+                if item["descriptor"]["package"] != NOTES_PACKAGE
             ]
+            default["roles"] = {
+                role: name for role, name in default["roles"].items() if name != NOTES_PACKAGE
+            }
+            for item in default["packages"]:
+                if item["descriptor"]["package"] == "coding-tools":
+                    item["config"]["tools"].remove("history_recall")
+                    item["config"]["contributions"] = [
+                        contribution
+                        for contribution in item["config"]["contributions"]
+                        if contribution["catalog"] != "eden.history-recall-tools.v1"
+                    ]
             default["runtime"]["scopes"][""]["bindings"] = {}
             (scratch / "default.json").write_text(json.dumps(default), encoding="utf-8")
             config = destination / f"{mode}.json"
@@ -330,6 +348,17 @@ def main() -> None:
             )
             results[mode] = json.loads(completed.stdout)
             if mode == "manual":
+                legacy = scratch / "legacy"
+                legacy.mkdir()
+                shutil.copy2(scratch / "history.jsonl", legacy / "history.jsonl")
+                for legacy_mode in ("legacy-switch", "resume"):
+                    legacy_result = run(
+                        [example("notes_probe"), config, legacy, legacy_mode],
+                        ROOT,
+                        env=environment,
+                        timeout=120,
+                    )
+                    results[f"legacy-{legacy_mode}"] = json.loads(legacy_result.stdout)
                 resume_start = len(server.requests)
                 reopened = run(
                     [example("notes_probe"), config, scratch, "resume"],

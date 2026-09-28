@@ -98,9 +98,19 @@ pub struct CatalogEntry {
 pub enum CatalogRequest {
     List,
     Refresh,
-    SetSource { url: String },
-    Resolve { selection: Option<ModelSelection> },
-    SetDefault { selection: ModelSelection },
+    /// Submit an instance-owned public catalog refresh without occupying a foreground run.
+    RefreshInBackground,
+    /// Refresh expired public metadata only; never log in or mutate account model policies.
+    RefreshIfStale,
+    SetSource {
+        url: String,
+    },
+    Resolve {
+        selection: Option<ModelSelection>,
+    },
+    SetDefault {
+        selection: ModelSelection,
+    },
 }
 /// Failure status may accompany a usable retained catalog.
 #[derive(Clone, Debug, Serialize, Deserialize)]

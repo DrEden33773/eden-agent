@@ -26,7 +26,7 @@ Run `python scripts/license_bundle.py --check --all-platforms` to validate the l
 
 ## Pi model catalog
 
-The bundled model catalog is data from `@earendil-works/pi-ai@0.85.1`, distributed under the MIT license. The license below is from [the pinned upstream source](https://github.com/earendil-works/pi/blob/d981de1229ef899957bbe968bc8dcda02a21f477/LICENSE). It applies to the model data embedded in the model-access library; Pi runtime code is not required.
+The bundled model catalog is data from `@earendil-works/pi-ai@0.87.1`, distributed under the MIT license. The license below is from [the pinned upstream source](https://github.com/earendil-works/pi/blob/f07218c4d4bbc12bef056a7058c3dd49dfe41abe/LICENSE). It applies to the model data embedded in the model-access library; Pi runtime code is not required.
 
 ```text
 MIT License

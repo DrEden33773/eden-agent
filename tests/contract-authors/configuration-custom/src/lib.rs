@@ -65,6 +65,23 @@ fn descriptor() -> p::Descriptor {
     }
 }
 fn create(config: Value) -> Result<Package, Fault> {
+    // A fresh-process replay must deliver the actual retained value to this native initializer.
+    if config["endpoint"] == "https://private-replay-required.invalid"
+        && config["token"] != "D2_REPLAY_CANARY"
+    {
+        return Err(Fault::new(
+            "InvalidInput",
+            PACKAGE,
+            "Retained private input was not restored",
+        ));
+    }
+    if config["token"] == "D2_FAIL_CANARY" {
+        return Err(Fault::new(
+            "InvalidInput",
+            PACKAGE,
+            "D2_FAIL_CANARY rejected during native initialization",
+        ));
+    }
     let validation = validate(&config)?;
     if !validation.errors.is_empty() {
         return Err(Fault::new(
@@ -134,10 +151,12 @@ fn description() -> config::Description {
                         "enabled": { "type": "boolean", "title": "Policy enabled" },
                     },
                 },
+                "token": { "type": "string", "title": "Private token" },
                 "tags": { "type": "array", "items": { "type": "string" }, "title": "Tags" },
             },
         })),
         defaults: defaults(),
+        secret_paths: vec!["/token".into()],
         live_paths: vec!["/endpoint".into(), "/policy".into(), "/tags".into()],
         description: Some("Independent direct-form and customized-helper author".into()),
         ..config::Description::default()
@@ -158,6 +177,7 @@ fn presentation(model: &Model) -> view::View {
     } else {
         let fields = [
             ("/endpoint", "Destination", Control::Text),
+            ("/token", "Private token", Control::Secret),
             ("/policy/retries", "Retry budget", Control::Integer),
             ("/policy/enabled", "Policy enabled", Control::Boolean),
             ("/tags", "Tags", Control::List),
@@ -169,7 +189,11 @@ fn presentation(model: &Model) -> view::View {
             label: label.into(),
             description: None,
             control,
-            value: model.effective.pointer(path).cloned(),
+            value: if path == "/token" {
+                None
+            } else {
+                model.effective.pointer(path).cloned()
+            },
             item_kind: if path == "/tags" {
                 Some("string".into())
             } else {
@@ -182,7 +206,7 @@ fn presentation(model: &Model) -> view::View {
             },
             source: model.sources.get(path).cloned(),
             writable: true,
-            configured: false,
+            configured: model.secrets_configured.get(path).copied().unwrap_or(false),
         })
         .collect();
         view::View::new(
@@ -214,6 +238,24 @@ fn presentation(model: &Model) -> view::View {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn private_input_reaches_native_initializer_and_requires_restart() {
+        let initial = defaults();
+        let mut candidate = initial.clone();
+        candidate["token"] = json!("D2_SET_CANARY");
+        assert!(!config::is_live_change(
+            &description(),
+            &initial,
+            &candidate
+        ));
+        assert!(create(candidate.clone()).is_ok());
+        candidate["token"] = json!("D2_FAIL_CANARY");
+        let error = match create(candidate) {
+            Ok(_) => panic!("native initializer must reject the failure canary"),
+            Err(error) => error,
+        };
+        assert!(error.message.contains("D2_FAIL_CANARY"));
+    }
     #[test]
     fn invalid_update_preserves_the_effective_state() {
         let initial = defaults();

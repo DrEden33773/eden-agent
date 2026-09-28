@@ -16,6 +16,7 @@ mod configuration_metadata;
 mod configuration_presentation;
 mod generation;
 mod models;
+mod private_input;
 mod workspace_setup;
 use eden_plugin_sdk::Cancellation;
 use eden_protocol::{AGENT_LOOP, Request, RunInput, coding as c};
@@ -208,7 +209,11 @@ impl Session {
         embedded = embedded.package(presentation.package(), "eden-host-presentation-v1")?;
         let mut selected = embedded.composition;
         let sources = configuration_metadata::origins(&selected, &workspace_options)?;
-        let mut configuration = configuration::replay(&mut selected, &previous)?;
+        let mut configuration = configuration::replay_private(
+            &mut selected,
+            &previous,
+            Some(&workspace_options.global_dir),
+        )?;
         configuration.inherited_sources = sources.clone();
         configuration.sources = sources;
         configuration::replay_sources(&mut configuration, &previous);

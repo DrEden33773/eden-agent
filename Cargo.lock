@@ -1411,6 +1411,7 @@ dependencies = [
  "eden-plugin-sdk",
  "eden-process",
  "eden-protocol",
+ "eden-workspace",
  "futures-util",
  "getrandom 0.3.4",
  "google-cloud-auth",
@@ -1511,6 +1512,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

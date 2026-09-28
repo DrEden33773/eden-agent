@@ -29,6 +29,7 @@ mod catalog;
 mod chat;
 mod cloud;
 mod codex_socket;
+mod configuration;
 mod credentials;
 mod gemini;
 mod mistral;
@@ -79,6 +80,7 @@ struct Config {
     model: Option<String>,
     endpoint: Option<String>,
     api_key_env: Option<String>,
+    api_key: Option<String>,
     profile: Option<Profile>,
     max_output_tokens: Option<u32>,
     reasoning_effort: Option<String>,
@@ -108,8 +110,11 @@ impl Config {
             .clone()
             .or_else(|| env("EDEN_API_KEY_ENV"))
             .unwrap_or_else(|| "OPENAI_API_KEY".into());
-        let key = env(&key_env)
+        let key = self
+            .api_key
+            .clone()
             .filter(|s| !s.trim().is_empty())
+            .or_else(|| env(&key_env).filter(|s| !s.trim().is_empty()))
             .ok_or_else(|| {
                 failure("configured API key environment variable is missing or empty")
             })?;
@@ -183,6 +188,7 @@ fn descriptor() -> Descriptor {
             eden_protocol::models::MODEL_MANAGER.into(),
             eden_protocol::models::CREDENTIAL_SOURCE.into(),
             eden_protocol::models::AUTH.into(),
+            eden_protocol::configuration::CONFIGURATION.into(),
             eden_protocol::auxiliary::PROVIDER.into(),
             MODEL_INFO.into(),
             PROVIDER.into(),
@@ -204,6 +210,7 @@ fn create(mut config: Value) -> Result<Package, Fault> {
         )?,
         &config,
     )?;
+    let package = configuration::register(package, &config);
     let config: Config = serde_json::from_value(if config.is_null() {
         serde_json::json!({})
     } else {

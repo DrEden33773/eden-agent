@@ -263,7 +263,12 @@ function App() {
     setDrafts((previous) => ({ ...previous, [key]: { ...previous[key], [field]: value } }));
     typing({ kind: "form", owner: view.owner, view_id: view.id, node_id: node.id });
   };
-  const act = async (view: View, action: string, values: unknown) => {
+  const act = async (
+    view: View,
+    action: string,
+    values: unknown,
+    inputs?: import("./configuration").Edit[],
+  ) => {
     stopActivity();
     const attempt = {
       session_id: frame?.presentation.session_id,
@@ -273,44 +278,64 @@ function App() {
       action,
       values,
     };
-    const request_id = attemptId("action", attempt);
+    const kind = inputs ? "private-input" : "action";
+    const previous = attempts()[`${kind}:${JSON.stringify(attempt)}`];
+    const request_id = attemptId(kind, attempt);
     try {
-      const result = await api("/action", { ...attempt, request_id });
-      forgetAttempt("action", attempt);
+      const result = await api(
+        inputs ? "/private-input" : "/action",
+        inputs
+          ? { request: { ...attempt, request_id }, inputs: previous ? [] : inputs }
+          : { ...attempt, request_id },
+      );
+      forgetAttempt(kind, attempt);
       setPendingAttempt(null);
       setMessage(`Action: ${JSON.stringify(result)}`);
       return result;
     } catch (error) {
       if (error instanceof ApiFault) {
-        forgetAttempt("action", attempt);
+        forgetAttempt(kind, attempt);
         setPendingAttempt(null);
-      } else setPendingAttempt(`action:${JSON.stringify(attempt)}`);
+      } else setPendingAttempt(`${kind}:${JSON.stringify(attempt)}`);
       setMessage(String(error));
     }
   };
   const retryPending = async () => {
     if (!pendingAttempt) return;
-    const kind = pendingAttempt.startsWith("action:") ? "action" : "send";
+    const kind = pendingAttempt.startsWith("private-input:")
+      ? "private-input"
+      : pendingAttempt.startsWith("action:")
+        ? "action"
+        : "send";
     const body = JSON.parse(pendingAttempt.slice(kind.length + 1)) as Record<string, unknown>;
     const request_id = attempts()[pendingAttempt];
     if (!request_id) {
       setPendingAttempt(null);
       return;
     }
-    const route = kind === "action" ? "/action" : body.mode === "prompt" ? "/prompt" : "/enqueue";
+    const route =
+      kind === "private-input"
+        ? "/private-input"
+        : kind === "action"
+          ? "/action"
+          : body.mode === "prompt"
+            ? "/prompt"
+            : "/enqueue";
     const payload =
-      kind === "action"
-        ? { ...body, request_id }
-        : body.mode === "prompt"
-          ? { request_id, text: body.text }
-          : { request_id, kind: body.mode, text: body.text };
+      kind === "private-input"
+        ? { request: { ...body, request_id }, inputs: [] }
+        : kind === "action"
+          ? { ...body, request_id }
+          : body.mode === "prompt"
+            ? { request_id, text: body.text }
+            : { request_id, kind: body.mode, text: body.text };
     try {
       const result = await api(route, payload);
       forgetAttempt(kind, body);
       setPendingAttempt(null);
       setMessage(`Retry resolved: ${JSON.stringify(result)}`);
       if (
-        kind === "action" &&
+        (kind === "action" || kind === "private-input") &&
         typeof body.action === "string" &&
         /:(apply|cancel_apply)$/.test(body.action) &&
         (result as { status?: string } | null)?.status === "applied"
@@ -353,7 +378,7 @@ function App() {
             draft={configurationDrafts[key]}
             save={(draft) => setConfigurationDrafts((previous) => ({ ...previous, [key]: draft }))}
             disabled={!connected || !view.active || Boolean(frame?.state.read_only)}
-            act={(action, values) => act(view, action, values)}
+            act={(action, values, inputs) => act(view, action, values, inputs)}
           />
         );
       }

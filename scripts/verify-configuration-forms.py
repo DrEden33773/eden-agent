@@ -17,6 +17,7 @@ from verification import author_artifact, installed, prepare
 
 HELPER = "configuration-forms"
 CUSTOM = "configuration-custom"
+DEFAULT_MODEL = "model-access"
 CONFIGURATION = "eden.configuration.v1"
 FORM = "eden.configuration.presentation.v1"
 
@@ -112,6 +113,11 @@ class Browser:
         self.run("fill", "input[data-budget-probe=selected]", value)
         self.evaluate(
             "document.querySelector('input[data-budget-probe=selected]').removeAttribute('data-budget-probe')"
+        )
+
+    def field_action(self, instance: str, path: str, action: str) -> None:
+        self.evaluate(
+            f"Array.from(Array.from(Array.from(document.querySelectorAll('form.configuration')).find(form => form.innerText.includes('Instance {instance} ·')).querySelectorAll('fieldset')).find(field => field.querySelector('legend').textContent.includes('({path})')).querySelectorAll('button')).find(button => button.textContent === {json.dumps(action)}).click()"
         )
 
     def screenshot(self, name: str) -> None:
@@ -322,6 +328,25 @@ def composition() -> dict:
             ),
         ]
     )
+    # Mount the shipped implementation for targeted configuration calls without replacing fixture roles.
+    packages.append(
+        package(
+            DEFAULT_MODEL,
+            [
+                "eden.model-catalog.v1",
+                "eden.model-manager.v1",
+                "eden.credential-source.v1",
+                "eden.auth.v1",
+                CONFIGURATION,
+                "eden.auxiliary-model.v1",
+                "eden.model-info.v1",
+                "eden.coding-provider.v1",
+            ],
+            str(build_target() / "debug" / library("eden_model_access")),
+            target(),
+            {},
+        )
+    )
     roles["eden.record-interpreter.v1"] = "notes"
     roles["eden.cache-warmer.v1"] = "cache-warmer"
     for name, config in [(HELPER, default), (CUSTOM, custom)]:
@@ -350,7 +375,7 @@ def exercise(
     assert configuration(endpoint, CUSTOM)["generation"] is not None
     browser.fill("Label", "forbidden")
     browser.action(HELPER, "validate")
-    browser.wait('document.querySelector("footer").innerText.includes("reserved")')
+    browser.wait('document.querySelector("footer").innerText.includes("plugin_validation")')
     assert configuration(endpoint, HELPER)["effective"]["label"] == "first"
     browser.action(HELPER, "Discard draft and use current values")
     browser.fill("Count", "4")
@@ -425,7 +450,7 @@ def exercise(
         terminal.action(b"\x06")
         terminal.edit(CUSTOM, "/endpoint", "forbidden")
         terminal.action(b"\x16")
-        assert "reserved" in terminal.display, terminal.display
+        assert "plugin_validation" in terminal.display, terminal.display
         assert configuration(endpoint, CUSTOM)["effective"]["endpoint"] == "https://example.invalid"
         terminal.edit(CUSTOM, "/endpoint", "https://tui.invalid")
         terminal.action(b"\x16")
@@ -618,6 +643,304 @@ def headless(endpoint: dict, terminal: Terminal | None, reason: str) -> dict:
     }
 
 
+def assert_private_absent(value: Any) -> None:
+    text = value if isinstance(value, str) else json.dumps(value)
+    assert not re.search(r"D2_[A-Z_]*CANARY", text), "Private material escaped into public output"
+
+
+def action_request(endpoint: dict, instance: str, action: str, edits: list[dict]) -> dict:
+    view, node = form(endpoint, instance)
+    return {
+        "session_id": endpoint["session_id"],
+        "owner": view["owner"],
+        "view_id": view["id"],
+        "revision": view["revision"],
+        "action": f"{node['id']}:{action}",
+        "request_id": f"private-native-{time.monotonic_ns()}",
+        "values": {"binding": node["binding"], "edits": edits},
+    }
+
+
+def await_private_operation(endpoint: dict, revision: int, status: str) -> dict:
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        inspection = call(endpoint, "/configuration/inspect", {})
+        if inspection["revision"] > revision:
+            receipt = max(inspection["operations"], key=lambda item: item["operation"])
+            assert receipt["status"] == status, receipt
+            return receipt
+        time.sleep(0.1)
+    raise AssertionError("Private configuration operation did not settle")
+
+
+def private_evidence(endpoint: dict, terminal: Terminal | None, browser: Browser | None) -> dict:
+    """PC-06: native material delivery, shared transactions, masking and material-free retry."""
+    peer = call(endpoint, "/attach", {"frontend": "web"})["attachment"]
+    receipts = []
+    unrelated = configuration(endpoint, "notes")["generation"]
+
+    def public_surfaces() -> None:
+        assert_private_absent(call(endpoint, "/snapshot"))
+        assert_private_absent(call(endpoint, f"/snapshot?attachment={peer}"))
+        assert_private_absent(call(endpoint, "/configuration/inspect", {}))
+        if browser:
+            assert_private_absent(browser.evaluate("JSON.stringify(sessionStorage)"))
+            assert_private_absent(browser.evaluate("document.body.innerText"))
+        if terminal:
+            terminal.drain()
+            assert_private_absent(terminal.output.decode("utf-8", errors="replace"))
+
+    try:
+        # Keep the custom author on its direct form so the two native authoring styles are covered.
+        call(endpoint, "/configuration/open", {"instance": CUSTOM})
+        if configuration(endpoint, CUSTOM)["effective"]["style"] != "direct":
+            result = call(
+                endpoint,
+                "/action",
+                action_request(
+                    endpoint,
+                    CUSTOM,
+                    "apply",
+                    [{"operation": "set", "path": "/style", "value": "direct"}],
+                ),
+            )
+            assert result["status"] == "applied", result
+        author_paths = {HELPER: "/label", CUSTOM: "/endpoint"}
+        paths = {**author_paths, DEFAULT_MODEL: "/model"}
+        adapters = ["headless", *(["browser"] if browser else []), *(["pty"] if terminal else [])]
+        for adapter in adapters:
+            for instance, path in paths.items():
+                secret_path = "/api_key" if instance == DEFAULT_MODEL else "/token"
+                call(endpoint, "/configuration/open", {"instance": instance})
+                for step, token in [
+                    ("set", "D2_SET_CANARY"),
+                    ("replace", "D2_REPLACE_CANARY"),
+                    ("clear", None),
+                ]:
+                    before = configuration(endpoint, instance)
+                    revision = call(endpoint, "/configuration/inspect", {})["revision"]
+                    public_value = (
+                        f"https://{adapter}-{step}.invalid"
+                        if instance == CUSTOM
+                        else f"{adapter}-{step}"
+                    )
+                    edits = [{"operation": "set", "path": path, "value": public_value}]
+                    inputs = (
+                        [{"operation": "clear", "path": secret_path}]
+                        if token is None
+                        else [{"operation": "set", "path": secret_path, "value": token}]
+                    )
+                    if adapter == "headless":
+                        for action in ("validate", "preview", "apply"):
+                            request = action_request(endpoint, instance, action, edits)
+                            result = call(
+                                endpoint, "/private-input", {"request": request, "inputs": inputs}
+                            )
+                            assert_private_absent(result)
+                            if action == "validate":
+                                assert result["errors"] == [], result
+                            elif action == "preview":
+                                assert result["application"] == "restart", result
+                            else:
+                                assert result["status"] == "applied", result
+                            assert (
+                                call(endpoint, "/private-input", {"request": request, "inputs": []})
+                                == result
+                            )
+                    elif adapter == "browser":
+                        assert browser is not None
+                        browser.action(instance, "refresh")
+                        browser.action(instance, "Discard draft and use current values")
+                        browser.fill_field(instance, path, public_value)
+                        if token is None:
+                            browser.field_action(instance, secret_path, "Clear secret")
+                        else:
+                            browser.fill_field(instance, secret_path, token)
+                        public_surfaces()
+                        browser.action(instance, "apply")
+                        browser.wait(
+                            "Array.from(document.querySelectorAll('input[type=password]')).every(input => input.value === '')"
+                        )
+                    else:
+                        assert terminal is not None
+                        terminal.field(instance, path)
+                        terminal.action(b"\x06")
+                        terminal.action(b"\x04")
+                        terminal.edit(instance, path, public_value)
+                        if token is None:
+                            terminal.field(instance, secret_path)
+                            terminal.keys(b"\x05")
+                        else:
+                            terminal.edit(instance, secret_path, token)
+                        public_surfaces()
+                        terminal.action(b"\x13")
+                    receipt = await_private_operation(endpoint, revision, "applied")
+                    receipts.append(
+                        {"adapter": adapter, "instance": instance, "step": step, "receipt": receipt}
+                    )
+                    after = configuration(endpoint, instance)
+                    assert after["effective"][path[1:]] == public_value
+                    assert after["secrets_configured"][secret_path] == (token is not None)
+                    assert after["generation"] != before["generation"]
+                    assert configuration(endpoint, "notes")["generation"] == unrelated
+                    public_surfaces()
+        # Both native initializers return a diagnostic containing the submitted value.
+        # The shared rollback must restore the public edit as well as the secret state.
+        for instance, path in author_paths.items():
+            call(endpoint, "/configuration/open", {"instance": instance})
+            baseline = call(
+                endpoint,
+                "/private-input",
+                {
+                    "request": action_request(endpoint, instance, "apply", []),
+                    "inputs": [
+                        {"operation": "set", "path": "/token", "value": "D2_REPLACE_CANARY"}
+                    ],
+                },
+            )
+            assert baseline["status"] == "applied", baseline
+            before = configuration(endpoint, instance)
+            request = action_request(
+                endpoint,
+                instance,
+                "apply",
+                [{"operation": "set", "path": path, "value": "must-be-rolled-back"}],
+            )
+            failed = call(
+                endpoint,
+                "/private-input",
+                {
+                    "request": request,
+                    "inputs": [{"operation": "set", "path": "/token", "value": "D2_FAIL_CANARY"}],
+                },
+            )
+            assert failed["status"] == "restored", failed
+            assert call(endpoint, "/private-input", {"request": request, "inputs": []}) == failed
+            after = configuration(endpoint, instance)
+            assert after["effective"] == before["effective"]
+            assert after["secrets_configured"] == before["secrets_configured"]
+            receipts.append(
+                {
+                    "adapter": "headless",
+                    "instance": instance,
+                    "step": "failed-restored",
+                    "receipt": failed,
+                }
+            )
+            public_surfaces()
+            call(endpoint, "/configuration/open", {"instance": instance})
+            marker = (
+                "https://private-replay-required.invalid"
+                if instance == CUSTOM
+                else "private-replay-required"
+            )
+            request = action_request(
+                endpoint, instance, "apply", [{"operation": "set", "path": path, "value": marker}]
+            )
+            retained = call(
+                endpoint,
+                "/private-input",
+                {
+                    "request": request,
+                    "inputs": [{"operation": "set", "path": "/token", "value": "D2_REPLAY_CANARY"}],
+                },
+            )
+            assert retained["status"] == "applied", retained
+            assert call(endpoint, "/private-input", {"request": request, "inputs": []}) == retained
+            receipts.append(
+                {
+                    "adapter": "headless",
+                    "instance": instance,
+                    "step": "retained-for-replay",
+                    "receipt": retained,
+                }
+            )
+            public_surfaces()
+        return {
+            "scenario": "PC-06",
+            "adapters": adapters,
+            "receipts": receipts,
+            "material_free_retry": True,
+            "default_model_access": {
+                "instance": DEFAULT_MODEL,
+                "private_path": "/api_key",
+                "provider_called": False,
+            },
+        }
+    finally:
+        call(endpoint, "/detach", {"attachment": peer})
+
+
+def private_replay(
+    binary: pathlib.Path, scratch: pathlib.Path, composition_file: pathlib.Path
+) -> dict:
+    """Reopen native authors in a fresh process; inspect and export only public records."""
+    history = scratch / "history.jsonl"
+    command = [
+        binary,
+        "--composition",
+        composition_file,
+        "--session",
+        history,
+        "--global-dir",
+        scratch / "global",
+        "--offline-startup",
+        "--no-trust-project",
+        "config",
+        "inspect",
+    ]
+    reopened = subprocess.run(
+        command, cwd=scratch, capture_output=True, text=True, timeout=30, check=False
+    )
+    assert_private_absent(reopened.stdout)
+    assert_private_absent(reopened.stderr)
+    assert reopened.returncode == 0, (reopened.stdout, reopened.stderr)
+    inspection = json.loads(reopened.stdout)
+    for instance in (HELPER, CUSTOM):
+        item = next(item for item in inspection["instances"] if item["id"] == instance)
+        assert item["secrets_configured"]["/token"]
+        assert item["field_sources"]["/token"] == "explicit_session"
+    snapshots = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in (scratch / "global/private-input").glob("*/value.json")
+    ]
+    for instance in (HELPER, CUSTOM):
+        assert any(
+            snapshot["instance"] == instance
+            and any(edit.get("value") == "D2_REPLAY_CANARY" for edit in snapshot["inputs"])
+            for snapshot in snapshots
+        )
+    public_history = subprocess.run(
+        [binary, "history", "inspect", history],
+        cwd=scratch,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert public_history.returncode == 0, public_history.stderr
+    assert_private_absent(public_history.stdout)
+    assert_private_absent(public_history.stderr)
+    exported = scratch / "public-export.jsonl"
+    export = subprocess.run(
+        [binary, "history", "export", history, exported],
+        cwd=scratch,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert export.returncode == 0, export.stderr
+    assert_private_absent(export.stdout)
+    assert_private_absent(export.stderr)
+    assert_private_absent(exported.read_text(encoding="utf-8"))
+    return {
+        "reopened_native_authors": [HELPER, CUSTOM],
+        "private_references_resolved": True,
+        "public_history_and_export_clean": True,
+    }
+
+
 def main() -> None:
     prepare()
     destination = installed(ROOT / "artifacts/install-configuration-forms", controlled=True)
@@ -638,6 +961,8 @@ def main() -> None:
             composition_file,
             "--session",
             scratch / "history.jsonl",
+            "--global-dir",
+            scratch / "global",
             "--offline-startup",
             "--no-trust-project",
             "live",
@@ -671,11 +996,16 @@ def main() -> None:
                 if browser
                 else headless(endpoint, terminal, browser_reason or "Browser unavailable")
             )
+            result["private_input"] = private_evidence(endpoint, terminal, browser)
             (output / "report.json").write_text(
                 json.dumps(result, indent=2) + "\n", encoding="utf-8"
             )
             call(endpoint, "/shutdown", {})
             assert host.wait(timeout=15) == 0
+            result["private_replay"] = private_replay(binary, scratch, composition_file)
+            (output / "report.json").write_text(
+                json.dumps(result, indent=2) + "\n", encoding="utf-8"
+            )
             history = scratch / "history.jsonl"
             if history.is_file():
                 records = [
@@ -700,6 +1030,7 @@ def main() -> None:
                     "PC-02",
                     "PC-03",
                     "PC-04",
+                    "PC-06",
                     "PC-08",
                     "notes-and-cache-warmer",
                     "default-coding-json-fallback",
@@ -707,6 +1038,7 @@ def main() -> None:
                 if browser
                 else [
                     "native-form-validation-preview-apply",
+                    "PC-06-headless-private-input",
                     "native-business-configuration",
                     *(["pty-repeat-apply"] if terminal else []),
                 ],
@@ -732,6 +1064,10 @@ def main() -> None:
             stdout, stderr = host.communicate()
             (output / "host.stdout.log").write_text(stdout, encoding="utf-8")
             (output / "host.stderr.log").write_text(stderr, encoding="utf-8")
+            assert_private_absent(stdout)
+            assert_private_absent(stderr)
+            if terminal:
+                assert_private_absent(terminal.output.decode("utf-8", errors="replace"))
 
 
 if __name__ == "__main__":

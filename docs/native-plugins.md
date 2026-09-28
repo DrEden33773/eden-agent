@@ -1,6 +1,6 @@
 # Native plugin contract
 
-The current development release pairs host and SDK exactly as `eden-native-0.11.0`, ABI version 1, on the same target triple. Authors use Rust 1.98.1. The host and each library own their Rust dependencies and runtimes. Libraries are trusted native code running with the host's permissions.
+The current development release pairs host and SDK exactly as `eden-native-0.12.0`, ABI version 1, on the same target triple. Authors use Rust 1.98.1. The host and each library own their Rust dependencies and runtimes. Libraries are trusted native code running with the host's permissions.
 
 ## Installation and selection
 
@@ -62,4 +62,4 @@ Version `eden-native-0.10.0` adds the selected compaction policy, conditional ch
 
 ## Management presentation pairing
 
-Version `eden-native-0.11.0` adds management-scoped presentation and public configuration path edits. Rebuild the host, native authors and manifests together; the C ABI table remains version 1. Old binaries are rejected before initialization by the existing pairing check. Legacy configuration merge patches and saved chat presentation remain readable. The independent host runtime is a Rust crate, not a replaceable native plugin.
+Version `eden-native-0.12.0` adds management-scoped presentation and public configuration path edits. Rebuild the host, native authors and manifests together; the C ABI table remains version 1. Old binaries are rejected before initialization by the existing pairing check. Legacy configuration merge patches and saved chat presentation remain readable. The independent host runtime is a Rust crate, not a replaceable native plugin.

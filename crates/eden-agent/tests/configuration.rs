@@ -83,6 +83,7 @@ async fn live_apply_survives_waiter_drop_and_rejects_stale_revision_and_secrets(
         revision: before.revision,
         patch: json!({ "limit": 2 }),
         replacement: None,
+        private_reference: None,
         edits: vec![],
     };
     let plan = session.preview_configuration(change.clone()).await.unwrap();
@@ -109,6 +110,7 @@ async fn live_apply_survives_waiter_drop_and_rejects_stale_revision_and_secrets(
         revision: before.revision,
         patch: json!({ "limit": 0 }),
         replacement: None,
+        private_reference: None,
         edits: vec![],
     };
     assert!(
@@ -124,6 +126,7 @@ async fn live_apply_survives_waiter_drop_and_rejects_stale_revision_and_secrets(
         revision: before.revision,
         patch: json!({ "token": "replacement" }),
         replacement: None,
+        private_reference: None,
         edits: vec![],
     };
     assert!(session.preview_configuration(secret).await.is_err());
@@ -132,6 +135,7 @@ async fn live_apply_survives_waiter_drop_and_rejects_stale_revision_and_secrets(
         revision: before.revision,
         patch: json!({ "token": "private-canary" }),
         replacement: None,
+        private_reference: None,
         edits: vec![],
     };
     assert_eq!(
@@ -198,7 +202,19 @@ async fn running_session(
                         live_paths: vec!["/limit".into()],
                         ..Default::default()
                     })),
-                    cfg::PluginRequest::Validate { .. } => Ok(json!(cfg::Validation::default())),
+                    cfg::PluginRequest::Validate { config } => {
+                        if config["limit"] == 99 {
+                            Ok(json!(cfg::Validation {
+                                errors: vec![cfg::FieldError {
+                                    path: "/token/NEW_CANARY".into(),
+                                    code: "NEW_CANARY".into(),
+                                    message: config["token"].to_string(),
+                                }]
+                            }))
+                        } else {
+                            Ok(json!(cfg::Validation::default()))
+                        }
+                    }
                     cfg::PluginRequest::Update { config } => {
                         *updated.lock().unwrap() = config;
                         Ok(json!(cfg::Validation::default()))
@@ -256,6 +272,7 @@ async fn unrelated_update_does_not_wait_for_foreground_but_related_update_keeps_
             revision: 0,
             patch: json!({ "limit": 2 }),
             replacement: None,
+            private_reference: None,
             edits: vec![],
         };
         let preview = session.preview_configuration(change.clone()).await.unwrap();
@@ -308,6 +325,7 @@ async fn explicit_cancel_settles_affected_run_before_update_and_detached_waiter_
                 revision: 0,
                 patch: json!({ "limit": 3 }),
                 replacement: None,
+                private_reference: None,
                 edits: vec![],
             },
             ApplyMode::Cancel,
@@ -353,6 +371,7 @@ async fn unrelated_pending_control_input_does_not_block_configuration() {
                 revision: 0,
                 patch: json!({ "limit": 5 }),
                 replacement: None,
+                private_reference: None,
                 edits: vec![],
             },
             ApplyMode::Wait,
@@ -528,4 +547,193 @@ async fn management_forms_repeat_apply_validate_and_inherit_without_a_chat_run()
     assert_eq!(inspect.instances[0].effective["unknown"], true);
     assert!(session.state().active_run.is_none());
     session.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn private_input_is_idempotent_and_recovers_old_secret_without_public_disclosure() {
+    use eden_protocol::{configuration_form as f, presentation as p, private_input};
+    let current = Arc::new(Mutex::new(json!({ "token": "OLD_CANARY", "limit": 1 })));
+    let observed = current.clone();
+    let package = Package::new("private-author")
+        .service(AGENT_LOOP, |_: Value, _| async {
+            Ok::<_, Fault>(Value::Null)
+        })
+        .service(CONTEXT, |_: Value, _| async { Ok::<_, Fault>(Value::Null) })
+        .service(PROVIDER, |_: Value, _| async {
+            Ok::<_, Fault>(Value::Null)
+        })
+        .service(TOOL, |_: Value, _| async { Ok::<_, Fault>(Value::Null) })
+        .service(cfg::CONFIGURATION, move |request: cfg::PluginRequest, _| {
+            let current = observed.clone();
+            async move {
+                match request {
+                    cfg::PluginRequest::Describe => Ok(json!(cfg::Description {
+                        schema: Some(json!({
+                            "type": "object",
+                            "properties": {
+                                "token": { "type": "string" },
+                                "limit": { "type": "integer" },
+                            },
+                        })),
+                        secret_paths: vec!["/token".into()],
+                        live_paths: vec!["/token".into(), "/limit".into()],
+                        ..Default::default()
+                    })),
+                    cfg::PluginRequest::Validate { config } => {
+                        if config["limit"] == 99 {
+                            Ok(json!(cfg::Validation {
+                                errors: vec![cfg::FieldError {
+                                    path: "/token/NEW_CANARY".into(),
+                                    code: "NEW_CANARY".into(),
+                                    message: config["token"].to_string(),
+                                }]
+                            }))
+                        } else {
+                            Ok(json!(cfg::Validation::default()))
+                        }
+                    }
+                    cfg::PluginRequest::Update { config } => {
+                        if config["token"] == "FAIL_CANARY" {
+                            return Err(Fault::new("Rejected", "author", "FAIL_CANARY"));
+                        }
+                        *current.lock().unwrap() = config;
+                        Ok(json!(cfg::Validation::default()))
+                    }
+                }
+            }
+        });
+    let cwd = std::env::current_dir().unwrap();
+    let global_dir = std::env::temp_dir().join(format!("eden-d2-private-{}", std::process::id()));
+    let composition: Composition = serde_json::from_value(json!({
+        "packages": [],
+        "roles": {},
+        "runtime": {
+            "instances": [{
+                "id": "private-author",
+                "package": "private-author",
+                "config": current.lock().unwrap().clone(),
+            }],
+        },
+    }))
+    .unwrap();
+    let session = Embedded::new(composition, cwd.clone())
+        .package(package, "private-v1")
+        .unwrap()
+        .open(
+            SessionOptions { cwd, history: None },
+            WorkspaceOptions {
+                global_dir: global_dir.clone(),
+                project_trust: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    session.enable_shared_presentation();
+    session.open_configuration("private-author").await.unwrap();
+    for (index, secret) in [Some("NEW_CANARY"), Some("FAIL_CANARY"), None]
+        .into_iter()
+        .enumerate()
+    {
+        let snapshot = session.presentation_snapshot();
+        let view = &snapshot.views[0];
+        let p::Node::ConfigurationForm {
+            binding, fields, ..
+        } = &view.view.nodes[0]
+        else {
+            panic!("form")
+        };
+        assert!(
+            fields
+                .iter()
+                .any(|f| f.path == "/token" && f.writable && f.value.is_none())
+        );
+        let request = p::ActionRequest {
+            session_id: session.id(),
+            owner: view.owner.clone(),
+            view_id: view.view.id.clone(),
+            revision: view.revision,
+            action: "settings:apply".into(),
+            request_id: format!("private-{index}"),
+            values: json!({
+                "binding": binding,
+                "edits": [{ "operation": "set", "path": "/limit", "value": index + 2 }],
+            }),
+        };
+        let inputs = vec![match secret {
+            Some(value) => f::Edit::Set {
+                path: "/token".into(),
+                value: json!(value),
+            },
+            None => f::Edit::Clear {
+                path: "/token".into(),
+            },
+        }];
+        let result = session
+            .submit_private_input(private_input::Submission {
+                request: request.clone(),
+                inputs,
+            })
+            .await
+            .unwrap();
+        let retry = session
+            .submit_private_input(private_input::Submission {
+                request,
+                inputs: vec![],
+            })
+            .await
+            .unwrap();
+        assert_eq!(result, retry);
+        if index == 0 {
+            let validation = session
+                .validate_configuration(Change {
+                    instance: "private-author".into(),
+                    revision: result["revision"].as_u64().unwrap(),
+                    patch: json!({ "limit": 99 }),
+                    edits: vec![],
+                    replacement: None,
+                    private_reference: None,
+                })
+                .await
+                .unwrap();
+            assert!(
+                !serde_json::to_string(&validation)
+                    .unwrap()
+                    .contains("CANARY")
+            );
+            assert_eq!(validation.errors[0].path, "/token");
+        }
+        if secret == Some("FAIL_CANARY") {
+            assert_eq!(result["status"], "restored");
+            assert_eq!(current.lock().unwrap()["token"], "NEW_CANARY");
+            assert_eq!(current.lock().unwrap()["limit"], 2);
+        } else {
+            assert_eq!(result["status"], "applied");
+            assert_eq!(
+                current.lock().unwrap().get("token").and_then(Value::as_str),
+                secret
+            );
+        }
+        let inspection = session.inspect_configuration().await.unwrap();
+        assert_eq!(
+            inspection.instances[0].field_sources["/token"],
+            if secret.is_none() {
+                "explicit_session_clear"
+            } else {
+                "explicit_session"
+            }
+        );
+        let public = format!(
+            "{:?}{:?}{:?}{result}",
+            session.presentation_snapshot(),
+            session.events(),
+            session.inspect_configuration().await.unwrap()
+        );
+        assert!(
+            !public.contains("CANARY"),
+            "public channel disclosed private material"
+        );
+    }
+    session.shutdown().await.unwrap();
+    std::fs::remove_dir_all(global_dir).unwrap();
 }

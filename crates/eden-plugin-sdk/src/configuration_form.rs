@@ -17,7 +17,7 @@ pub struct Model {
     pub effective: Value,
     /// Per-pointer provenance from configuration inspection.
     pub sources: BTreeMap<String, String>,
-    /// Presence only for private inputs that D1 cannot edit.
+    /// Presence only; private input never starts with a saved secret value.
     pub secrets_configured: BTreeMap<String, bool>,
 }
 
@@ -109,7 +109,10 @@ fn fields_for(model: &Model, schema: &Value, path: &str, fields: &mut Vec<f::Fie
             })
             .into(),
         description: if secret {
-            Some("Private input is unavailable until D2".into())
+            Some(
+                "Set, replace or clear through private input; current values are never shown"
+                    .into(),
+            )
         } else {
             schema
                 .get("description")
@@ -136,8 +139,7 @@ fn fields_for(model: &Model, schema: &Value, path: &str, fields: &mut Vec<f::Fie
             .and_then(Value::as_str)
             .map(str::to_owned),
         source: model.sources.get(path).cloned(),
-        writable: !secret
-            && !secret_child
+        writable: !secret_child
             && (model.description.editable_layers.is_empty()
                 || model
                     .description

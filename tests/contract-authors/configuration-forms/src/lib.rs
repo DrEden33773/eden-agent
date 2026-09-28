@@ -65,6 +65,21 @@ fn descriptor() -> p::Descriptor {
     }
 }
 fn create(config: Value) -> Result<Package, Fault> {
+    // A fresh-process replay must deliver the actual retained value to this native initializer.
+    if config["label"] == "private-replay-required" && config["token"] != "D2_REPLAY_CANARY" {
+        return Err(Fault::new(
+            "InvalidInput",
+            PACKAGE,
+            "Retained private input was not restored",
+        ));
+    }
+    if config["token"] == "D2_FAIL_CANARY" {
+        return Err(Fault::new(
+            "InvalidInput",
+            PACKAGE,
+            "D2_FAIL_CANARY rejected during native initialization",
+        ));
+    }
     let validation = validate(&config)?;
     if !validation.errors.is_empty() {
         return Err(Fault::new(
@@ -159,6 +174,24 @@ fn presentation(model: &Model) -> view::View {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn private_input_reaches_native_initializer_and_requires_restart() {
+        let initial = defaults();
+        let mut candidate = initial.clone();
+        candidate["token"] = json!("D2_SET_CANARY");
+        assert!(!config::is_live_change(
+            &description(),
+            &initial,
+            &candidate
+        ));
+        assert!(create(candidate.clone()).is_ok());
+        candidate["token"] = json!("D2_FAIL_CANARY");
+        let error = match create(candidate) {
+            Ok(_) => panic!("native initializer must reject the failure canary"),
+            Err(error) => error,
+        };
+        assert!(error.message.contains("D2_FAIL_CANARY"));
+    }
     #[test]
     fn invalid_update_preserves_the_effective_state() {
         let initial = defaults();

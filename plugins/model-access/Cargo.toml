@@ -10,6 +10,7 @@ crate-type = ["cdylib", "rlib"]
 eden-plugin-sdk.workspace = true
 eden-process.workspace = true
 eden-protocol.workspace = true
+eden-workspace.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

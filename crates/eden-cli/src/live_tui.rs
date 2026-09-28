@@ -95,6 +95,7 @@ struct ConfigurationDraft {
     binding: Option<Binding>,
     fields: String,
     edits: BTreeMap<String, Edit>,
+    private_inputs: BTreeMap<String, Edit>,
     raw: BTreeMap<String, String>,
     rows: BTreeMap<String, usize>,
 }
@@ -472,7 +473,11 @@ fn draw(terminal: &mut RawTerminal, screen: &mut Screen) -> io::Result<()> {
                     },
                     field.label,
                     if field.control == Control::Secret {
-                        "Private input pending D2"
+                        match draft.and_then(|draft| draft.private_inputs.get(&field.path)) {
+                            Some(Edit::Set { .. }) => "******** (replacement pending)",
+                            Some(Edit::Clear { .. }) => "clear pending",
+                            _ => "type to set or replace secret",
+                        }
                     } else {
                         &value
                     },
@@ -610,6 +615,9 @@ fn configuration_key_event(
         .binding
         .as_ref()
         .is_some_and(|old| old != &binding || draft.fields != fields);
+    if conflict {
+        draft.private_inputs.clear();
+    }
     let action = if control {
         match key.code {
             KeyCode::Char('v') => Some("validate"),
@@ -638,6 +646,9 @@ fn configuration_key_event(
         } else {
             draft.edits.values().cloned().collect()
         };
+        let inputs: Vec<_> = std::mem::take(&mut draft.private_inputs)
+            .into_values()
+            .collect();
         let request = ActionRequest {
             session_id: screen.snapshot.session_id,
             owner,
@@ -647,19 +658,57 @@ fn configuration_key_event(
             request_id: String::new(),
             values: json!({ "binding": binding, "edits": edits }),
         };
-        submit(screen, replies, endpoint, "/action", json!(request));
+        if refresh || inputs.is_empty() {
+            submit(screen, replies, endpoint, "/action", json!(request));
+        } else {
+            submit(
+                screen,
+                replies,
+                endpoint,
+                "/private-input",
+                json!({ "request": request, "inputs": inputs }),
+            );
+        }
         return;
     }
     if conflict {
         screen.message = "Configuration conflict; draft retained. Ctrl+d discards it.".into();
         return;
     }
-    if !field.writable || field.control == Control::Secret {
+    if !field.writable {
         return;
     }
     draft.binding.get_or_insert(binding);
     draft.fields = fields;
     let path = field.path.clone();
+    if field.control == Control::Secret {
+        if control && key.code == KeyCode::Char('e') {
+            draft
+                .private_inputs
+                .insert(path.clone(), Edit::Clear { path });
+            return;
+        }
+        let mut text = match draft.private_inputs.get(&path) {
+            Some(Edit::Set { value, .. }) => value.as_str().unwrap_or_default().to_owned(),
+            _ => String::new(),
+        };
+        match key.code {
+            KeyCode::Char('u') if control => text.clear(),
+            KeyCode::Char(character) if !control => text.push(character),
+            KeyCode::Backspace => {
+                text.pop();
+            }
+            _ => return,
+        }
+        draft.private_inputs.insert(
+            path.clone(),
+            Edit::Set {
+                path,
+                value: json!(text),
+            },
+        );
+        return;
+    }
     if control && matches!(key.code, KeyCode::Char('b') | KeyCode::Char('e')) {
         draft.raw.remove(&path);
         draft.edits.insert(
@@ -851,6 +900,26 @@ struct Reply {
     key: String,
     result: Result<Value, Fault>,
 }
+fn take_private_inputs(body: &mut Value, private: bool) -> Value {
+    // Retry identity and retained replies contain only the public request envelope.
+    let inputs = if private {
+        body["inputs"].take()
+    } else {
+        Value::Null
+    };
+    let request = if private {
+        &mut body["request"]
+    } else {
+        &mut *body
+    };
+    if let Some(object) = request.as_object_mut() {
+        object.remove("request_id");
+    }
+    if private {
+        body["inputs"] = json!([]);
+    }
+    inputs
+}
 fn submit(
     screen: &mut Screen,
     replies: &tokio::sync::mpsc::UnboundedSender<Reply>,
@@ -858,13 +927,13 @@ fn submit(
     route: &str,
     mut body: Value,
 ) {
-    if let Some(object) = body.as_object_mut() {
-        object.remove("request_id");
-    }
+    let private = route == "/private-input";
+    let inputs = take_private_inputs(&mut body, private);
     let key = format!("{route}:{body}");
     if !screen.pending.insert(key.clone()) {
         return;
     }
+    let retry = screen.attempts.contains_key(&key);
     let id = if let Some(known) = screen.attempts.get(&key) {
         known.clone()
     } else {
@@ -872,14 +941,23 @@ fn submit(
         screen.attempts.insert(key.clone(), id.clone());
         id
     };
-    body["request_id"] = json!(id);
+    if private {
+        body["request"]["request_id"] = json!(id);
+    } else {
+        body["request_id"] = json!(id);
+    }
     let endpoint = endpoint.to_owned();
     let route = route.to_owned();
     let replies = replies.clone();
     screen.message = "Request pending · Ctrl+x cancel · Esc detach".into();
     // Dropping the frontend only drops its response receiver; the host still owns the action.
     tokio::spawn(async move {
-        let result = call(&endpoint, "POST", &route, Some(&body)).await;
+        let mut outgoing = body.clone();
+        if private && !retry {
+            outgoing["inputs"] = inputs;
+        }
+        let result = call(&endpoint, "POST", &route, Some(&outgoing)).await;
+        drop(outgoing);
         let _ = replies.send(Reply {
             route,
             body,
@@ -905,8 +983,13 @@ fn receive_reply(screen: &mut Screen, reply: Reply) {
     if reply.result.is_ok() && reply.route == "/prompt" && reply.body["text"] == screen.composer {
         screen.composer.clear();
     }
-    if reply.route == "/action"
-        && reply.body["action"]
+    let request = if reply.route == "/private-input" {
+        &reply.body["request"]
+    } else {
+        &reply.body
+    };
+    if (reply.route == "/action" || reply.route == "/private-input")
+        && request["action"]
             .as_str()
             .is_some_and(|action| action.ends_with(":apply") || action.ends_with(":cancel_apply"))
         && reply
@@ -914,9 +997,9 @@ fn receive_reply(screen: &mut Screen, reply: Reply) {
             .as_ref()
             .is_ok_and(|result| result["status"] == "applied")
         && let (Some(owner), Some(view), Some(action)) = (
-            reply.body["owner"].as_str(),
-            reply.body["view_id"].as_str(),
-            reply.body["action"].as_str(),
+            request["owner"].as_str(),
+            request["view_id"].as_str(),
+            request["action"].as_str(),
         )
     {
         let id = configuration_key(
@@ -929,12 +1012,12 @@ fn receive_reply(screen: &mut Screen, reply: Reply) {
             .configuration_drafts
             .get(&id)
             .and_then(|draft| draft.binding.as_ref())
-            .is_some_and(|binding| json!(binding) == reply.body["values"]["binding"])
+            .is_some_and(|binding| json!(binding) == request["values"]["binding"])
             && screen.configuration_drafts.get(&id).is_some_and(|draft| {
                 serde_json::to_value(draft.edits.values().collect::<Vec<_>>())
                     .ok()
                     .as_ref()
-                    == Some(&reply.body["values"]["edits"])
+                    == Some(&request["values"]["edits"])
             })
         {
             screen.configuration_drafts.remove(&id);
@@ -1197,6 +1280,37 @@ async fn run_attached(
                 }
                 let focused = screen.current();
                 screen.snapshot = snapshot;
+                let current: BTreeMap<_, _> = screen
+                    .focusables()
+                    .into_iter()
+                    .filter_map(|focus| {
+                        if let Focus::Configuration {
+                            owner,
+                            view_id,
+                            node_id,
+                            binding,
+                            ..
+                        } = focus
+                        {
+                            Some((
+                                configuration_key(&screen, &owner, &view_id, &node_id),
+                                (
+                                    binding,
+                                    configuration_schema(&screen, &owner, &view_id, &node_id),
+                                ),
+                            ))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                for (id, draft) in &mut screen.configuration_drafts {
+                    if current.get(id).is_none_or(|(binding, fields)| {
+                        draft.binding.as_ref() != Some(binding) || &draft.fields != fields
+                    }) {
+                        draft.private_inputs.clear();
+                    }
+                }
                 screen.focus = screen
                     .focusables()
                     .iter()
@@ -1291,6 +1405,9 @@ async fn run_attached(
             continue;
         }
         if key.code == KeyCode::Char('x') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            for draft in screen.configuration_drafts.values_mut() {
+                draft.private_inputs.clear();
+            }
             if let Some((target, _)) = screen.last_activity.take() {
                 report(endpoint, attachment, target, false).await;
             }
@@ -1523,6 +1640,23 @@ mod tests {
                 "nodes": nodes,
             }],
         })
+    }
+
+    #[test]
+    fn private_retry_body_excludes_material_and_preserves_public_envelope() {
+        let request = json!({
+            "action": "config:apply",
+            "request_id": "old",
+            "values": { "edits": [] },
+        });
+        let inputs = json!([{ "operation": "set", "path": "/token", "value": "private-sentinel" }]);
+        let mut body = json!({ "request": request, "inputs": inputs });
+        assert_eq!(take_private_inputs(&mut body, true), inputs);
+        assert!(!body.to_string().contains("private-sentinel"));
+        assert_eq!(body["request"]["action"], "config:apply");
+        assert!(body["request"].get("request_id").is_none());
+        assert_eq!(body["inputs"], json!([]));
+        assert_eq!(take_private_inputs(&mut body, true), json!([]));
     }
 
     #[test]

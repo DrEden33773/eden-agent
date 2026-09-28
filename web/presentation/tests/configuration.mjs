@@ -49,6 +49,7 @@ let fields = [
   ...field,
 }));
 const actions = [];
+const privateSubmissions = [];
 const applied = new Map();
 let dropApplyResponse = false;
 let frozenBinding = null;
@@ -100,9 +101,13 @@ const server = createServer(async (request, response) => {
   if (request.method === "POST") {
     let bytes = "";
     for await (const chunk of request) bytes += chunk;
-    const body = JSON.parse(bytes);
+    let body = JSON.parse(bytes);
+    if (url.pathname === "/private-input") {
+      privateSubmissions.push(body);
+      body = body.request;
+    }
     if (url.pathname === "/attach") reply({ attachment: 1 });
-    else if (url.pathname === "/action") {
+    else if (url.pathname === "/action" || url.pathname === "/private-input") {
       actions.push(body);
       if (applied.has(body.request_id)) {
         reply(applied.get(body.request_id));
@@ -144,7 +149,7 @@ const address = server.address();
 const click = (name) => browser("find", "role", "button", "click", "--name", name, "--exact");
 try {
   await browser("open", `http://127.0.0.1:${address.port}/?token=fixture`);
-  await waitFor('document.body.innerText.includes("Private input pending D2")');
+  await waitFor('document.querySelector("input[type=password]") !== null');
   await browser("find", "label", "Count", "fill", "42");
   sequence++;
   activeRun = 99;
@@ -254,7 +259,43 @@ try {
   assert.ok(await evaluate('document.querySelector(".configuration").innerText.includes("13")'));
   await click("Discard draft and use current values");
   assert.equal(await evaluate('document.querySelector(".configuration input").value'), "12");
-  assert.equal(await evaluate('document.querySelectorAll("input[type=password]").length'), 0);
+  assert.equal(await evaluate('document.querySelectorAll("input[type=password]").length'), 1);
+  const secret = "private-browser-sentinel";
+  await browser("find", "label", "Replace secret", "fill", secret);
+  await click("validate");
+  assert.deepEqual(privateSubmissions.at(-1).inputs, [
+    { operation: "set", path: "/secret", value: secret },
+  ]);
+  assert.equal(await evaluate('document.querySelector("input[type=password]").value'), "");
+  await browser("find", "label", "Replace secret", "fill", secret);
+  dropApplyResponse = true;
+  await click("apply");
+  await waitFor('document.body.innerText.includes("Retry last request")');
+  const secretRequest = privateSubmissions.at(-1).request;
+  assert.equal((await evaluate("JSON.stringify(sessionStorage)")).includes(secret), false);
+  assert.equal((await evaluate("document.body.innerText")).includes(secret), false);
+  await browser("reload");
+  await waitFor(
+    'document.body.innerText.includes("Retry last request") && document.querySelector("input[type=password]") !== null',
+  );
+  assert.equal(await evaluate('document.querySelector("input[type=password]").value'), "");
+  await click("Retry last request");
+  await waitFor('document.body.innerText.includes("Retry resolved")');
+  assert.equal(privateSubmissions.at(-1).request.request_id, secretRequest.request_id);
+  assert.deepEqual(privateSubmissions.at(-1).inputs, []);
+  await click("Clear secret");
+  await click("preview");
+  assert.deepEqual(privateSubmissions.at(-1).inputs, [{ operation: "clear", path: "/secret" }]);
+  await browser("find", "label", "Replace secret", "fill", secret);
+  await click("Discard draft and use current values");
+  assert.equal(await evaluate('document.querySelector("input[type=password]").value'), "");
+  await browser("find", "label", "Replace secret", "fill", secret);
+  await click("refresh");
+  assert.equal(await evaluate('document.querySelector("input[type=password]").value'), "");
+  await browser("find", "label", "Replace secret", "fill", secret);
+  binding = { ...binding, generation: binding.generation + 1 };
+  sequence++;
+  await waitFor('document.querySelector("input[type=password]").value === ""');
   assert.ok(
     actions.every((action) => action.values.edits.every((edit) => edit.path !== "/secret")),
   );

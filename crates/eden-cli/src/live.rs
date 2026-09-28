@@ -493,6 +493,11 @@ async fn dispatch(
             let instance: String = field(&body, "instance")?;
             Ok(json!(session.open_configuration(&instance).await?))
         }
+        ("POST", "/private-input") => {
+            let input = serde_json::from_value(body)
+                .map_err(|_| fault("InvalidInput", "invalid private input request"))?;
+            session.submit_private_input(input).await
+        }
         ("POST", "/action") => {
             let action: ActionRequest = serde_json::from_value(body)
                 .map_err(|error| fault("InvalidInput", error.to_string()))?;

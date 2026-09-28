@@ -38,7 +38,7 @@ pub enum Control {
 }
 
 /// Non-secret starting values and source information for one stable JSON pointer.
-/// Secret controls carry only presence and a disabled private-input entry state in D1.
+/// Secret controls carry only presence; editing uses the separate private-input contract.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[allow(missing_docs)]
 pub struct Field {

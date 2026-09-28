@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 export type Binding = {
   instance: string;
@@ -24,7 +24,7 @@ export type ConfigurationNode = {
   binding: Binding;
   fields: ConfigurationField[];
 };
-type Edit =
+export type Edit =
   | { operation: "set"; path: string; value: unknown }
   | { operation: "clear" | "inherit"; path: string };
 export type ConfigurationDraft = { binding: Binding; edits: Record<string, Edit>; fields: string };
@@ -224,11 +224,19 @@ export function ConfigurationForm({
   draft?: ConfigurationDraft;
   save: (draft?: ConfigurationDraft) => void;
   disabled: boolean;
-  act: (action: string, values: unknown) => Promise<unknown>;
+  act: (action: string, values: unknown, inputs?: Edit[]) => Promise<unknown>;
 }) {
+  const [privateEdits, setPrivateEdits] = useState<Record<string, Edit>>({});
+  const bindingKey = bindingIdentity(node.binding);
+  const fieldsKey = fieldIdentity(node.fields);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: A binding or schema change invalidates all private draft material.
+  useEffect(() => {
+    setPrivateEdits({});
+  }, [bindingKey, fieldsKey]);
   const [busy, setBusy] = useState(false);
   const [reset, setReset] = useState(0);
   const discard = () => {
+    setPrivateEdits({});
     save(undefined);
     setReset((value) => value + 1);
   };
@@ -262,7 +270,7 @@ export function ConfigurationForm({
         return (
           <fieldset
             key={`${reset}/${bindingIdentity(node.binding)}/${field.path}`}
-            disabled={disabled || busy || conflict || !field.writable || field.control === "secret"}
+            disabled={disabled || busy || conflict || !field.writable}
           >
             <legend>
               {field.label} ({field.path})
@@ -272,7 +280,48 @@ export function ConfigurationForm({
               {!field.writable && " · Read only"}
             </p>
             {field.control === "secret" ? (
-              <p>{field.configured ? "Configured" : "Not configured"} · Private input pending D2</p>
+              <>
+                <p>{field.configured ? "Configured" : "Not configured"}</p>
+                <label>
+                  {field.configured ? "Replace secret" : "Set secret"}
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    value={
+                      privateEdits[field.path]?.operation === "set"
+                        ? String((privateEdits[field.path] as { value: unknown }).value)
+                        : ""
+                    }
+                    onChange={(event) =>
+                      setPrivateEdits((previous) => ({
+                        ...previous,
+                        [field.path]: {
+                          operation: "set",
+                          path: field.path,
+                          value: event.target.value,
+                        },
+                      }))
+                    }
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setPrivateEdits((previous) => ({
+                      ...previous,
+                      [field.path]: { operation: "clear", path: field.path },
+                    }))
+                  }
+                >
+                  Clear secret
+                </button>
+                {privateEdits[field.path] && (
+                  <p>
+                    Pending:{" "}
+                    {privateEdits[field.path].operation === "set" ? "replacement" : "clear"}
+                  </p>
+                )}
+              </>
             ) : (
               <>
                 {field.control === "choice" ? (
@@ -353,12 +402,18 @@ export function ConfigurationForm({
                 event.currentTarget.form?.querySelector('[aria-invalid="true"]')
               )
                 return;
+              const inputs = action === "refresh" ? [] : Object.values(privateEdits);
+              setPrivateEdits({});
               setBusy(true);
               try {
-                const result = await act(`${node.id}:${action}`, {
-                  binding: action === "refresh" ? node.binding : (draft?.binding ?? node.binding),
-                  edits: action === "refresh" ? [] : Object.values(edits),
-                });
+                const result = await act(
+                  `${node.id}:${action}`,
+                  {
+                    binding: action === "refresh" ? node.binding : (draft?.binding ?? node.binding),
+                    edits: action === "refresh" ? [] : Object.values(edits),
+                  },
+                  inputs.length ? inputs : undefined,
+                );
                 if (
                   (action === "apply" || action === "cancel_apply") &&
                   (result as { status?: string } | undefined)?.status === "applied"

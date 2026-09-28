@@ -1,6 +1,7 @@
 //! Data-only workspace bootstrap. No library, shell or credential command is executed here.
 pub mod packages;
 pub mod paths;
+pub mod private_file;
 use eden_protocol::Fault;
 use eden_protocol::resources::Diagnostic;
 use serde::{Deserialize, Serialize};

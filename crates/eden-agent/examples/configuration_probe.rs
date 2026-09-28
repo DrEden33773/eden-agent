@@ -34,6 +34,7 @@ fn change(instance: &str, revision: u64, patch: Value) -> Change {
         revision,
         patch,
         replacement: None,
+        private_reference: None,
         edits: vec![],
     }
 }

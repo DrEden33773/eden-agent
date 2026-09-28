@@ -130,6 +130,13 @@ impl Session {
         &self,
         request: &p::ActionRequest,
     ) -> Result<Value, Fault> {
+        self.configuration_private_action(request, None).await
+    }
+    pub(crate) async fn configuration_private_action(
+        &self,
+        request: &p::ActionRequest,
+        private_reference: Option<String>,
+    ) -> Result<Value, Fault> {
         let submission: f::Submission = serde_json::from_value(request.values.clone())
             .map_err(|_| fault("InvalidInput", "invalid configuration submission"))?;
         let action = request
@@ -158,6 +165,7 @@ impl Session {
             patch: json!({}),
             edits: submission.edits,
             replacement: None,
+            private_reference,
         };
         match action {
             "validate" => Ok(json!(self.validate_configuration(change).await?)),
@@ -209,8 +217,7 @@ fn refresh_fields(nodes: &mut [p::Node], model: &Model) -> bool {
                     };
                     field.source = model.sources.get(path).cloned();
                     field.configured = model.secrets_configured.get(path).copied().unwrap_or(false);
-                    field.writable &= !secret
-                        && !contains_secret
+                    field.writable &= !contains_secret
                         && model.binding.profile == 1
                         && (model.description.editable_layers.is_empty()
                             || model

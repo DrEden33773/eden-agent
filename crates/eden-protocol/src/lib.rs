@@ -10,6 +10,7 @@ pub mod environment;
 pub mod interaction;
 pub mod models;
 pub mod presentation;
+pub mod private_input;
 pub mod recall;
 pub mod resources;
 pub mod runtime;
@@ -17,7 +18,7 @@ pub mod shell;
 pub mod updates;
 
 /// Exact host/SDK pairing for this development release.
-pub const CONTRACT: &str = "eden-native-0.11.0";
+pub const CONTRACT: &str = "eden-native-0.12.0";
 /// Agent loop role.
 pub const AGENT_LOOP: &str = "eden.agent-loop.v1";
 /// Context projection role.

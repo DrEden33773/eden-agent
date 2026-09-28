@@ -18,6 +18,9 @@ pub struct Change {
     pub edits: Vec<eden_protocol::configuration_form::Edit>,
     /// A resolved composition containing the installed replacement package. No build or install runs.
     pub replacement: Option<PathBuf>,
+    /// Opaque installation-private input reference; contains no material and is bound to this instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_reference: Option<String>,
 }
 /// Default waiting preserves the entire affected foreground run, including cleanup and persistence.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -113,6 +116,7 @@ pub(crate) struct Manager {
     pub sources: BTreeMap<String, BTreeMap<String, String>>,
     pub inherited: BTreeMap<String, Value>,
     pub inherited_sources: BTreeMap<String, BTreeMap<String, String>>,
+    pub private_sources: BTreeMap<String, BTreeMap<String, String>>,
 }
 fn fault(code: &str, message: impl Into<String>) -> Fault {
     Fault::new(code, "configuration", message)
@@ -223,7 +227,8 @@ impl Session {
                 Cancellation::default(),
             )
             .await
-            .into_result()?;
+            .into_result()
+            .map_err(crate::private_input::public_fault)?;
         serde_json::from_value(value).map_err(|_| {
             fault(
                 "IncompatibleContract",
@@ -433,10 +438,22 @@ impl Session {
             .cloned()
             .unwrap_or_else(|| old.clone());
         apply_edits(&mut value, &inherited, change, &description)?;
-        let mut validation = p::validate(&description, &value)?;
+        let mut validation = p::validate_public_edit(&description, &old, &value);
+        if let Some(reference) = &change.private_reference {
+            let inputs = crate::private_input::read(
+                &self.0.workspace_options.global_dir,
+                reference,
+                &change.instance,
+            )?;
+            crate::private_input::validate_paths(&description, &inputs)?;
+            eden_protocol::configuration_form::apply_edits(&mut value, &Value::Null, &inputs)?;
+            if value.get(eden_protocol::environment::CONFIG_KEY).is_some() {
+                return Err(fault("InvalidInput", "host environment is not editable"));
+            }
+        }
         validation
             .errors
-            .extend(p::validate_public_edit(&description, &old, &value).errors);
+            .extend(p::validate(&description, &value)?.errors);
         if validation.errors.is_empty()
             && self.0.kernel.get()?.instance_running(&spec.id)
             && candidate.packages.iter().any(|m| {
@@ -452,7 +469,21 @@ impl Session {
                     },
                 )
                 .await?;
-            validation.errors.extend(business.errors);
+            validation
+                .errors
+                .extend(business.errors.into_iter().map(|mut error| {
+                    if !description.secret_paths.is_empty() {
+                        error.message = "Plugin configuration validation failed".into();
+                        error.code = "plugin_validation".into();
+                        // An author-supplied pointer is also untrusted diagnostic text.
+                        error.path =
+                            crate::private_input::public_error_path(&description, &error.path);
+                    }
+                    error
+                }));
+        }
+        for error in &mut validation.errors {
+            error.path = crate::private_input::public_error_path(&description, &error.path);
         }
         let application = if change.replacement.is_none()
             && old == value
@@ -770,8 +801,8 @@ impl Session {
             Err(failure) => {
                 let (status, error, recovery) = *failure;
                 receipt.status = status;
-                receipt.error = Some(error);
-                receipt.recovery_error = recovery;
+                receipt.error = Some(crate::private_input::public_fault(error));
+                receipt.recovery_error = recovery.map(crate::private_input::public_fault);
             }
         }
         if receipt.status != Status::Applied
@@ -865,6 +896,18 @@ impl Session {
             }
             changed.await;
         }
+        let private_origins = if let Some(reference) = &change.private_reference {
+            crate::private_input::origins(
+                &crate::private_input::read(
+                    &self.0.workspace_options.global_dir,
+                    reference,
+                    &change.instance,
+                )
+                .map_err(ordinary)?,
+            )
+        } else {
+            BTreeMap::new()
+        };
         let old = kernel.composition();
         let records = if self.0.coding {
             self.history().await.map_err(ordinary)?
@@ -979,6 +1022,18 @@ impl Session {
                 Err(recovery) => (Status::RecoveryFailed, error, Some(recovery)),
             }));
         }
+        {
+            let mut manager = self
+                .0
+                .configuration
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let sources = manager.sources.entry(change.instance.clone()).or_default();
+            for (path, source) in private_origins {
+                sources.retain(|key, _| key != &path && !key.starts_with(&format!("{path}/")));
+                sources.insert(path, source);
+            }
+        }
         // The pending union retains both code versions; old libraries remain usable for recovery.
         kernel
             .set_reconfiguring(affected, false)
@@ -1043,7 +1098,15 @@ impl Session {
     }
 }
 /// Reapply only committed explicit edits before checking the persisted composition identity.
+#[cfg(test)]
 pub(crate) fn replay(selected: &mut Composition, records: &[c::Record]) -> Result<Manager, Fault> {
+    replay_private(selected, records, None)
+}
+pub(crate) fn replay_private(
+    selected: &mut Composition,
+    records: &[c::Record],
+    private_root: Option<&Path>,
+) -> Result<Manager, Fault> {
     let mut manager = Manager::default();
     for spec in specs(selected) {
         manager
@@ -1080,6 +1143,23 @@ pub(crate) fn replay(selected: &mut Composition, records: &[c::Record]) -> Resul
             replacement.config = current.config.clone();
             *current = replacement;
         }
+        let private_inputs = if let Some(reference) = &change.private_reference {
+            let root = private_root.ok_or_else(|| {
+                fault(
+                    "PrivateInputUnavailable",
+                    "private storage is required to restore this configuration",
+                )
+            })?;
+            let inputs = crate::private_input::read(root, reference, &change.instance)?;
+            manager
+                .private_sources
+                .entry(change.instance.clone())
+                .or_default()
+                .extend(crate::private_input::origins(&inputs));
+            inputs
+        } else {
+            vec![]
+        };
         if record.payload["application"] != "unchanged" {
             let (spec, mut value) = config(selected, &change.instance)?;
             if !change
@@ -1096,6 +1176,11 @@ pub(crate) fn replay(selected: &mut Composition, records: &[c::Record]) -> Resul
                     .get(&change.instance)
                     .unwrap_or(&Value::Null),
                 &change.edits,
+            )?;
+            eden_protocol::configuration_form::apply_edits(
+                &mut value,
+                &Value::Null,
+                &private_inputs,
             )?;
             set_config(selected, spec, value);
         }
@@ -1156,6 +1241,13 @@ pub(crate) fn replay_sources(manager: &mut Manager, records: &[c::Record]) {
                 &inherited,
                 &change.edits,
             );
+        }
+    }
+    for (instance, private) in &manager.private_sources {
+        let sources = manager.sources.entry(instance.clone()).or_default();
+        for (path, source) in private {
+            sources.retain(|key, _| key != path && !key.starts_with(&format!("{path}/")));
+            sources.insert(path.clone(), source.clone());
         }
     }
 }
@@ -1341,5 +1433,62 @@ mod tests {
             config(&composition, "plugin").unwrap().1,
             json!({ "n": 1, "nullable": null, "unknown": { "kept": true }, "secret": "private" })
         );
+    }
+    #[test]
+    fn unchanged_private_commits_replay_set_and_clear_provenance() {
+        let root = std::env::temp_dir().join(format!("eden-private-origin-{}", new_session_id()));
+        let path = root.join("private-input/abc/value.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let file = eden_workspace::private_file::open(&path).unwrap();
+        serde_json::to_writer(
+            file,
+            &json!({
+                "instance": "plugin",
+                "inputs": [
+                    { "operation": "set", "path": "/token", "value": { "CANARY": 1 } },
+                    { "operation": "clear", "path": "/absent" }
+                ],
+            }),
+        )
+        .unwrap();
+        let records = vec![record(
+            "configuration_commit",
+            json!({
+                "change": {
+                    "instance": "plugin",
+                    "revision": 0,
+                    "patch": {},
+                    "replacement": null,
+                    "private_reference": "abc",
+                },
+                "application": "unchanged",
+                "receipt": {
+                    "operation": 1,
+                    "revision": 1,
+                    "instance": "plugin",
+                    "affected": [],
+                    "status": "applied",
+                    "error": null,
+                    "recovery_error": null,
+                },
+            }),
+        )];
+        let mut selected: Composition = serde_json::from_value(json!({
+            "packages": [],
+            "roles": {},
+        }))
+        .unwrap();
+        let mut manager = replay_private(&mut selected, &records, Some(&root)).unwrap();
+        replay_sources(&mut manager, &records);
+        assert_eq!(
+            manager.sources["plugin"].get("/token").map(String::as_str),
+            Some("explicit_session")
+        );
+        assert_eq!(
+            manager.sources["plugin"].get("/absent").map(String::as_str),
+            Some("explicit_session_clear")
+        );
+        assert!(!format!("{:?}", manager.sources).contains("CANARY"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

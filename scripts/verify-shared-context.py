@@ -204,7 +204,11 @@ def main() -> None:
                                                 "context_window": 1048576,
                                                 "max_output_tokens": 393216,
                                             },
-                                            "capabilities": {"tools": True, "images": True},
+                                            "capabilities": {
+                                                "tools": True,
+                                                "images": True,
+                                                "reasoning": False,
+                                            },
                                             "source": {
                                                 "kind": "fixture",
                                                 "location": "controlled notes target",

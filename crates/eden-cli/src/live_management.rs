@@ -1,18 +1,17 @@
 //! Launching another local host is an explicit management action; accepted work stays with its owner.
 use super::*;
-use eden_agent::{CopyOptions, CopyPlan};
 
 #[derive(Default)]
 pub(super) struct Management {
     pub(super) launch: Option<Cli>,
-    pub(super) copies: Mutex<HashMap<String, CopyPlan>>,
+    pub(super) previews: Mutex<previews::Previews>,
     pub(super) scans: Mutex<HashMap<String, DirectoryReader>>,
 }
 pub(super) struct DirectoryReader {
     attachment: u64,
     reader: Arc<tokio::sync::Mutex<eden_agent::SavedSessionScan>>,
 }
-fn managed_path(shared: &Shared, body: &Value, key: &str) -> Result<PathBuf, Fault> {
+pub(super) fn managed_path(shared: &Shared, body: &Value, key: &str) -> Result<PathBuf, Fault> {
     let path: PathBuf = field(body, key)?;
     Ok(if path.is_absolute() {
         path
@@ -134,16 +133,7 @@ pub(super) async fn management_submit(
                     .apply_configuration(field(body, "change")?, field(body, "mode")?)
                     .await?,
         })),
-        "/delivery/save" => {
-            shared
-                .session
-                .save_export_preview(
-                    &field::<String>(body, "preview_id")?,
-                    managed_path(shared, body, "path")?,
-                )
-                .await?;
-            Ok(json!({ "saved": body["path"] }))
-        }
+        "/delivery/save" => previews::save(shared, body).await,
         "/manage/rename" => {
             let cli = shared
                 .management
@@ -214,96 +204,36 @@ pub(super) async fn management_submit(
             .map_err(|e| fault("HostLaunch", e.to_string()))??;
             Ok(json!({ "endpoint": endpoint }))
         }
-        "/manage/copy/preview" => {
-            let cli = shared
-                .management
-                .launch
-                .as_ref()
-                .ok_or_else(|| fault("Unavailable", "composition unavailable"))?;
-            let composition =
-                crate::composition(cli).map_err(|e| fault("InvalidInput", e.to_string()))?;
-            let plan = Session::plan_copy(
-                composition,
-                CopyOptions {
-                    source: managed_path(shared, body, "source")?,
-                    destination: managed_path(shared, body, "destination")?,
-                    kind: field(body, "kind")?,
-                    target: body["target"].as_u64(),
-                    cwd: None,
-                    public_only: false,
-                },
-            )
-            .await?;
-            let id = token()?;
-            let result = json!({ "preview_id": id, "plan": plan });
-            let mut plans = shared
-                .management
-                .copies
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if plans.len() >= 8 {
-                return Err(fault(
-                    "PreviewLimit",
-                    "discard a copy preview before creating another",
-                ));
-            }
-            plans.insert(id, plan);
-            Ok(result)
-        }
-        "/manage/copy/apply" => {
-            if body["confirmed"] != true {
-                return Err(fault("InvalidInput", "confirm the reviewed copy plan"));
-            }
-            let id = field::<String>(body, "preview_id")?;
-            let plan = shared
-                .management
-                .copies
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&id)
-                .ok_or_else(|| fault("Unavailable", "copy preview expired"))?;
-            Ok(json!({ "created": Session::apply_copy(plan).await? }))
-        }
-        "/manage/copy/discard" => {
-            shared
-                .management
-                .copies
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&field::<String>(body, "preview_id")?);
-            Ok(json!({ "discarded": true }))
-        }
-        "/delivery/preview" => {
-            let (id, artifact) = shared
-                .session
-                .prepare_export(
-                    field(body, "selection")?,
-                    eden_protocol::delivery::Format::Jsonl,
-                )
-                .await?;
-            Ok(json!({ "preview_id": id, "artifact": artifact }))
-        }
-        "/delivery/publish" => Ok(json!({
-            "run_id": shared.session.publish_preview(
-                &field::<String>(body, "preview_id")?,
-                field(body, "confirmed")?
-            )?,
-        })),
-        "/delivery/discard" => Ok(json!({
-            "discarded": shared
-                .session
-                .forget_preview(&field::<String>(body, "preview_id")?),
-        })),
+        "/manage/copy/preview" => previews::prepare_copy(shared, body).await,
+        "/manage/copy/apply" => previews::apply_copy(shared, body).await,
+        "/manage/copy/discard" => previews::discard(shared, body, true),
+        "/delivery/preview" => previews::prepare_export(shared, body).await,
+        "/delivery/publish" => previews::publish(shared, body),
+        "/delivery/discard" => previews::discard(shared, body, false),
         "/updates" => Ok(json!({ "run_id": shared.session.update(field(body, "request")?)? })),
         _ => Err(fault("Unsupported", "unknown management action")),
     }
 }
 
-pub(super) fn detach_scans(shared: &Shared, attachment: u64) {
-    let mut scans = shared
-        .management
-        .scans
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    scans.retain(|_, entry| entry.attachment != attachment);
+pub(super) async fn detach_scans(shared: &Shared, attachment: u64) {
+    let readers = {
+        let mut scans = shared
+            .management
+            .scans
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut readers = vec![];
+        scans.retain(|_, entry| {
+            if entry.attachment == attachment {
+                readers.push(entry.reader.clone());
+                false
+            } else {
+                true
+            }
+        });
+        readers
+    };
+    for reader in readers {
+        reader.lock().await.cancel_and_wait().await;
+    }
 }

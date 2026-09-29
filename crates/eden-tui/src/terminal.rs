@@ -115,6 +115,11 @@ pub async fn run(mut options: Options) -> Result<i32, Box<dyn std::error::Error>
             },
         }));
     }
+    let prior = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore();
+        prior(info)
+    }));
     loop {
         let identity = HostClient::new(&options.endpoint)
             .snapshot()
@@ -124,11 +129,10 @@ pub async fn run(mut options: Options) -> Result<i32, Box<dyn std::error::Error>
         let client = HostClient::for_session(&options.endpoint, identity);
         let lease = Arc::new(AtomicU64::new(client.attach("tui").await?));
         let result = run_attached(&options, client.clone(), lease.clone()).await;
-        let _ = tokio::time::timeout(
-            Duration::from_secs(1),
-            client.detach(lease.load(Ordering::Relaxed)),
-        )
-        .await;
+        let detached = client.detach(lease.load(Ordering::Relaxed)).await;
+        if options.endpoint.exists() {
+            detached?;
+        }
         let (code, next) = result?;
         if let Some(endpoint) = next {
             options.endpoint = endpoint;
@@ -238,11 +242,6 @@ async fn run_attached(
                 app.notice = "Invalid UI settings · previous preferences retained".into();
             }
         }
-        let prior = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            restore();
-            prior(info)
-        }));
         let result = drive(&mut app, options, &preferences);
         app.cancel_management_scan();
         app.release_management_preview();

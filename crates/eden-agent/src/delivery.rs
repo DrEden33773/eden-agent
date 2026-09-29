@@ -225,10 +225,36 @@ pub fn read_preview(path: &Path, digest: &str) -> Result<Artifact, Fault> {
         warnings: vec![],
     })
 }
+/// Save already reviewed reading bytes to a new file without rereading history or overwriting a file.
+pub async fn save_artifact_file(artifact: Artifact, path: std::path::PathBuf) -> Result<(), Fault> {
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|e| Fault::new("FileFailure", "delivery", e.to_string()))?;
+        file.write_all(artifact.content.as_bytes())
+            .and_then(|()| file.sync_all())
+            .map_err(|e| Fault::new("FileFailure", "delivery", e.to_string()))
+    })
+    .await
+    .map_err(|e| Fault::new("FileFailure", "delivery", e.to_string()))?
+}
 impl Session {
     /// Render one committed snapshot without writing a file or including streaming deltas.
     pub async fn export(&self, selection: Selection, format: Format) -> Result<Artifact, Fault> {
-        self.service(
+        self.export_with_cancel(selection, format, Cancellation::default())
+            .await
+    }
+    /// Prepare reading bytes under the caller's cancellation ownership, including exporter cleanup.
+    pub async fn export_with_cancel(
+        &self,
+        selection: Selection,
+        format: Format,
+        cancel: Cancellation,
+    ) -> Result<Artifact, Fault> {
+        self.service_with_cancel(
             0,
             EXPORTER,
             &ExportRequest {
@@ -236,6 +262,7 @@ impl Session {
                 selection,
                 format,
             },
+            cancel,
         )
         .await
     }
@@ -273,19 +300,7 @@ impl Session {
             .get(id)
             .cloned()
             .ok_or_else(|| Fault::new("PreviewExpired", "delivery", "prepare the export again"))?;
-        tokio::task::spawn_blocking(move || {
-            use std::io::Write;
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)
-                .map_err(|e| Fault::new("FileFailure", "delivery", e.to_string()))?;
-            file.write_all(artifact.content.as_bytes())
-                .and_then(|()| file.sync_all())
-                .map_err(|e| Fault::new("FileFailure", "delivery", e.to_string()))
-        })
-        .await
-        .map_err(|e| Fault::new("FileFailure", "delivery", e.to_string()))?
+        save_artifact_file(artifact, path).await
     }
     /// Release an unused preview; publication never rereads conversation history.
     pub fn forget_preview(&self, id: &str) -> bool {

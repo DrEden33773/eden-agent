@@ -551,30 +551,49 @@ pub fn artifacts(records: &[Record], message_id: u64) -> Vec<Artifact> {
 pub(crate) fn reading(document: &eden_protocol::delivery::ReadingDocument) -> Vec<Message> {
     let mut messages = vec![];
     for (index, entry) in document.entries.iter().enumerate() {
-        let content = entry.get("content").unwrap_or(entry);
+        let content = if document.format == "eden-reading-v1" {
+            entry.get("content").unwrap_or(entry)
+        } else {
+            entry
+        };
         let id = index as u64 + 1;
         let (role, title, body) = match content["type"]
             .as_str()
             .filter(|_| document.format == "eden-reading-v1")
         {
             Some("message") => {
-                let content_blocks: Vec<Block> =
-                    serde_json::from_value(content["content"].clone()).unwrap_or_default();
+                let mut visible = vec![];
+                let mut images = vec![];
+                if let Some(parts) = content["content"].as_array() {
+                    for part in parts {
+                        match serde_json::from_value::<Block>(part.clone()) {
+                            Ok(block) => {
+                                visible.push(blocks(std::slice::from_ref(&block)));
+                                if matches!(block, Block::Image { .. }) {
+                                    images.push(std::sync::Arc::new(block));
+                                }
+                            }
+                            Err(_) => {
+                                visible.push(serde_json::to_string_pretty(part).unwrap_or_default())
+                            }
+                        }
+                    }
+                } else {
+                    visible.push(
+                        serde_json::to_string_pretty(&content["content"]).unwrap_or_default(),
+                    );
+                }
                 let mut message = Message::new(
                     id,
-                    if content["role"] == "user" {
-                        Role::User
-                    } else {
-                        Role::Assistant
+                    match content["role"].as_str() {
+                        Some("user") => Role::User,
+                        Some("assistant") => Role::Assistant,
+                        _ => Role::Notice,
                     },
                     content["role"].as_str().unwrap_or("Message"),
-                    blocks(&content_blocks),
+                    visible.join("\n"),
                 );
-                message.images = content_blocks
-                    .into_iter()
-                    .filter(|b| matches!(b, Block::Image { .. }))
-                    .map(std::sync::Arc::new)
-                    .collect();
+                message.images = images;
                 messages.push(message);
                 continue;
             }
@@ -877,5 +896,40 @@ mod tests {
             shell_streaming(&[events.clone(), events].concat(), &[7])[0].body,
             "中"
         );
+    }
+}
+
+#[cfg(test)]
+mod reading_fallback_tests {
+    #[test]
+    fn unknown_document_format_keeps_the_entire_source_entry() {
+        let document = eden_protocol::delivery::ReadingDocument {
+            format: "history-source".into(),
+            entries: vec![serde_json::json!({ "schema_version": 3, "content": "SOURCE_MARKER" })],
+            diagnostic: None,
+        };
+        let rows = super::reading(&document);
+        assert!(rows[0].body.contains("schema_version"));
+        assert!(rows[0].body.contains("SOURCE_MARKER"));
+    }
+    #[test]
+    fn unknown_message_block_keeps_known_siblings_and_its_source() {
+        let reading = eden_protocol::delivery::ReadingDocument {
+            format: "eden-reading-v1".into(),
+            entries: vec![serde_json::json!({
+                "content": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "VISIBLE_SIBLING" },
+                        { "type": "future", "data": "UNKNOWN_SOURCE" }
+                    ],
+                },
+            })],
+            diagnostic: None,
+        };
+        let projected = super::reading(&reading);
+        assert!(projected[0].body.contains("VISIBLE_SIBLING"));
+        assert!(projected[0].body.contains("UNKNOWN_SOURCE"));
     }
 }

@@ -17,6 +17,8 @@ use tokio::{
 
 #[path = "live_management.rs"]
 mod management;
+#[path = "live_previews.rs"]
+mod previews;
 use management::{Management, detach_scans, management_read, management_submit};
 
 const MAX_FRAME: usize = 1024 * 1024;
@@ -431,8 +433,9 @@ async fn dispatch(
         }
         ("POST", "/detach") => {
             let attachment = field(&body, "attachment")?;
-            detach_scans(shared, attachment);
             session.detach_presentation(attachment)?;
+            previews::detach(shared, attachment).await;
+            detach_scans(shared, attachment).await;
             Ok(json!({ "detached": true }))
         }
         ("POST", "/activity") => {
@@ -838,6 +841,7 @@ async fn submit_once(shared: &Arc<Shared>, route: &str, body: Value) -> Result<V
         tokio::spawn(async move {
             let result = perform_submission(&shared, &route, &body).await;
             let mut guard = shared.submissions.lock().unwrap_or_else(|e| e.into_inner());
+            let result = previews::completed_result(&shared, &route, &body, result);
             let listeners = match guard.0.remove(&id) {
                 Some(Submission::Running { listeners, .. }) => listeners,
                 _ => vec![],

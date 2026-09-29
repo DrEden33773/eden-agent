@@ -7,8 +7,17 @@ use eden_tui_client::{HostClient, RequestStatus};
 use std::collections::BTreeMap;
 
 async fn session() -> Session {
+    session_with_preview_barrier(None).await
+}
+async fn session_with_preview_barrier(
+    barrier: Option<(
+        Arc<tokio::sync::Notify>,
+        Arc<tokio::sync::Notify>,
+        Arc<std::sync::atomic::AtomicBool>,
+    )>,
+) -> Session {
     let cwd = std::env::current_dir().unwrap();
-    let package = Package::new("live-test")
+    let mut package = Package::new("live-test")
         .service(AGENT_LOOP, |input: RunInput, cx| async move {
             if input.prompt == "wait" {
                 cx.scope.cancellation().cancelled().await;
@@ -34,6 +43,35 @@ async fn session() -> Session {
                 }))
             },
         );
+    if let Some((started, release, cleaned)) = barrier {
+        package = package.service(
+            eden_protocol::delivery::EXPORTER,
+            move |_: eden_protocol::delivery::ExportRequest, cx| {
+                let started = started.clone();
+                let release = release.clone();
+                let cleaned = cleaned.clone();
+                async move {
+                    cx.scope
+                        .cleanup(async move {
+                            cleaned.store(true, std::sync::atomic::Ordering::SeqCst);
+                            Ok(())
+                        })
+                        .unwrap();
+                    started.notify_one();
+                    let cancel = cx.scope.cancellation();
+                    tokio::select! {
+                        _ = cancel.cancelled() => Err(fault("Cancelled", "export cancelled")),
+                        _ = release.notified() => Ok(eden_protocol::delivery::Artifact {
+                            media_type: "application/x-ndjson".into(),
+                            filename: "preview.jsonl".into(),
+                            content: "fixed".into(),
+                            warnings: vec![]
+                        }),
+                    }
+                }
+            },
+        );
+    }
     let session = Embedded::new(
         Composition {
             host_environment: None,
@@ -409,4 +447,130 @@ fn reading_jsonl_is_read_only_and_retains_valid_prefix_and_unknown_content() {
     assert!(document.reading.as_ref().unwrap().diagnostic.is_some());
     assert!(eden_kernel::history::read(&root).is_err());
     std::fs::remove_file(root).unwrap();
+}
+
+#[tokio::test]
+async fn detaching_frontend_cancels_pending_preview_and_observes_cleanup() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let cleaned = Arc::new(AtomicBool::new(false));
+    let session =
+        session_with_preview_barrier(Some((started.clone(), release.clone(), cleaned.clone())))
+            .await;
+    let (stop, _) = watch::channel(false);
+    let shared = Arc::new(Shared {
+        management: Default::default(),
+        session: session.clone(),
+        token: "fixture".into(),
+        web_root: None,
+        submissions: Mutex::new((HashMap::new(), VecDeque::new())),
+        history: tokio::sync::Mutex::new(None),
+        stop,
+    });
+    let attachment = dispatch(&shared, "POST", "/attach", json!({ "frontend": "tui" }))
+        .await
+        .unwrap()["attachment"]
+        .clone();
+    let preparing = shared.clone();
+    let owner = attachment.clone();
+    let task = tokio::spawn(async move {
+        dispatch(
+            &preparing,
+            "POST",
+            "/delivery/preview",
+            json!({ "request_id": "pending-preview", "attachment": owner, "selection": {} }),
+        )
+        .await
+    });
+    started.notified().await;
+    dispatch(
+        &shared,
+        "POST",
+        "/detach",
+        json!({ "attachment": attachment }),
+    )
+    .await
+    .unwrap();
+    let cleaned_before_ack = cleaned.load(Ordering::SeqCst);
+    release.notify_one();
+    let result = task.await.unwrap();
+    session.shutdown().await.unwrap();
+    assert!(
+        cleaned_before_ack,
+        "detach acknowledged before export cleanup"
+    );
+    assert!(result.is_err(), "detached preview retained a result");
+}
+#[test]
+fn unknown_history_version_keeps_the_source_visible() {
+    let path =
+        std::env::temp_dir().join(format!("eden-future-history-{}.jsonl", std::process::id()));
+    std::fs::write(
+        &path,
+        "{\"schema_version\":3,\"content\":\"UNIQUE_UNKNOWN_CONTENT\"}\n",
+    )
+    .unwrap();
+    let document = read_document(&path).unwrap();
+    assert!(document.reading.is_some());
+    assert!(
+        json!(document.reading)
+            .to_string()
+            .contains("UNIQUE_UNKNOWN_CONTENT")
+    );
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn detached_preview_receipt_does_not_retain_the_artifact() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    release.notify_one();
+    let session = session_with_preview_barrier(Some((
+        started,
+        release,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )))
+    .await;
+    let (stop, _) = watch::channel(false);
+    let shared = Arc::new(Shared {
+        management: Default::default(),
+        session: session.clone(),
+        token: "fixture".into(),
+        web_root: None,
+        submissions: Mutex::new((HashMap::new(), VecDeque::new())),
+        history: tokio::sync::Mutex::new(None),
+        stop,
+    });
+    let attachment = dispatch(&shared, "POST", "/attach", json!({ "frontend": "tui" }))
+        .await
+        .unwrap()["attachment"]
+        .clone();
+    dispatch(
+        &shared,
+        "POST",
+        "/delivery/preview",
+        json!({ "request_id": "finished-preview", "attachment": attachment, "selection": {} }),
+    )
+    .await
+    .unwrap();
+    dispatch(
+        &shared,
+        "POST",
+        "/detach",
+        json!({ "attachment": attachment }),
+    )
+    .await
+    .unwrap();
+    let receipt = dispatch(
+        &shared,
+        "POST",
+        "/request-status",
+        json!({ "request_id": "finished-preview" }),
+    )
+    .await
+    .unwrap();
+    session.shutdown().await.unwrap();
+    assert_eq!(receipt["result"]["Err"]["code"], "Cancelled");
+    assert!(!receipt.to_string().contains("application/x-ndjson"));
 }

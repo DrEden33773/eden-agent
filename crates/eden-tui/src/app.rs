@@ -1046,6 +1046,7 @@ impl App {
     }
     pub fn open(&mut self, kind: &str) {
         if !kind.starts_with("manage:") {
+            self.release_management_preview();
             self.cancel_management_scan();
             self.management.generation += 1;
             self.management.form = None;
@@ -1604,6 +1605,10 @@ impl App {
         }
         self.clipboard_generation += 1;
         if key.code == KeyCode::Esc {
+            if matches!(&self.dialog,Some(Dialog::Palette{kind,..}) if matches!(kind.as_str(),"manage:export-preview"|"manage:copy-preview"))
+            {
+                self.release_management_preview();
+            }
             self.cancel_management_scan();
             let management_back = !self.management.page.is_empty()
                 && matches!(

@@ -669,6 +669,11 @@ impl App {
             return;
         }
         body["management"] = json!(self.management.generation);
+        if matches!(route, "/delivery/preview" | "/manage/copy/preview")
+            && let Some(lease) = &self.lease
+        {
+            body["attachment"] = json!(lease.load(std::sync::atomic::Ordering::Relaxed));
+        }
         self.request(route, body, false);
     }
     fn dispatch_private_auth(&mut self, route: &str, mut body: Value) {

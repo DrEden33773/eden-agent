@@ -36,6 +36,22 @@ pub(super) fn read_document(path: &Path) -> Result<Document, Fault> {
         });
     }
     let scan = eden_protocol::history::scan_records(text.as_bytes());
+    if scan.records.is_empty() && scan.diagnostic.is_some() {
+        return Ok(Document {
+            history: vec![],
+            reading: Some(eden_protocol::delivery::ReadingDocument {
+                format: "history-source".into(),
+                entries: text
+                    .lines()
+                    .map(|line| {
+                        serde_json::from_str(line).unwrap_or_else(|_| Value::String(line.into()))
+                    })
+                    .collect(),
+                diagnostic: scan.diagnostic,
+            }),
+            diagnostic: None,
+        });
+    }
     let history = match eden_protocol::history::active_path(&scan.records) {
         Ok(history) => history,
         Err(error) => {

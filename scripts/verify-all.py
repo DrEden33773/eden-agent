@@ -36,6 +36,8 @@ SUITES = {
     "coding": ("verify-coding.py", "coding-verification.json"),
     "sessions": ("verify-sessions.py", "session-verification.json"),
     "context": ("verify-context.py", "context-verification.json"),
+    "shared-context": ("verify-shared-context.py", "shared-context-verification.json"),
+    "shared-context-tui": ("verify-shared-context-tui.py", "shared-context-tui-verification.json"),
     "workspace": ("verify-workspace.py", "workspace-verification.json"),
     "models": ("verify-model-access.py", "model-access-verification.json"),
     "cloud-models": ("verify-cloud-model-access.py", "cloud-model-access-verification.json"),

@@ -109,6 +109,7 @@ mod tests {
             session: "task-a".into(),
             frontend: "terminal-a".into(),
             draft: Draft {
+                references: vec![crate::references::tests::frozen().into()],
                 text: "中文\n草稿".into(),
                 cursor: 6,
                 attachments: vec![Attachment {
@@ -125,6 +126,10 @@ mod tests {
         let loaded = store.load().unwrap();
         assert_eq!(loaded.draft.attachments[0].bytes.as_ref(), b"immutable");
         assert_eq!(loaded.frontend, "terminal-a");
+        assert_eq!(
+            *loaded.draft.references[0],
+            crate::references::tests::frozen()
+        );
         assert_eq!(loaded.sessions["other-session"].text, "other draft");
         let other = DraftStore::new(&dir, "terminal-b").unwrap();
         assert!(other.load().is_none());

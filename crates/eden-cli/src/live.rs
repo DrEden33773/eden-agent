@@ -499,8 +499,26 @@ async fn dispatch(
         }
         (
             "POST",
-            "/prompt" | "/enqueue" | "/shell" | "/command" | "/queue/withdraw" | "/queue/configure",
+            "/prompt" | "/enqueue" | "/shell" | "/command" | "/queue/withdraw" | "/queue/configure"
+            | "/context/apply" | "/context/rebuild" | "/context/compact" | "/context/images",
         ) => submit_once(shared, route, body).await,
+        ("POST", "/session/catalog") => Ok(json!(session.session_catalog().await?)),
+        ("POST", "/session/branches") => Ok(json!(
+            session
+                .session_branches(field::<String>(&body, "path")?)
+                .await?
+        )),
+        ("POST", "/reference/check") => Ok(json!(
+            session
+                .check_reference_input(content(&body)?, field(&body, "references")?)
+                .await?
+        )),
+        ("POST", "/reference/preview") => Ok(json!(
+            session
+                .reference_preview(field::<String>(&body, "path")?, body["head"].as_u64())
+                .await?
+        )),
+        ("POST", "/context/inspect") => Ok(json!(session.inspect_context().await?)),
         ("POST", "/queue/inspect") => Ok(json!(session.queued().await?)),
         ("POST", "/resources") => Ok(json!(session.resources().await?)),
         ("POST", "/tools") => Ok(json!(session.tools().await?)),
@@ -753,13 +771,52 @@ fn content(body: &Value) -> Result<Vec<eden_protocol::coding::Block>, Fault> {
 }
 async fn perform_submission(session: &Session, route: &str, body: &Value) -> Result<Value, Fault> {
     match route {
-        "/prompt" => Ok(json!({ "run_id": session.submit_blocks(content(body)?)? })),
+        "/context/images" => Ok(json!(session.edit_images(field(body, "edit")?).await?)),
+        "/context/rebuild" => Ok(json!({
+            "run_id": session.rebuild_context(field(body, "rebuild")?)?,
+        })),
+        "/context/compact" => Ok(json!({
+            "run_id":
+                session.compact(body["instructions"].as_str().unwrap_or_default().into())?,
+        })),
+        "/context/apply" => Ok(json!(session.edit_context(field(body, "edit")?).await?)),
+        "/prompt" => {
+            let content = content(body)?;
+            let references: Vec<eden_protocol::session_reference::Reference> = body
+                .get("references")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|error| fault("InvalidReference", error.to_string()))?
+                .unwrap_or_default();
+            if session.has_role(eden_protocol::context_edit::SERVICE)
+                && session.state().active_run.is_none()
+            {
+                session
+                    .check_reference_input(content.clone(), references.clone())
+                    .await?;
+            }
+            Ok(json!({ "run_id": session.submit_referenced(content, references)? }))
+        }
         "/enqueue" => {
             let kind: String = field(body, "kind")?;
             if !["steering", "follow_up"].contains(&kind.as_str()) {
                 return Err(fault("InvalidInput", "choose steering or follow_up"));
             }
-            Ok(json!(session.enqueue(&kind, content(body)?).await?))
+            Ok(json!(
+                session
+                    .enqueue_referenced(
+                        &kind,
+                        content(body)?,
+                        body.get("references")
+                            .cloned()
+                            .map(serde_json::from_value)
+                            .transpose()
+                            .map_err(|error| fault("InvalidReference", error.to_string()))?
+                            .unwrap_or_default()
+                    )
+                    .await?
+            ))
         }
         "/shell" => Ok(json!({
             "run_id": session.user_shell(

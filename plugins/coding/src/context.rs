@@ -2,6 +2,7 @@
 use super::*;
 use eden_plugin_sdk::protocol::compaction as c;
 
+use eden_plugin_sdk::protocol::context_edit::{Document, Entry};
 use eden_plugin_sdk::protocol::history::active_path;
 use std::collections::BTreeMap;
 
@@ -43,18 +44,45 @@ fn validate_compactions(path: &[Record]) -> Result<(), Fault> {
     Ok(())
 }
 fn project_path(path: &[Record], records: &[Record]) -> Result<Vec<Item>, Fault> {
-    let compact = path.iter().rev().find(|record| record.kind == "compaction");
+    Ok(project_entries(path, records)?
+        .into_iter()
+        .map(|entry| entry.item)
+        .collect())
+}
+fn project_entries(path: &[Record], records: &[Record]) -> Result<Vec<Entry>, Fault> {
+    let rebuild = path
+        .iter()
+        .rev()
+        .find(|record| record.kind == "context_rebuild")
+        .map_or(0, |record| record.sequence);
+    let compact = path
+        .iter()
+        .rev()
+        .find(|record| record.kind == "compaction" && record.sequence > rebuild);
     let first = compact
         .and_then(|record| record.payload.get("first_kept"))
         .and_then(Value::as_u64);
     let states = queue::statuses(records);
     let mut items = vec![];
+    let mut identities = vec![];
+    let mut retained_references = BTreeMap::new();
     if let Some(record) = compact {
         items.push(text_item(format!(
             "Previous context summary:\n{}",
             record.payload["summary"].as_str().unwrap_or_default()
         )));
         add_uncertainties(&mut items, &record.payload);
+        identities
+            .extend((0..items.len()).map(|index| format!("record:{}:{index}", record.sequence)));
+        if let Some(retained) = record.payload.get("context_retained") {
+            let retained: Vec<Entry> = serde_json::from_value(retained.clone())
+                .map_err(|error| Fault::new("PersistenceFailure", "context", error.to_string()))?;
+            for entry in retained {
+                retained_references.insert(entry.id.clone(), entry.references);
+                identities.push(entry.id);
+                items.push(entry.item);
+            }
+        }
     }
     for record in path {
         if let Some(first) = first
@@ -67,6 +95,7 @@ fn project_path(path: &[Record], records: &[Record]) -> Result<Vec<Item>, Fault>
         {
             continue;
         }
+        let start = items.len();
         match record.kind.as_str() {
             "message" | "tool_intent" | "tool_result" | "provider_state" => {
                 items.push(decode(record)?)
@@ -134,7 +163,14 @@ fn project_path(path: &[Record], records: &[Record]) -> Result<Vec<Item>, Fault>
             }
             _ => {}
         }
+        identities.extend(
+            (0..items.len() - start).map(|index| format!("record:{}:{index}", record.sequence)),
+        );
     }
+    let by_sequence: BTreeMap<_, _> = records
+        .iter()
+        .map(|record| (record.sequence, record))
+        .collect();
     let completed: BTreeSet<_> = items
         .iter()
         .filter_map(|item| {
@@ -145,18 +181,37 @@ fn project_path(path: &[Record], records: &[Record]) -> Result<Vec<Item>, Fault>
             }
         })
         .collect();
-    Ok(items
+    items
         .into_iter()
-        .map(|item| match item {
-            Item::ToolCall { ref call_id, .. } if !completed.contains(call_id) => {
-                text_item(format!(
-                    "Historical tool call {call_id} was interrupted; result and external effects \
-                     are unknown. It was not replayed."
-                ))
-            }
-            other => other,
+        .zip(identities)
+        .map(|(item, id)| {
+            let references = id
+                .strip_prefix("record:")
+                .and_then(|id| id.split(':').next())
+                .and_then(|id| id.parse::<u64>().ok())
+                .and_then(|sequence| by_sequence.get(&sequence))
+                .and_then(|record| record.payload.get("references"))
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|error| Fault::new("InvalidReference", "context", error.to_string()))?
+                .unwrap_or_default();
+            let references = retained_references.get(&id).cloned().unwrap_or(references);
+            Ok(Entry {
+                id,
+                references,
+                item: match item {
+                    Item::ToolCall { ref call_id, .. } if !completed.contains(call_id) => {
+                        text_item(format!(
+                            "Historical tool call {call_id} was interrupted; result and external \
+                             effects are unknown. It was not replayed."
+                        ))
+                    }
+                    other => other,
+                },
+            })
         })
-        .collect())
+        .collect::<Result<Vec<_>, Fault>>()
 }
 fn add_uncertainties(items: &mut Vec<Item>, payload: &Value) {
     for (key, label) in [
@@ -217,7 +272,12 @@ pub(crate) fn estimate(items: &[Item]) -> u64 {
 pub(crate) fn generation(path: &[Record]) -> u64 {
     path.iter()
         .rev()
-        .find(|r| r.kind == "compaction")
+        .find(|r| {
+            matches!(
+                r.kind.as_str(),
+                "compaction" | "context_edit" | "context_rebuild" | "image_version"
+            )
+        })
         .map_or(0, |r| r.sequence)
 }
 pub(crate) fn usage_tokens(usage: &Value) -> Option<u64> {
@@ -235,7 +295,12 @@ fn calibrated_estimate(path: &[Record], estimate: u64) -> u64 {
         .rev()
         // Copies renumber checkpoints. A matching number before the latest
         // compaction is still stale evidence for the current projection.
-        .take_while(|record| record.kind != "compaction")
+        .take_while(|record| {
+            !matches!(
+                record.kind.as_str(),
+                "compaction" | "context_edit" | "context_rebuild" | "image_version"
+            )
+        })
         .find_map(|record| {
             if record.kind != "model_response"
                 || record.payload["usage_generation"].as_u64()? != current
@@ -251,10 +316,15 @@ fn calibrated_estimate(path: &[Record], estimate: u64) -> u64 {
 
 fn retained_cut(path: &[Record], keep_recent_tokens: u64) -> Result<usize, Fault> {
     // Keep about 20k recent tokens. A cut may only precede a complete assistant/tool round.
+    let rebuild = path
+        .iter()
+        .rev()
+        .find(|record| record.kind == "context_rebuild")
+        .map_or(0, |record| record.sequence);
     let first = path
         .iter()
         .rev()
-        .find(|record| record.kind == "compaction")
+        .find(|record| record.kind == "compaction" && record.sequence > rebuild)
         .map(|record| {
             record.payload["first_kept"]
                 .as_u64()
@@ -467,9 +537,32 @@ fn summary_safe_items(items: Vec<Item>) -> Vec<Item> {
         .collect()
 }
 fn latest_states(records: &[Record]) -> Result<Vec<ExtensionState>, Fault> {
+    let rebuild = records
+        .iter()
+        .rev()
+        .find(|record| record.kind == "context_rebuild")
+        .map_or(0, |record| record.sequence);
+    let mut replaced = BTreeSet::new();
+    for (index, checkpoint) in records
+        .iter()
+        .enumerate()
+        .filter(|(_, record)| record.kind == "compaction" && record.sequence < rebuild)
+    {
+        let mut start = index;
+        while start > 0 && records[start - 1].kind == "extension_state" {
+            start -= 1;
+        }
+        if start > 0
+            && records[start - 1].kind == "model_request"
+            && records[start - 1].payload["purpose"] == "compaction"
+            && records[start - 1].payload["request_id"] == checkpoint.payload["request_id"]
+        {
+            replaced.extend(records[start..index].iter().map(|record| record.sequence));
+        }
+    }
     let states: Vec<ExtensionState> = records
         .iter()
-        .filter(|r| r.kind == "extension_state")
+        .filter(|r| r.kind == "extension_state" && !replaced.contains(&r.sequence))
         .map(|r| {
             serde_json::from_value(r.payload.clone())
                 .map_err(|e| Fault::new("PersistenceFailure", "context", e.to_string()))
@@ -499,7 +592,7 @@ async fn interpreted(records: &[Record], cx: &CallContext) -> Result<Vec<Item>, 
         Ok(vec![])
     }
 }
-fn system_item(input: &ContextInput) -> Item {
+pub(crate) fn system_item(input: &ContextInput) -> Item {
     let selected = input.tools.clone().unwrap_or_else(tools);
     let mut system = input
         .resources
@@ -545,14 +638,102 @@ fn system_item(input: &ContextInput) -> Item {
         content: vec![Block::Text { text: system }],
     }
 }
+fn split_edited(document: &Document, keep: u64) -> (Vec<Item>, Vec<Entry>) {
+    let entries: Vec<_> = document.entries.iter().filter(|entry| !matches!(&entry.item, Item::Message {role, ..} if role == "system" || role == "developer") && !entry.id.starts_with("extension:")).cloned().collect();
+    let mut cut = entries.len();
+    let mut tokens = 0;
+    while cut > 0 && tokens < keep {
+        cut -= 1;
+        tokens += estimate(std::slice::from_ref(&entries[cut].item));
+    }
+    // Never start retained input in the middle of an assistant/tool response.
+    while cut > 0 && !matches!(&entries[cut].item, Item::Message {role, ..} if role == "user") {
+        cut -= 1;
+    }
+    (
+        entries[..cut]
+            .iter()
+            .map(|entry| entry.item.clone())
+            .collect(),
+        entries[cut..].to_vec(),
+    )
+}
+
+pub(crate) async fn document(input: &ContextInput, cx: &CallContext) -> Result<Document, Fault> {
+    let path = if input.action == "branch_summary" {
+        input.records.clone()
+    } else {
+        active_path(&input.records)?
+    };
+    validate_compactions(&path)?;
+    let mut entries = vec![Entry {
+        id: "system".into(),
+        item: system_item(input),
+        references: vec![],
+    }];
+    entries.extend(project_entries(&path, &input.records)?);
+    let state_revision = path
+        .iter()
+        .rev()
+        .find(|record| record.kind == "extension_state")
+        .map_or(0, |record| record.sequence);
+    entries.extend(
+        interpreted(&path, cx)
+            .await?
+            .into_iter()
+            .enumerate()
+            .map(|(index, item)| Entry {
+                id: format!("extension:{state_revision}:{index}"),
+                item,
+                references: vec![],
+            }),
+    );
+    let mut document = Document {
+        entries,
+        tools: input.tools.clone().unwrap_or_else(tools),
+    };
+    let rebuild = path
+        .iter()
+        .rev()
+        .find(|record| record.kind == "context_rebuild")
+        .map_or(0, |record| record.sequence);
+    if let Some(checkpoint) = path
+        .iter()
+        .rev()
+        .find(|record| record.kind == "compaction" && record.sequence > rebuild)
+    {
+        if let Some(system) = checkpoint
+            .payload
+            .get("context_system")
+            .filter(|value| !value.is_null())
+        {
+            let mut system: Vec<Entry> = serde_json::from_value(system.clone())
+                .map_err(|error| Fault::new("PersistenceFailure", "context", error.to_string()))?;
+            system.extend(document.entries.into_iter().filter(|entry| !matches!(&entry.item, Item::Message {role, ..} if role == "system" || role == "developer")));
+            document.entries = system;
+        }
+        if let Some(tools) = checkpoint
+            .payload
+            .get("context_tools")
+            .filter(|value| !value.is_null())
+        {
+            document.tools = serde_json::from_value(tools.clone())
+                .map_err(|error| Fault::new("PersistenceFailure", "context", error.to_string()))?;
+        }
+    }
+    Ok(document)
+}
+
 pub(crate) async fn context(
     mut input: ContextInput,
     cx: CallContext,
     settings: Settings,
 ) -> Result<ModelInput, Fault> {
+    let settings = settings.for_target(&input.target)?;
     if ![
         "",
         "project",
+        "inspect",
         "compact",
         "overflow",
         "post_response",
@@ -586,7 +767,14 @@ pub(crate) async fn context(
     let mut extension_items = interpreted(&path, &cx).await?;
     let mut projected = project_path(&path, &input.records)?;
     projected.extend(input.items.clone());
-    let threshold = settings.auto_compaction()
+    let threshold = matches!(input.action.as_str(), "" | "project")
+        && settings.auto_compaction()
+        && !super::edits::pending_temporary(&input.records)?
+        && !path.iter().any(|record| {
+            record.payload["references"]
+                .as_array()
+                .is_some_and(|references| !references.is_empty())
+        })
         && input.limits.context_window > 0
         && calibrated_estimate(
             &path,
@@ -639,17 +827,77 @@ pub(crate) async fn context(
                 .unwrap_or(path.len())
         };
         let request_id = format!("{}:{}:compaction", cx.run_id(), before.sequence + 1);
+        let original_document = document(&input, &cx).await?;
+        let (effective_document, edit_ids) = super::edits::apply_path(&original_document, &path)?;
+        let edited = !edit_ids.is_empty()
+            || effective_document
+                .entries
+                .iter()
+                .any(|entry| !entry.references.is_empty())
+            || path
+                .iter()
+                .any(|record| record.payload.get("context_retained").is_some());
+        let (effective_prefix, retained) = if edited {
+            if max_cut != path.len() {
+                return Err(Fault::new(
+                    "ContextConflict",
+                    "context-edit",
+                    "queued delivery must settle before compacting edited context",
+                ));
+            }
+            let transient = path.iter().any(|record| {
+                edit_ids.contains(&record.sequence) && record.payload["scope"] == "next_request"
+            });
+            if transient {
+                return Err(Fault::new(
+                    "ContextConflict",
+                    "context-edit",
+                    "temporary edits cannot be persisted into a compaction checkpoint",
+                ));
+            }
+            let expanded = super::references::materialize(&effective_document, u64::MAX)?;
+            let (prefix, retained) = split_edited(&expanded, settings.keep_recent_tokens);
+            let retained = retained
+                .into_iter()
+                .map(|entry| {
+                    effective_document
+                        .entries
+                        .iter()
+                        .find(|source| source.id == entry.id)
+                        .cloned()
+                        .unwrap_or(entry)
+                })
+                .collect();
+            (Some(summary_safe_items(prefix)), retained)
+        } else {
+            (None, vec![])
+        };
         let request = c::Request {
             request_id: request_id.clone(),
-            projected: summary_safe_items(projected.clone()),
+            effective_prefix: effective_prefix.clone(),
+            projected: effective_prefix
+                .clone()
+                .unwrap_or_else(|| summary_safe_items(projected.clone())),
             input: input.clone(),
             reason,
-            suggested_cut: compaction_cut(&path, &input.action, &settings)?,
+            suggested_cut: if edited {
+                path.len()
+            } else {
+                compaction_cut(&path, &input.action, &settings)?
+            },
             max_cut,
         };
-        let plan: Option<c::Plan> = cx.call(c::POLICY, &request).await?;
+        let plan: Option<c::Plan> = if effective_prefix.as_ref().is_some_and(Vec::is_empty) {
+            None
+        } else {
+            cx.call(c::POLICY, &request).await?
+        };
         if let Some(plan) = plan {
-            if plan.cut == 0 || plan.cut > max_cut || plan.summary.trim().is_empty() {
+            if plan.cut == 0
+                || plan.cut > max_cut
+                || plan.summary.trim().is_empty()
+                || (edited && plan.cut != path.len())
+            {
                 return Err(Fault::new(
                     "InvalidCheckpoint",
                     "context",
@@ -696,6 +944,55 @@ pub(crate) async fn context(
                 "uncertainties": uncertainties,
             });
             if kind == "compaction" {
+                if edited {
+                    payload["context_retained"] = json!(retained);
+                    payload["context_edits"] = json!(edit_ids);
+                    let mut protected: BTreeSet<String> = effective_document
+                        .entries
+                        .iter()
+                        .filter(|entry| {
+                            original_document
+                                .entries
+                                .iter()
+                                .find(|original| original.id == entry.id)
+                                .is_none_or(|original| {
+                                    original.item != entry.item
+                                        || original.references != entry.references
+                                })
+                        })
+                        .map(|entry| entry.id.clone())
+                        .collect();
+                    if let Some(previous) =
+                        path.iter().rev().find(|record| record.kind == "compaction")
+                    {
+                        protected.extend(
+                            previous.payload["context_protected"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(Value::as_str)
+                                .map(str::to_owned),
+                        );
+                    }
+                    payload["context_protected"] = json!(protected);
+                    let system: Vec<_> = effective_document.entries.iter().filter(|entry| matches!(&entry.item, Item::Message {role, ..} if role == "system" || role == "developer")).cloned().collect();
+                    let unchanged = system.len() == 1
+                        && system[0].id == "system"
+                        && system[0].item == system_item(&input);
+                    payload["context_system"] = if unchanged {
+                        Value::Null
+                    } else {
+                        json!(system)
+                    };
+                    payload["context_tools"] = if serde_json::to_value(&effective_document.tools)
+                        .ok()
+                        != serde_json::to_value(input.tools.clone().unwrap_or_else(tools)).ok()
+                    {
+                        json!(effective_document.tools)
+                    } else {
+                        Value::Null
+                    };
+                }
                 payload["first_kept"] = json!(path.get(plan.cut).map_or(0, |r| r.sequence));
                 payload["source_ids"] = json!(
                     path[..plan.cut]
@@ -742,6 +1039,7 @@ pub(crate) async fn context(
                 .call(
                     STORE,
                     &StoreRequest::AppendChecked {
+                        new_branch: None,
                         run_id: cx.run_id(),
                         session_id: before.session_id,
                         sequence: before.sequence,
@@ -757,6 +1055,7 @@ pub(crate) async fn context(
                 json!({ "sequence": committed.sequence, "kind": kind }),
             )?;
             projected = project_records(&committed.records)?;
+            input.records = committed.records.clone();
             extension_items = interpreted(&active_path(&committed.records)?, &cx).await?;
         } else {
             cx.emit(
@@ -766,6 +1065,41 @@ pub(crate) async fn context(
         }
     }
     let mut items = vec![system_item(&input)];
+    let current_path = if input.action == "branch_summary" {
+        input.records.clone()
+    } else {
+        active_path(&input.records)?
+    };
+    let rebuild = current_path
+        .iter()
+        .rev()
+        .find(|record| record.kind == "context_rebuild")
+        .map_or(0, |record| record.sequence);
+    let checkpoint = current_path
+        .into_iter()
+        .rev()
+        .find(|record| record.kind == "compaction" && record.sequence > rebuild);
+    if let Some(checkpoint) = &checkpoint {
+        if let Some(system) = checkpoint
+            .payload
+            .get("context_system")
+            .filter(|value| !value.is_null())
+        {
+            let entries: Vec<Entry> = serde_json::from_value(system.clone())
+                .map_err(|error| Fault::new("PersistenceFailure", "context", error.to_string()))?;
+            items = entries.into_iter().map(|entry| entry.item).collect();
+        }
+        if let Some(tools) = checkpoint
+            .payload
+            .get("context_tools")
+            .filter(|value| !value.is_null())
+        {
+            input.tools =
+                Some(serde_json::from_value(tools.clone()).map_err(|error| {
+                    Fault::new("PersistenceFailure", "context", error.to_string())
+                })?);
+        }
+    }
     items.extend(projected);
     items.extend(extension_items);
     Ok(ModelInput {
@@ -776,11 +1110,71 @@ pub(crate) async fn context(
     })
 }
 
+pub(crate) async fn recover_edited(
+    input: &ContextInput,
+    model: &ModelInput,
+    cx: &CallContext,
+    settings: &Settings,
+) -> Result<ModelInput, Fault> {
+    let document = Document { entries: model.items.iter().enumerate().map(|(index, item)| Entry {
+        references: vec![], id: if matches!(item, Item::Message {role, ..} if role == "system" || role == "developer") { "system".into() } else { format!("request:{index}") }, item: item.clone(),
+    }).collect(), tools: model.tools.clone() };
+    let (prefix, retained) = split_edited(&document, settings.keep_recent_tokens);
+    if prefix.is_empty() {
+        return Err(Fault::new(
+            "ContextOverflow",
+            "context-edit",
+            "edited request has no older complete turns to summarize; adjust context or model",
+        ));
+    }
+    let path = active_path(&input.records)?;
+    let plan: Option<c::Plan> = cx
+        .call(
+            c::POLICY,
+            &c::Request {
+                request_id: format!("{}:edited-recovery", cx.run_id()),
+                input: input.clone(),
+                projected: summary_safe_items(prefix.clone()),
+                effective_prefix: Some(summary_safe_items(prefix)),
+                reason: c::Reason::Overflow,
+                suggested_cut: path.len(),
+                max_cut: path.len(),
+            },
+        )
+        .await?;
+    let plan = plan.ok_or_else(|| {
+        Fault::new(
+            "ContextOverflow",
+            "context-edit",
+            "policy could not reduce the edited request",
+        )
+    })?;
+    if plan.summary.trim().is_empty() {
+        return Err(Fault::new(
+            "InvalidCheckpoint",
+            "context-edit",
+            "policy returned an empty summary",
+        ));
+    }
+    let mut recovered = model.clone();
+    recovered.items = model.items.iter().filter(|item| matches!(item, Item::Message {role, ..} if role == "system" || role == "developer")).cloned().collect();
+    recovered.items.push(text_item(format!(
+        "Previous context summary:\n{}",
+        plan.summary
+    )));
+    recovered
+        .items
+        .extend(retained.into_iter().map(|entry| entry.item));
+    eden_plugin_sdk::protocol::context_edit::validate(&recovered)?;
+    Ok(recovered)
+}
+
 pub(crate) async fn summary_policy(
     request: c::Request,
     cx: CallContext,
     settings: Settings,
 ) -> Result<Option<c::Plan>, Fault> {
+    let settings = settings.for_target(&request.input.target)?;
     let request_id = request.request_id;
     let input = request.input;
     let path = if request.reason == c::Reason::BranchSummary {
@@ -816,7 +1210,10 @@ pub(crate) async fn summary_policy(
             ),
         }],
     }];
-    let summary_projection = summary_safe_items(summary_prefix(&path, cut, &input.records)?);
+    let summary_projection = match request.effective_prefix {
+        Some(items) => items,
+        None => summary_safe_items(summary_prefix(&path, cut, &input.records)?),
+    };
     summary_items.push(text_item(format!(
         "Conversation to summarize (attachments remain in raw history):\n{}",
         serde_json::to_string(&summary_projection).map_err(|e| Fault::new(
@@ -1403,5 +1800,36 @@ mod tests {
         assert!(!text.contains("secretbinary"));
         assert!(!text.contains("filebinary"));
         assert!(text.contains("report.pdf"));
+    }
+    #[test]
+    fn rebuilding_discards_old_compaction_notes_but_preserves_unrelated_state() {
+        let state = |namespace: &str, summary: &str| {
+            json!(ExtensionState {
+                namespace: namespace.into(),
+                version: 1,
+                required: false,
+                summary: summary.into(),
+                references: vec![],
+                value: json!({})
+            })
+        };
+        let records = vec![
+            record(1, "extension_state", state("manual", "keep")),
+            record(
+                2,
+                "model_request",
+                json!({ "request_id": "summary", "purpose": "compaction" }),
+            ),
+            record(3, "extension_state", state("notes", "old edited summary")),
+            record(
+                4,
+                "compaction",
+                json!({ "request_id": "summary", "summary": "old edited summary", "first_kept": 0 }),
+            ),
+            record(5, "context_rebuild", json!({ "edit_ids": [] })),
+        ];
+        let states = latest_states(&records).unwrap();
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].namespace, "manual");
     }
 }

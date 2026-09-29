@@ -72,8 +72,10 @@ pub struct Attachment {
     pub media_type: Option<String>,
     pub image: bool,
 }
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Draft {
+    #[serde(default)]
+    pub references: Vec<std::sync::Arc<eden_protocol::session_reference::Reference>>,
     pub text: String,
     pub cursor: usize,
     pub attachments: Vec<Attachment>,

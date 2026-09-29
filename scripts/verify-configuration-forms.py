@@ -238,6 +238,7 @@ def composition() -> dict:
                 [
                     "eden.coding-control.v1",
                     presentation.CODING,
+                    "eden.context-edit.v1",
                     "eden.compaction-policy.v1",
                     presentation.CODING_CONTEXT,
                     presentation.QUEUE,

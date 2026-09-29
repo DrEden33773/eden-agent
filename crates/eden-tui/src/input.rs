@@ -67,6 +67,12 @@ fn scrollbar(app: &mut App, g: &Geometry, y: u16) {
     }
 }
 pub fn mouse(app: &mut App, g: &Geometry, m: MouseEvent, p: &mut Pointer) -> bool {
+    if app.reference_picker.open {
+        return crate::references::mouse(app, g, m);
+    }
+    if app.context.open {
+        return crate::context::mouse(app, g, m);
+    }
     let (x, y) = (m.column, m.row);
     if m.kind == MouseEventKind::Moved {
         let changed = app.hover != Some((x, y));

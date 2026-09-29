@@ -252,6 +252,7 @@ fn drive(
     let mut modes = Some(Modes::enter(app.preferences.mouse)?);
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let mut geometry = view::Geometry::default();
+    let mut kitty = crate::image_preview::Kitty::default();
     let mut pointer = input::Pointer::default();
     let mut dirty = true;
     let mut frame = Instant::now();
@@ -298,6 +299,7 @@ fn drive(
                     f.set_cursor_position(position);
                 }
             })?;
+            kitty.draw(geometry.image.as_ref(), &mut io::stdout())?;
             dirty = false;
             frame = Instant::now();
         }
@@ -312,6 +314,7 @@ fn drive(
             dirty = true;
         }
         if app.external_editor || app.suspend {
+            kitty.clear(&mut io::stdout())?;
             drop(modes.take());
             if app.external_editor {
                 app.external_editor = false;
@@ -346,6 +349,7 @@ fn drive(
                     dirty |= input::mouse(app, &geometry, mouse, &mut pointer);
                 }
                 Event::Resize(..) => {
+                    kitty.clear(&mut io::stdout())?;
                     terminal.clear()?;
                     dirty = true
                 }
@@ -353,6 +357,7 @@ fn drive(
             }
         }
     }
+    kitty.clear(&mut io::stdout())?;
     drop(modes);
     Ok(0)
 }

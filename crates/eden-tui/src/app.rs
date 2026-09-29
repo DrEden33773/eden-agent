@@ -66,6 +66,9 @@ enum PasteTarget {
     },
 }
 pub struct App {
+    pub references: Vec<std::sync::Arc<eden_protocol::session_reference::Reference>>,
+    pub reference_picker: crate::references::Picker,
+    pub context: crate::context::Context,
     pub editor: Editor,
     pub field_editor: Editor,
     pub artifact: Option<(u64, Message)>,
@@ -184,6 +187,9 @@ impl App {
             PathBuf::from(&snapshot.state.cwd)
         };
         let mut app = Self {
+            references: vec![],
+            reference_picker: Default::default(),
+            context: Default::default(),
             editor: Editor::load(plugin)?,
             field_editor: Editor::load(plugin)?,
             artifact: None,
@@ -274,6 +280,7 @@ impl App {
         self.apply_messages(messages);
     }
     fn apply_messages(&mut self, mut messages: Vec<Message>) {
+        self.context.update_usage(&self.snapshot.history);
         self.rebind_applied_form();
 
         let expanded: BTreeMap<_, _> = self.messages.iter().map(|m| (m.id, m.expanded)).collect();
@@ -390,6 +397,7 @@ impl App {
     }
     pub fn draft(&self) -> Draft {
         Draft {
+            references: self.references.clone(),
             text: self.editor.text(),
             cursor: self.editor.cursor(),
             attachments: self.attachments.clone(),
@@ -397,7 +405,10 @@ impl App {
     }
     pub fn changed(&mut self) {
         let next = self.draft();
-        if self.checkpoint.text != next.text || self.checkpoint.attachments != next.attachments {
+        if self.checkpoint.text != next.text
+            || self.checkpoint.attachments != next.attachments
+            || self.checkpoint.references != next.references
+        {
             self.undo
                 .push(std::mem::replace(&mut self.checkpoint, next));
             if self.undo.len() > 128 {
@@ -446,10 +457,11 @@ impl App {
             let draft = saved.sessions.get(&self.session).unwrap_or(&saved.draft);
             let _ = self.editor.restore(&draft.text, draft.cursor);
             self.attachments = draft.attachments.clone();
+            self.references = draft.references.clone();
             self.changed();
         }
     }
-    fn id(&self) -> String {
+    pub(crate) fn id(&self) -> String {
         format!(
             "tui-{}-{}",
             std::process::id(),
@@ -468,6 +480,9 @@ impl App {
             self.notice = "Admission unknown · Ctrl+R checks the original request".into();
             return;
         }
+        if matches!(route, "/prompt" | "/enqueue") {
+            body["references"] = json!(self.references);
+        }
         body["request_id"] = json!(self.id());
         body["session_id"] = json!(self.snapshot.presentation.session_id);
         let draft = if consume {
@@ -481,7 +496,7 @@ impl App {
         self.phase = Phase::Waiting;
         self.dispatch(route, body);
     }
-    fn dispatch(&self, route: &str, mut body: Value) {
+    pub(crate) fn dispatch(&self, route: &str, mut body: Value) {
         if body.is_null() {
             body = json!({});
         }
@@ -503,6 +518,8 @@ impl App {
             && let Some(lease) = &self.lease
         {
             let active = self.dialog.is_none()
+                && !self.context.open
+                && !self.reference_picker.open
                 && self.focus == Focus::Editor
                 && at.elapsed() < std::time::Duration::from_secs(3);
             if !active || self.activity_sent.elapsed() >= std::time::Duration::from_millis(250) {
@@ -524,7 +541,7 @@ impl App {
         if let Some(error) = self.store.as_ref().and_then(DraftStore::error) {
             self.notice = error;
         }
-        let mut changed = self.autocomplete.poll();
+        let mut changed = self.autocomplete.poll() | self.poll_context_images();
         for _ in 0..64 {
             let Ok(update) = self.rx.try_recv() else {
                 break;
@@ -671,6 +688,19 @@ impl App {
                     body,
                     result,
                 } => {
+                    if route.starts_with("/session/")
+                        || route == "/reference/preview"
+                        || (route == "/context/inspect" && body["reference_budget"].is_boolean())
+                    {
+                        self.reference_reply(&route, &body, result);
+                        continue;
+                    }
+                    if route.starts_with("/context/")
+                        || (route == "/terminal" && body["context_operation"].is_string())
+                    {
+                        self.context_reply(&route, &body, result);
+                        continue;
+                    }
                     if route == "/activity" {
                         continue;
                     }
@@ -748,6 +778,11 @@ impl App {
                                 >(value.clone())
                             {
                                 for entry in entries {
+                                    for reference in entry.references {
+                                        if !self.references.iter().any(|r| r.id == reference.id) {
+                                            self.references.push(reference.into());
+                                        }
+                                    }
                                     self.restore_blocks(
                                         entry.original_content.unwrap_or(entry.content),
                                     );
@@ -821,12 +856,18 @@ impl App {
                                 }
                             }
                             if let Some((_, _, draft)) = pending
-                                && (!draft.text.is_empty() || !draft.attachments.is_empty())
+                                && (!draft.text.is_empty()
+                                    || !draft.attachments.is_empty()
+                                    || !draft.references.is_empty())
                                 && self.editor.text() == draft.text
                                 && self.attachments == draft.attachments
+                                && self.references == draft.references
                             {
                                 let _ = self.editor.restore("", 0);
                                 self.attachments.clear();
+                                if matches!(route.as_str(), "/prompt" | "/enqueue") {
+                                    self.references.clear();
+                                }
                                 self.changed();
                             }
                             if route == "/queue/inspect" {
@@ -1069,7 +1110,7 @@ impl App {
             return;
         }
         let text = self.editor.text();
-        if text.trim().is_empty() && self.attachments.is_empty() {
+        if text.trim().is_empty() && self.attachments.is_empty() && self.references.is_empty() {
             return;
         }
         if self.command(text.trim()) {
@@ -1112,6 +1153,11 @@ impl App {
         }
         let (name, args) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
         match name {
+            "/session" => self.open_references(None, false),
+            "/references" => self.open_references(None, true),
+            "/context" => self.open_context(),
+            "/compact" => self.open_context_management(false),
+            "/context-rebuild" => self.open_context_management(true),
             "/config" => self.dispatch("/configuration/open", json!({ "instance": args.trim() })),
             "/queue-mode" => {
                 let mode = match args.trim() {
@@ -1302,6 +1348,7 @@ impl App {
             }
         }
         self.attachments = previous.attachments;
+        self.references = previous.references;
         self.checkpoint = self.draft();
         if redo {
             self.undo.push(current)
@@ -1332,11 +1379,13 @@ impl App {
             let draft = self.history_draft.clone();
             let _ = self.editor.restore(&draft.text, draft.cursor);
             self.attachments = draft.attachments;
+            self.references = draft.references;
             self.history_position = None;
         } else {
             let text = &self.input_history[index];
             let _ = self.editor.restore(text, text.len());
             self.attachments.clear();
+            self.references.clear();
             self.history_position = Some(index);
         }
         self.changed();
@@ -1353,6 +1402,10 @@ impl App {
             self.autocomplete
                 .take(index, &self.editor.text(), self.editor.cursor())
         {
+            if item.action == crate::autocomplete::Action::Session {
+                self.open_references(Some(replacement), false);
+                return;
+            }
             if let crate::autocomplete::Action::File(path) = item.action {
                 let tx = self.tx.clone();
                 self.attachment_pending += 1;
@@ -1385,6 +1438,15 @@ impl App {
         }
     }
     pub fn paste(&mut self, text: &str) {
+        if self.reference_picker.open {
+            return;
+        }
+        if self.context.open {
+            if self.context.editing.is_some() {
+                let _ = self.field_editor.event(1, 0, 0, text);
+            }
+            return;
+        }
         self.clipboard_generation += 1;
         if let Some(Dialog::Form {
             fields, selected, ..
@@ -1921,6 +1983,18 @@ impl App {
 
 impl App {
     pub fn key(&mut self, key: KeyEvent) {
+        if self.reference_picker.open {
+            if key.kind != KeyEventKind::Release {
+                self.reference_key(key);
+            }
+            return;
+        }
+        if self.context.open {
+            if key.kind != KeyEventKind::Release {
+                self.context_key(key);
+            }
+            return;
+        }
         if key.kind != KeyEventKind::Release {
             self.clipboard_generation += 1;
         }
@@ -2015,6 +2089,7 @@ impl App {
                     "clear" => {
                         let _ = self.editor.restore("", 0);
                         self.attachments.clear();
+                        self.references.clear();
                         self.changed();
                     }
                     "external_editor" => self.external_editor = true,
@@ -2109,6 +2184,7 @@ impl App {
                 2 => self.open("commands"),
                 3 => self.preferences.inspector = !self.preferences.inspector,
                 4 => self.preferences.navigator = !self.preferences.navigator,
+                7 => self.open_context(),
 
                 6 => {
                     self.focus = match self.focus {
@@ -2143,13 +2219,18 @@ impl App {
         }
         match key.code {
             KeyCode::Esc => self.cancel(),
-            KeyCode::Char('d') if ctrl && self.editor.text().is_empty() => self.quit = true,
+            KeyCode::Char('d')
+                if ctrl && self.editor.text().is_empty() && self.references.is_empty() =>
+            {
+                self.quit = true
+            }
             KeyCode::Char('c') if ctrl => {
                 if !self.editor.selected_text().is_empty() || self.selection.is_some() {
                     self.copy();
                 } else {
                     let _ = self.editor.restore("", 0);
                     self.attachments.clear();
+                    self.references.clear();
                     self.attachment_generation += 1;
                     self.attachment_pending = 0;
                     self.changed();
@@ -2289,10 +2370,10 @@ fn pop_grapheme(text: &mut String) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use ratatui::{buffer::Buffer, layout::Rect};
-    pub(super) fn app() -> App {
+    pub(crate) fn app() -> App {
         let executable = std::env::current_exe().unwrap();
         let plugin = executable.parent().unwrap().parent().unwrap().join(format!(
             "{}eden_terminal_editor{}",
@@ -2895,5 +2976,90 @@ mod clipboard_focus_tests {
                 .unwrap()
                 .contains("PRIVATE_CLIPBOARD_CANARY")
         );
+    }
+}
+
+#[cfg(test)]
+mod reference_draft_tests {
+    use super::*;
+    #[tokio::test]
+    async fn reference_budget_rejection_and_unknown_receipt_keep_fixed_draft() {
+        for error in [
+            Fault::new(
+                "ReferenceBudgetExceeded",
+                "session-reference",
+                "reduce selection",
+            ),
+            Fault::new("InputFailure", "live-client", "lost receipt"),
+        ] {
+            let mut app = super::tests::app();
+            app.references
+                .push(crate::references::tests::frozen().into());
+            app.editor.restore("question", 0).unwrap();
+            app.changed();
+            app.submit();
+            let (route, body, draft) = app.pending.clone().unwrap();
+            assert_eq!(body["references"][0]["source"]["head"], 4);
+            app.tx
+                .send(Update::Reply {
+                    route,
+                    body,
+                    result: Err(error),
+                })
+                .unwrap();
+            app.tick();
+            assert_eq!(app.references, draft.references);
+            assert_eq!(app.editor.text(), "question");
+        }
+    }
+    #[tokio::test]
+    async fn withdrawal_restores_fixed_references_and_undo_redo_keeps_them_owned() {
+        let mut app = super::tests::app();
+        app.editor.restore("current", 0).unwrap();
+        app.changed();
+        let reference = crate::references::tests::frozen();
+        app.tx
+            .send(Update::Reply {
+                route: "/queue/withdraw".into(),
+                body: json!({ "id": 1 }),
+                result: Ok(json!([{
+                    "id": 1,
+                    "kind": "follow_up",
+                    "content": [{ "type": "text", "text": "queued" }],
+                    "references": [reference],
+                }])),
+            })
+            .unwrap();
+        app.tick();
+        assert_eq!(app.editor.text(), "current\nqueued");
+        assert_eq!(*app.references[0], reference);
+        app.undo_draft(false);
+        assert!(app.references.is_empty());
+        app.undo_draft(true);
+        assert_eq!(*app.references[0], reference);
+    }
+    #[tokio::test]
+    async fn admission_clears_only_the_matching_reference_draft() {
+        for edit_while_pending in [false, true] {
+            let mut app = super::tests::app();
+            app.references
+                .push(crate::references::tests::frozen().into());
+            app.changed();
+            app.submit();
+            let (route, body, _) = app.pending.clone().unwrap();
+            if edit_while_pending {
+                std::sync::Arc::make_mut(&mut app.references[0]).id = "new draft identity".into();
+                app.changed();
+            }
+            app.tx
+                .send(Update::Reply {
+                    route,
+                    body,
+                    result: Ok(json!({ "run_id": 42 })),
+                })
+                .unwrap();
+            app.tick();
+            assert_eq!(app.references.is_empty(), !edit_while_pending);
+        }
     }
 }

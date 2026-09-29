@@ -11,6 +11,7 @@ license = "Apache-2.0"
 repository = "https://github.com/DrEden33773/eden-agent"
 
 [workspace.dependencies]
+eden-model-input = { path = "crates/eden-model-input", version = "0.1.0" }
 eden-tui = { path = "crates/eden-tui", version = "0.1.0" }
 eden-tui-client = { path = "crates/eden-tui-client", version = "0.1.0" }
 eden-ui-sdk = { path = "crates/eden-ui-sdk", version = "0.1.0" }

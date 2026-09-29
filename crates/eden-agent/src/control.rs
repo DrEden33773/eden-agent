@@ -75,7 +75,118 @@ impl Session {
         .await
         .map_err(|e| Fault::new("Unavailable", "control", e.to_string()))?
     }
-    fn admit_input(&self) -> Result<u64, Fault> {
+    /// Inspect original and edited model input without claiming an edit or starting a model.
+    pub async fn inspect_context(&self) -> Result<eden_protocol::context_edit::Snapshot, Fault> {
+        self.context_operation(|input| eden_protocol::context_edit::Request::Inspect { input })
+            .await
+    }
+    /// Atomically accept an edit at the reviewed revision, including while a run is active.
+    /// The coding loop uses it only at the next model request boundary.
+    pub async fn edit_context(
+        &self,
+        edit: eden_protocol::context_edit::Apply,
+    ) -> Result<eden_protocol::context_edit::Snapshot, Fault> {
+        self.context_operation(move |input| eden_protocol::context_edit::Request::Apply {
+            input,
+            edit,
+        })
+        .await
+    }
+    /// Reconstruct original context on a new branch; this never replays tools or calls a model.
+    pub fn rebuild_context(
+        &self,
+        rebuild: eden_protocol::context_edit::Rebuild,
+    ) -> Result<u64, Fault> {
+        self.start(true, move |session, run_id, cancel| async move {
+            let result = async {
+                let input = c::ContextInput {
+                    target: session.inspect_model_target().await?,
+                    resources: session.context_resources().await?,
+                    tools: session.context_tools().await?,
+                    action: "inspect".into(),
+                    records: vec![],
+                    instructions: String::new(),
+                    limits: c::ModelLimits::default(),
+                    cwd: session.cwd().into(),
+                    items: vec![],
+                };
+                let snapshot: eden_protocol::context_edit::Snapshot = session
+                    .service_with_cancel(
+                        run_id,
+                        eden_protocol::context_edit::SERVICE,
+                        &eden_protocol::context_edit::Request::Rebuild { input, rebuild },
+                        cancel,
+                    )
+                    .await?;
+                Ok::<_, Fault>(serde_json::json!(snapshot))
+            }
+            .await;
+            Terminal {
+                outcome: match result {
+                    Ok(value) => Outcome::Completed(value),
+                    Err(error) => Outcome::Failed(error),
+                },
+                cleanup_errors: vec![],
+                partial_result: None,
+            }
+        })
+    }
+    /// Explicitly preserve, omit or re-adapt a reviewed image while retaining all prior versions.
+    pub async fn edit_images(
+        &self,
+        edit: eden_protocol::context_edit::ImageEdit,
+    ) -> Result<eden_protocol::context_edit::Snapshot, Fault> {
+        self.context_operation(move |input| eden_protocol::context_edit::Request::Images {
+            input,
+            edit,
+        })
+        .await
+    }
+    /// Check references and image compatibility against current model input before admitting a draft.
+    /// Sending still rechecks at its actual boundary if context or configuration changes.
+    pub async fn check_reference_input(
+        &self,
+        content: Vec<c::Block>,
+        references: Vec<eden_protocol::session_reference::Reference>,
+    ) -> Result<eden_protocol::context_edit::Snapshot, Fault> {
+        self.context_operation(
+            move |input| eden_protocol::context_edit::Request::CheckInput {
+                input,
+                content,
+                references,
+            },
+        )
+        .await
+    }
+    async fn context_operation(
+        &self,
+        build: impl FnOnce(c::ContextInput) -> eden_protocol::context_edit::Request + Send + 'static,
+    ) -> Result<eden_protocol::context_edit::Snapshot, Fault> {
+        let run_id = self.admit_input()?;
+        let session = self.clone();
+        let owner = InputOwner(session.clone());
+        tokio::spawn(async move {
+            let _owner = owner;
+            let input = c::ContextInput {
+                target: session.inspect_model_target().await?,
+                resources: session.context_resources().await?,
+                tools: session.context_tools().await?,
+                action: "inspect".into(),
+                records: vec![],
+                instructions: String::new(),
+                limits: c::ModelLimits::default(),
+                cwd: session.cwd().into(),
+                items: vec![],
+            };
+            let request = build(input);
+            session
+                .service_input(run_id, eden_protocol::context_edit::SERVICE, &request)
+                .await
+        })
+        .await
+        .map_err(|error| Fault::new("Unavailable", "context-edit", error.to_string()))?
+    }
+    pub(crate) fn admit_input(&self) -> Result<u64, Fault> {
         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.closed || state.management {
             return Err(Fault::new(

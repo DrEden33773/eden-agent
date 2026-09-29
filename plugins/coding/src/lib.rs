@@ -34,7 +34,11 @@ fn item_kind(item: &Item) -> &'static str {
     }
 }
 mod context;
+mod edits;
+mod model_input;
+mod policies;
 mod queue;
+mod references;
 mod settings;
 use context::context;
 #[cfg(test)]
@@ -316,6 +320,7 @@ async fn prepare_input(
     .map_or(prepared, |hook| hook.content))
 }
 async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result<String, Fault> {
+    let settings = settings.for_target(&input.target)?;
     let resource_reply: Option<r::ResourceReply> =
         optional_call(&cx, r::SOURCE, &r::ResourceRequest::Snapshot).await?;
     let resources = resource_reply.map(|reply| reply.snapshot);
@@ -349,15 +354,12 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
         .await?;
     }
     if !input.resume {
-        append(
-            &cx,
-            "message",
-            json!(Item::Message {
-                role: "user".into(),
-                content: input.content
-            }),
-        )
-        .await?;
+        let mut message = json!(Item::Message {
+            role: "user".into(),
+            content: input.content
+        });
+        message["references"] = json!(input.references);
+        append(&cx, "message", message).await?;
     }
     let limits = match &input.target {
         Some(target) => target.limits.clone(),
@@ -390,26 +392,61 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
                     final_answer = Some(answer);
                     continue;
                 }
+                if settings.policies.iter().any(|policy| {
+                    policy.enabled
+                        && policy.boundary
+                            == eden_plugin_sdk::protocol::context_edit::Boundary::RunFinish
+                }) {
+                    policies::run(
+                        &ContextInput {
+                            target: input.target.clone(),
+                            resources: resources.clone(),
+                            tools: selected_tools.clone(),
+                            action: "inspect".into(),
+                            records: vec![],
+                            instructions: String::new(),
+                            limits: limits.clone(),
+                            cwd: input.cwd.clone(),
+                            items: vec![],
+                        },
+                        eden_plugin_sdk::protocol::context_edit::Boundary::RunFinish,
+                        &cx,
+                        &settings,
+                    )
+                    .await?;
+                }
                 return Ok(answer);
             }
         }
         let history: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
-        let mut projected: ModelInput = cx
-            .call(
-                CONTEXT,
-                &ContextInput {
-                    target: input.target.clone(),
-                    resources: resources.clone(),
-                    tools: selected_tools.clone(),
-                    action: String::new(),
-                    records: history.records.clone(),
-                    instructions: String::new(),
-                    limits: limits.clone(),
-                    cwd: input.cwd.clone(),
-                    items: vec![],
-                },
-            )
-            .await?;
+        let context_input = ContextInput {
+            target: input.target.clone(),
+            resources: resources.clone(),
+            tools: selected_tools.clone(),
+            action: String::new(),
+            records: history.records.clone(),
+            instructions: String::new(),
+            limits: limits.clone(),
+            cwd: input.cwd.clone(),
+            items: vec![],
+        };
+        policies::run(
+            &context_input,
+            eden_plugin_sdk::protocol::context_edit::Boundary::BeforeRequest,
+            &cx,
+            &settings,
+        )
+        .await?;
+        let mut context_input = context_input;
+        let fresh: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
+        context_input.records = fresh.records;
+        let projected: ModelInput = cx.call(CONTEXT, &context_input).await?;
+        let prepared = match edits::prepare(&context_input, projected, &cx, &settings).await {
+            Ok(prepared) => prepared,
+            Err(error) if error.code == "RequestPreparationConflict" => continue,
+            Err(error) => return Err(error),
+        };
+        let mut projected = prepared.input;
         // Context may have committed a summary request and checkpoint. Allocate
         // the next identity from that resulting history, never the stale input.
         let history: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
@@ -422,12 +459,41 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
             })
             .map(|(id, _)| *id)
             .collect();
-        append(
-            &cx,
-            "model_request",
-            json!({ "request_id": request_id, "queue_ids": queue_ids, "target": input.target }),
-        )
-        .await?;
+        let mut request_records = prepared.image_records;
+        request_records.push(RecordDraft {
+            kind: "model_request".into(),
+            payload: json!({
+                "request_id": request_id,
+                "queue_ids": queue_ids,
+                "target": input.target,
+                "input": projected,
+                "context_edits": prepared.edits,
+                "prompt_cache": prepared.prompt_cache,
+            }),
+        });
+        let committed: Result<StoreReply, Fault> = cx
+            .call(
+                STORE,
+                &StoreRequest::AppendChecked {
+                    new_branch: None,
+                    run_id: cx.run_id(),
+                    session_id: prepared.revision.session_id,
+                    sequence: prepared.revision.sequence,
+                    head: prepared.revision.head,
+                    branch: prepared.revision.branch,
+                    entries: request_records,
+                },
+            )
+            .await;
+        let committed = match committed {
+            Ok(receipt) => receipt,
+            Err(error) if error.code == "CheckpointConflict" => continue,
+            Err(error) => return Err(error),
+        };
+        cx.emit(
+            "committed",
+            json!({ "sequence": committed.sequence, "kind": "model_request" }),
+        )?;
         cx.emit(
             "model_request",
             json!({ "request_id": request_id, "queue_ids": queue_ids, "target": input.target }),
@@ -436,11 +502,14 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
             Ok(reply) => reply,
             Err(error)
                 if settings.auto_compaction()
+                    && !prepared.references
                     && matches!(error.code.as_str(), "ContextOverflow" | "RecoverableLength") =>
             {
                 let history: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
-                let compacted: ModelInput = cx
-                    .call(
+                let compacted: ModelInput = if !prepared.edits.is_empty() {
+                    context::recover_edited(&context_input, &projected, &cx, &settings).await?
+                } else {
+                    cx.call(
                         CONTEXT,
                         &ContextInput {
                             target: input.target.clone(),
@@ -454,8 +523,15 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
                             items: vec![],
                         },
                     )
-                    .await?;
+                    .await?
+                };
                 projected = compacted;
+                append(
+                    &cx,
+                    "model_request_revision",
+                    json!({ "request_id": request_id, "input": projected }),
+                )
+                .await?;
                 cx.emit(
                     "model_request",
                     json!({
@@ -562,9 +638,23 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
                     .saturating_sub(settings.reserve_tokens)
             });
         cx.emit("model_usage", reply.usage)?;
-        let (called, answer) =
-            tool_execution::run(&cx, &input.cwd, reply.items, &projected.tools).await?;
-        if usage_overflow && settings.auto_compaction() {
+        let (called, answer) = tool_execution::run(
+            &cx,
+            &input.cwd,
+            reply.items,
+            &selected_tools.clone().unwrap_or_else(tools),
+        )
+        .await?;
+        if called {
+            policies::run(
+                &context_input,
+                eden_plugin_sdk::protocol::context_edit::Boundary::ToolRoundEnd,
+                &cx,
+                &settings,
+            )
+            .await?;
+        }
+        if usage_overflow && settings.auto_compaction() && !prepared.references {
             let history: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
             let _: ModelInput = cx
                 .call(
@@ -597,6 +687,7 @@ fn descriptor() -> Descriptor {
         provides: vec![
             CODING_CONTROL.into(),
             LOOP.into(),
+            eden_plugin_sdk::protocol::context_edit::SERVICE.into(),
             eden_plugin_sdk::protocol::compaction::POLICY.into(),
             CONTEXT.into(),
             QUEUE.into(),
@@ -607,6 +698,7 @@ fn create(config: Value) -> Result<Package, Fault> {
     let settings = Settings::parse(config)?;
     let loop_settings = settings.clone();
     let policy_settings = settings.clone();
+    let edit_settings = settings.clone();
     let control_settings = settings.clone();
     let queue_lock = Arc::new(tokio::sync::Mutex::new(()));
     Ok(Package::new("coding")
@@ -615,6 +707,10 @@ fn create(config: Value) -> Result<Package, Fault> {
             async move { Ok(state) }
         })
         .service(LOOP, move |input, cx| run(input, cx, loop_settings.clone()))
+        .service(
+            eden_plugin_sdk::protocol::context_edit::SERVICE,
+            move |input, cx| edits::service(input, cx, edit_settings.clone()),
+        )
         .service(
             eden_plugin_sdk::protocol::compaction::POLICY,
             move |input, cx| context::summary_policy(input, cx, policy_settings.clone()),

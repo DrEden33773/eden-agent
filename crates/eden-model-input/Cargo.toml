@@ -1,0 +1,15 @@
+[package]
+name = "eden-model-input"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+eden-protocol.workspace = true
+serde.workspace = true
+base64 = "0.22.1"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+
+[lints]
+workspace = true

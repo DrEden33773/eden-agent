@@ -70,6 +70,7 @@ impl Palette {
 }
 #[derive(Clone, Debug, Default)]
 pub struct Geometry {
+    pub image: Option<crate::image_preview::Placement>,
     pub hits: Vec<Hit>,
     pub field_editor: Option<Rect>,
     pub latest: Option<Rect>,
@@ -238,6 +239,12 @@ pub fn render(
     if area.width < 8 || area.height < 5 {
         label(buf, area, "Resize · /quit", p.style());
         return (g, None);
+    }
+    if app.reference_picker.open {
+        return crate::references::render(app, buf, area, p);
+    }
+    if app.context.open {
+        return crate::context::render(app, buf, area, p, mono);
     }
     let tiny = area.height < 16;
     let pad = if area.width >= 90 { 2 } else { 1 };
@@ -475,7 +482,7 @@ pub fn render(
             if app.read_only {
                 "Read only · / for commands"
             } else {
-                "Ask anything…  / commands  @ files"
+                "Ask anything…  / commands  @ files/session"
             },
             Style::default().fg(p.muted),
         );
@@ -491,7 +498,13 @@ pub fn render(
             first,
             vec![
                 Span::styled(app.model.clone(), Style::default().fg(p.function)),
-                Span::styled("  ·  usage unavailable", dim),
+                Span::styled(
+                    format!(
+                        "  ·  {} fixed references · usage unavailable",
+                        app.references.len()
+                    ),
+                    dim,
+                ),
             ],
         );
         let second = row_rect(first, 1);
@@ -1403,7 +1416,7 @@ const HELP_LINES: &[&str] = &[
     "Alt+S Steering · Alt+F Follow-up · /queue Review and withdraw",
     "Ctrl+G External editor · Ctrl+Z Undo · Ctrl+Alt+Z Suspend (Unix)",
     "Ctrl+F Search loaded branch · PgUp/PgDn Read · Ctrl+End Latest",
-    "F2 Commands · F3 Inspector · F4 Turns · F6 Focus · F10 Style",
+    "F2 Commands · F3 Inspector · F4 Turns · F6 Focus · F7 Context · F10 Style",
     "Ctrl+O Expand tool · Ctrl+T Thinking · /copy Last answer",
     "@file Content snapshot · /attachments Review / refresh / remove",
     "!command Shell in context · !!command Shell excluded from context",

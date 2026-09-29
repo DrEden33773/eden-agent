@@ -107,6 +107,20 @@ unsafe extern "C" fn request(host: usize, bytes: Bytes, reply: Reply) -> u64 {
                 StoreRequest::Read => vec![],
                 StoreRequest::Append { kind, payload, .. } => vec![RecordDraft { kind, payload }],
                 StoreRequest::AppendBatch { entries, .. } => entries,
+                StoreRequest::AppendChecked {
+                    session_id,
+                    sequence,
+                    head,
+                    branch,
+                    entries,
+                    ..
+                } => {
+                    assert_eq!(session_id, 1);
+                    assert_eq!(sequence, records.len() as u64);
+                    assert_eq!(head, records.last().map(|record| record.sequence));
+                    assert_eq!(branch, "main");
+                    entries
+                }
                 _ => panic!("unexpected store operation"),
             };
             for draft in drafts {
@@ -122,6 +136,18 @@ unsafe extern "C" fn request(host: usize, bytes: Bytes, reply: Reply) -> u64 {
                 records: records.clone(),
             }))
         }
+        CONTEXT => {
+            let input: ContextInput = serde_json::from_value(request.payload).unwrap();
+            let mut items = vec![context::system_item(&input)];
+            items.extend(context::project_records(&input.records).unwrap());
+            Ok(json!(ModelInput {
+                target: input.target,
+                max_output_tokens: None,
+                items,
+                tools: input.tools.unwrap_or_else(tools)
+            }))
+        }
+        eden_plugin_sdk::protocol::runtime::HOST => Ok(json!(0)),
         PROVIDER => {
             host.provider_calls.fetch_add(1, Ordering::SeqCst);
             Err(Fault::new(
@@ -370,5 +396,95 @@ async fn changed_delivery_mode_applies_to_next_take_without_rewriting_delivered_
             .count(),
         1
     );
+    package.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn context_service_inspection_is_read_only_and_stale_edit_keeps_original() {
+    use eden_plugin_sdk::protocol::context_edit as e;
+    let host = Box::<Host>::default();
+    let mut original = record(1, "message");
+    original.payload = json!(Item::Message {
+        role: "user".into(),
+        content: vec![Block::Text {
+            text: "original".into()
+        }]
+    });
+    host.records.lock().unwrap().push(original.clone());
+    let package = instance(&host, create(Value::Null).unwrap());
+    let input = ContextInput {
+        target: None,
+        resources: None,
+        tools: Some(vec![]),
+        action: "inspect".into(),
+        records: vec![],
+        instructions: String::new(),
+        limits: ModelLimits::default(),
+        cwd: "/fixture".into(),
+        items: vec![],
+    };
+    let snapshot: e::Snapshot = serde_json::from_value(
+        call(
+            &package,
+            e::SERVICE,
+            e::Request::Inspect {
+                input: input.clone(),
+            },
+        )
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(host.records.lock().unwrap().len(), 1);
+    assert_eq!(host.provider_calls.load(Ordering::SeqCst), 0);
+    let mut document = snapshot.effective.clone();
+    document.entries[1].item = Item::Message {
+        role: "user".into(),
+        content: vec![Block::Text {
+            text: "edited".into(),
+        }],
+    };
+    let edit = e::Apply {
+        revision: snapshot.revision,
+        document,
+        scope: e::Scope::Branch,
+        source: "frontend-a".into(),
+    };
+    call(
+        &package,
+        e::SERVICE,
+        e::Request::Apply {
+            input: input.clone(),
+            edit: edit.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        call(
+            &package,
+            e::SERVICE,
+            e::Request::Apply {
+                input: input.clone(),
+                edit
+            }
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "ContextConflict"
+    );
+    let reopened: e::Snapshot = serde_json::from_value(
+        call(&package, e::SERVICE, e::Request::Inspect { input })
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(reopened.edits, vec![2]);
+    assert_ne!(
+        reopened.effective.entries[1].item,
+        reopened.original.entries[1].item
+    );
+    assert_eq!(host.records.lock().unwrap()[0].payload, original.payload);
     package.stop().await.unwrap();
 }

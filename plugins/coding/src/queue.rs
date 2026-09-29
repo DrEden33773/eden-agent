@@ -46,15 +46,29 @@ pub(crate) async fn queue(
     request: QueueRequest,
     cx: CallContext,
 ) -> Result<Vec<QueueEntry>, Fault> {
+    let request = match request {
+        QueueRequest::Enqueue { kind, content } => QueueRequest::EnqueueReferenced {
+            kind,
+            content,
+            references: vec![],
+        },
+        other => other,
+    };
     let history: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
     let entries = pending(&history.records)?;
     match request {
         QueueRequest::Inspect => Ok(entries),
-        QueueRequest::Enqueue { kind, content } => {
+        QueueRequest::Enqueue { .. } => unreachable!(),
+        QueueRequest::EnqueueReferenced {
+            kind,
+            content,
+            references,
+        } => {
             if !["steering", "follow_up"].contains(&kind.as_str()) {
                 return Err(Fault::new("InvalidInput", "queue", "unknown queue kind"));
             }
             let entry = QueueEntry {
+                references,
                 id: history.sequence + 1,
                 branch: history.active_branch,
                 kind,

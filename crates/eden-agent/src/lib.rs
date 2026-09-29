@@ -7,6 +7,7 @@ pub mod delivery;
 pub mod embedded;
 mod interaction;
 mod presentation;
+mod references;
 mod startup;
 mod user_shell;
 pub use control::SessionState;
@@ -398,16 +399,30 @@ impl Session {
     /// Accept multimodal content as one run. The blocks are carried as given,
     /// so an attachment does not depend on its source file afterwards.
     pub fn submit_blocks(&self, content: Vec<c::Block>) -> Result<u64, Fault> {
-        self.start_loop(content, false)
+        self.start_loop(content, false, vec![])
     }
     /// Explicitly continue from committed context and restored queues, without a new prompt.
     pub fn resume(&self) -> Result<u64, Fault> {
-        self.start_loop(vec![], true)
+        self.start_loop(vec![], true, vec![])
     }
-    fn start_loop(&self, content: Vec<c::Block>, resume: bool) -> Result<u64, Fault> {
+    /// Accept owned reference snapshots together with the user's normal content.
+    pub fn submit_referenced(
+        &self,
+        content: Vec<c::Block>,
+        references: Vec<eden_protocol::session_reference::Reference>,
+    ) -> Result<u64, Fault> {
+        self.start_loop(content, false, references)
+    }
+    fn start_loop(
+        &self,
+        content: Vec<c::Block>,
+        resume: bool,
+        references: Vec<eden_protocol::session_reference::Reference>,
+    ) -> Result<u64, Fault> {
         self.0.kernel.get()?;
         let mut payload = if self.0.coding {
             serde_json::json!(c::RunInput {
+                references,
                 target: None,
                 resume,
                 cwd: self.0.cwd.clone(),
@@ -827,6 +842,15 @@ impl Session {
         kind: &str,
         content: Vec<c::Block>,
     ) -> Result<c::QueueEntry, Fault> {
+        self.enqueue_referenced(kind, content, vec![]).await
+    }
+    /// Queue a fixed reference snapshot; later delivery compares the actual final system.
+    pub async fn enqueue_referenced(
+        &self,
+        kind: &str,
+        content: Vec<c::Block>,
+        references: Vec<eden_protocol::session_reference::Reference>,
+    ) -> Result<c::QueueEntry, Fault> {
         let run_id = {
             let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
             if state.closed || state.management {
@@ -851,7 +875,11 @@ impl Session {
                 .service_input(
                     run_id,
                     c::QUEUE,
-                    &c::QueueRequest::Enqueue { kind, content },
+                    &c::QueueRequest::EnqueueReferenced {
+                        kind,
+                        content,
+                        references,
+                    },
                 )
                 .await?;
             entries

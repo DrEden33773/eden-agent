@@ -141,6 +141,7 @@ def main() -> None:
                     [
                         "eden.coding-control.v1",
                         CODING,
+                        "eden.context-edit.v1",
                         "eden.compaction-policy.v1",
                         CODING_CONTEXT,
                         QUEUE,

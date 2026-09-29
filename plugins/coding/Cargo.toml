@@ -8,7 +8,9 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 [dependencies]
 eden-plugin-sdk.workspace = true
+eden-model-input.workspace = true
 tokio.workspace = true
 serde.workspace = true
+sha2 = "0.10.9"
 [lints]
 workspace = true

@@ -191,6 +191,9 @@ jobs:
         id: hooks
         if: ${{ !inputs.cache-only && fromJSON(inputs.selected).hooks == true && success() && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: node scripts/ci-run.mjs hooks pnpm hooks:test
+      - name: Build native terminal editor for dynamic tests
+        if: ${{ !inputs.cache-only && success() && steps.toolchain.outcome == 'success' }}
+        run: node scripts/ci-run.mjs tui-editor-build cargo build -p eden-terminal-editor --locked
       # Platform sensitivity, not the crate list, decides what each runner
       # executes. These targets own the branches that really differ per OS:
       # process ownership and shell descendants, link creation, path scope and

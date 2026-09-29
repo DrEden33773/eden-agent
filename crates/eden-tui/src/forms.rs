@@ -281,3 +281,59 @@ mod tests {
         assert!(request["values"]["edits"][1]["value"].is_null());
     }
 }
+
+#[cfg(test)]
+mod inherit_edit_tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    #[test]
+    fn explicit_input_after_inherit_selects_set_or_clear() {
+        let target = Target {
+            owner: "config".into(),
+            view: "settings".into(),
+            revision: 1,
+            node: "fields".into(),
+            action: String::new(),
+            binding: Some(Binding {
+                instance: "one".into(),
+                generation: Some(1),
+                revision: 1,
+                profile: 0,
+            }),
+        };
+        let mut text = Field::text("value", "");
+        text.key = "/value".into();
+        text.inherit = true;
+        text.paste("new").unwrap();
+        let mut boolean = Field::boolean("flag", false);
+        boolean.key = "/flag".into();
+        boolean.inherit = true;
+        boolean.activate();
+        let mut choice = Field::choice("mode", "a", &["a", "b"]);
+        choice.key = "/mode".into();
+        choice.inherit = true;
+        choice.choose(1);
+        let mut clear = Field::text("clear", "old");
+        clear.key = "/clear".into();
+        clear.allow_clear = true;
+        clear.inherit = true;
+        clear
+            .handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
+            .unwrap();
+        let (request, _) = submission(
+            &target,
+            &[text, boolean, choice, clear],
+            7,
+            "request",
+            "preview",
+        )
+        .unwrap();
+        let operations: Vec<_> = request["values"]["edits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|edit| edit["operation"].as_str().unwrap())
+            .collect();
+        assert_eq!(operations, ["set", "set", "set", "clear"]);
+    }
+}

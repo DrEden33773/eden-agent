@@ -61,6 +61,8 @@ Native UI code runs in the terminal process. `eden-ui-sdk` defines C-compatible 
 
 See the [SDK](../crates/eden-ui-sdk/src/lib.rs) and [independent author](../tests/contract-authors/tui-editor/README.md). `python3 scripts/verify-tui.py` checks the installed boundary; POSIX runs use a real PTY. Core/editor/renderer tests also run natively on the supported CI platforms.
 
+For targeted frontend tests, first run `cargo build -p eden-terminal-editor --locked`, then `cargo test -p eden-tui --locked`. The tests load the actual dynamic library; a Cargo test build alone does not publish it in the normal library output directory. CI builds this prerequisite explicitly.
+
 ## Rich content
 
 The terminal renders Markdown, highlighted code, tables and responsive split/unified Diff. Supported Mermaid flowcharts and sequence diagrams are laid out as terminal text. Common LaTeX symbols, fractions, roots and scripts are rendered natively in inline, display and fenced formulas. Unsupported or incomplete syntax retains readable source. Displayed content cannot emit terminal control sequences.

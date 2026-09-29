@@ -70,6 +70,7 @@ impl Field {
         if self.kind == "boolean" {
             self.value = (self.value != "true").to_string();
             self.clear = false;
+            self.inherit = false;
         } else if self.is_choice() {
             let selected = self
                 .options
@@ -105,6 +106,7 @@ impl Field {
         }
         self.cursor = self.value.len();
         self.clear = false;
+        self.inherit = false;
     }
     fn selected_choices(&self) -> Result<Vec<String>, String> {
         if self.value.is_empty() {
@@ -140,6 +142,7 @@ impl Field {
         self.value = next;
         self.cursor += text.len();
         self.clear = false;
+        self.inherit = false;
         Ok(())
     }
     /// Returns true when the field consumed the event, false for form navigation.
@@ -212,11 +215,13 @@ impl Field {
                 self.value.clear();
                 self.cursor = 0;
                 self.clear = true;
+                self.inherit = false;
             }
             KeyCode::Char('u') if ctrl && self.is_text() => {
                 self.value.clear();
                 self.cursor = 0;
                 self.clear = false;
+                self.inherit = false;
             }
             KeyCode::Enter | KeyCode::Char(' ')
                 if key.code == KeyCode::Enter
@@ -230,6 +235,7 @@ impl Field {
             KeyCode::Left | KeyCode::Right if self.kind == "boolean" => {
                 self.value = (key.code == KeyCode::Right).to_string();
                 self.clear = false;
+                self.inherit = false;
             }
             KeyCode::Left | KeyCode::Right if self.is_choice() => {
                 if !self.options.is_empty() && self.kind != "multi_choice" {
@@ -257,11 +263,13 @@ impl Field {
                 self.value.replace_range(start..self.cursor, "");
                 self.cursor = start;
                 self.clear = false;
+                self.inherit = false;
             }
             KeyCode::Delete if self.is_text() => {
                 let end = next(&self.value, self.cursor);
                 self.value.replace_range(self.cursor..end, "");
                 self.clear = false;
+                self.inherit = false;
             }
             KeyCode::Char(c) if plain => {
                 self.paste(&c.to_string())?;

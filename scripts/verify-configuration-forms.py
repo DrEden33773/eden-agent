@@ -268,11 +268,35 @@ class Terminal:
         return self.driver.display
 
     def action(self, key: bytes) -> None:
+        before = None
+        if key == b"\x06":
+            assert self.instance is not None
+            before = form(self.endpoint, self.instance)[0]["revision"]
         self.keys(key)
         if key == b"\x04":
             self.selected = 0
             self.focus = None
+        if before is not None:
+            # A refresh publishes before its reply reaches the TUI. Until that reply is
+            # processed, form_retry still rejects Apply, even if the new view is visible.
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                self.drain(0.1)
+                assert self.instance is not None
+                current = form(self.endpoint, self.instance)[0]["revision"]
+                if (
+                    current > before
+                    and f'"value":{current}' in self.display
+                    and "Refreshed · draft retained" in self.display
+                ):
+                    return
+            raise AssertionError((self.instance, "PTY refresh reply was not rendered"))
         self.drain()
+
+    def applied(self, receipt: dict) -> None:
+        # A committed configuration is not evidence that the frontend has cleared its
+        # pending request. Observe this operation's receipt before sending another key.
+        self.driver.wait(f'"operation":{receipt["operation"]}', seconds=20)
 
     def close(self, output: pathlib.Path) -> None:
         try:
@@ -704,15 +728,22 @@ def action_request(endpoint: dict, instance: str, action: str, edits: list[dict]
     }
 
 
-def await_private_operation(endpoint: dict, revision: int, status: str) -> dict:
+def await_private_operation(
+    endpoint: dict, revision: int, status: str, terminal: Terminal | None = None
+) -> dict:
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         inspection = call(endpoint, "/configuration/inspect", {})
         if inspection["revision"] > revision:
             receipt = max(inspection["operations"], key=lambda item: item["operation"])
             assert receipt["status"] == status, receipt
+            if terminal:
+                terminal.applied(receipt)
             return receipt
-        time.sleep(0.1)
+        if terminal:
+            terminal.drain(0.1)
+        else:
+            time.sleep(0.1)
     raise AssertionError("Private configuration operation did not settle")
 
 
@@ -809,8 +840,11 @@ def private_evidence(endpoint: dict, terminal: Terminal | None, browser: Browser
                 else:
                     assert terminal is not None
                     terminal.field(instance, path)
-                    terminal.action(b"\x06")
+                    # The headless prelude may leave this form open on an old binding.
+                    # This scenario intentionally starts with no draft: discard/reopen
+                    # before requesting refresh, which itself requires a current binding.
                     terminal.action(b"\x04")
+                    terminal.action(b"\x06")
                     terminal.edit(instance, path, public_value)
                     if token is None:
                         terminal.field(instance, secret_path)
@@ -819,7 +853,9 @@ def private_evidence(endpoint: dict, terminal: Terminal | None, browser: Browser
                         terminal.edit(instance, secret_path, token)
                     public_surfaces()
                     terminal.action(b"\x13")
-                receipt = await_private_operation(endpoint, revision, "applied")
+                receipt = await_private_operation(
+                    endpoint, revision, "applied", terminal if adapter == "pty" else None
+                )
                 receipts.append(
                     {"adapter": adapter, "instance": instance, "step": step, "receipt": receipt}
                 )

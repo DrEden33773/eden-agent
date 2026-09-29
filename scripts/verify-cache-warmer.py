@@ -29,6 +29,7 @@ class Server:
         self.foreground = 0
         self.prefix: dict[str, Any] | None = None
         self.lock = threading.Lock()
+        self.prefix_ready = threading.Event()
         owner = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -40,15 +41,20 @@ class Server:
                     self.connection.settimeout(35)
                     body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                     assert self.path == "/v1/chat/completions", self.path
-                    assert self.headers["Authorization"] == "Bearer controlled-cache-key"
+                    assert self.headers["Authorization"] == "Bearer controlled-cache-key", (
+                        "unexpected fixture authorization"
+                    )
                     assert "AUTHOR-WRAPPER-PREFIX" in json.dumps(body), body
                     auxiliary = body["max_completion_tokens"] == 1
+                    # Preparation may publish the replay before foreground HTTP reaches us.
+                    if auxiliary:
+                        assert owner.prefix_ready.wait(30), "foreground prefix never arrived"
                     with owner.lock:
                         owner.requests.append(body)
                         if auxiliary:
                             owner.auxiliary += 1
                             number = owner.auxiliary
-                            assert owner.prefix is not None
+                            assert owner.prefix is not None, "prefix barrier lost its value"
                             expected = copy.deepcopy(owner.prefix)
                             expected["max_completion_tokens"] = 1
                             assert body == expected, (body, expected)
@@ -56,6 +62,7 @@ class Server:
                             owner.foreground += 1
                             number = owner.foreground
                             owner.prefix = body
+                            owner.prefix_ready.set()
                     held = auxiliary and number == (2 if mode == "idle" else 1)
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")

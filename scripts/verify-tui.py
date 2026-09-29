@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Installed official terminal, saved-history and independent UI-author acceptance.
 
-The default uses the shared frozen installation and SDK-author preparation. Explicit
---binary/--composition/--author paths exercise existing bytes without reinstalling.
+The default uses the shared frozen installation and SDK-author preparation, and runs
+both independent UI authors through the same assertions. Explicit
+--binary/--composition/--author paths exercise existing bytes without reinstalling;
+add --macro-author there to include the second author, otherwise that parity pass is
+skipped and reported as not exercised.
 No model/provider request or system clipboard read is made.
 """
 
@@ -152,7 +155,11 @@ def main():
     parser.add_argument("--binary", type=Path)
     parser.add_argument("--composition", type=Path)
     parser.add_argument("--author", type=Path)
-    parser.add_argument("--macro-author", type=Path)
+    parser.add_argument(
+        "--macro-author",
+        type=Path,
+        help="second independent author library for the parity pass; required to include it in --binary runs",
+    )
     parser.add_argument("--editor", type=Path)
     args = parser.parse_args()
     receipt = None if args.binary else ROOT / "artifacts/tui-verification.json"
@@ -179,7 +186,10 @@ def main():
             args.author.resolve(),
         )
         if macro_author is None:
-            parser.error("--binary requires --macro-author")
+            print(
+                "No --macro-author given; the macro-author parity pass is not exercised",
+                file=sys.stderr,
+            )
     else:
         prepare()
         destination = installed(ROOT / "artifacts/install-tui")
@@ -273,7 +283,8 @@ def main():
             # hand-written fixture stays the ABI reference, the macro library is the
             # `export_ui!` output. A difference in either direction fails here.
             independent_roles(binary, endpoint, endpoint_file, env, author)
-            independent_roles(binary, endpoint, endpoint_file, env, macro_author)
+            if macro_author is not None:
+                independent_roles(binary, endpoint, endpoint_file, env, macro_author)
         finally:
             stop(host, endpoint)
         reader_endpoint = scratch / "read.json"
@@ -338,8 +349,8 @@ def main():
             "independent_theme": True,
             "independent_frontend": True,
             "independent_overlay": True,
-            "macro_author_roles": True,
-            "author_parity": True,
+            "macro_author_roles": macro_author is not None,
+            "author_parity": macro_author is not None,
             "combined_overlay_renderer_theme": True,
             "external_editor_success_and_failure": True,
             "suspend_resume_modes": True,

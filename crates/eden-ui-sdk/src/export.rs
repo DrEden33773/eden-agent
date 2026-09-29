@@ -46,6 +46,8 @@
 #[macro_export]
 macro_rules! export_ui {
     (editor: $ty:ty $(,)?) => {
+        // The exported entry point is named by the ABI, not by an author writing
+        // documentation; the macro's own doc comment covers it.
         #[allow(missing_docs)]
         #[unsafe(no_mangle)]
         pub extern "C" fn eden_ui_v1() -> *const $crate::UiApi {
@@ -223,6 +225,8 @@ macro_rules! export_ui {
         }
     };
     (renderer: $ty:ty $(,)?) => {
+        // The exported entry point is named by the ABI, not by an author writing
+        // documentation; the macro's own doc comment covers it.
         #[allow(missing_docs)]
         #[unsafe(no_mangle)]
         pub extern "C" fn eden_renderer_v1() -> *const $crate::RendererApi {
@@ -290,6 +294,8 @@ macro_rules! export_ui {
         }
     };
     (theme: $ty:ty $(,)?) => {
+        // The exported entry point is named by the ABI, not by an author writing
+        // documentation; the macro's own doc comment covers it.
         #[allow(missing_docs)]
         #[unsafe(no_mangle)]
         pub extern "C" fn eden_theme_v1() -> *const $crate::ThemeApi {
@@ -310,6 +316,8 @@ macro_rules! export_ui {
         }
     };
     (frontend: $ty:ty $(,)?) => {
+        // The exported entry point is named by the ABI, not by an author writing
+        // documentation; the macro's own doc comment covers it.
         #[allow(missing_docs)]
         #[unsafe(no_mangle)]
         pub extern "C" fn eden_terminal_frontend_v1() -> *const $crate::TerminalFrontendApi {
@@ -336,6 +344,8 @@ macro_rules! export_ui {
         }
     };
     (overlay: $ty:ty $(,)?) => {
+        // The exported entry point is named by the ABI, not by an author writing
+        // documentation; the macro's own doc comment covers it.
         #[allow(missing_docs)]
         #[unsafe(no_mangle)]
         pub extern "C" fn eden_overlay_v1() -> *const $crate::OverlayApi {

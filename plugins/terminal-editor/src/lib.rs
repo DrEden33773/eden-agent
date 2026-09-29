@@ -844,6 +844,8 @@ mod tests {
             assert_eq!(next.text, "a\nb\nc\n");
             key(next, 13, 0);
             assert_eq!(next.text, "a\nb\nc\nd");
+            // The transfer copies into the destination and leaves the source alone.
+            assert_eq!((&*first.cast::<Editor>()).text, "a\nb\nc\nd");
             (api.destroy)(first);
             (api.destroy)(second);
         }

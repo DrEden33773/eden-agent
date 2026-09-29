@@ -19,6 +19,7 @@ use std::{
 thread_local! {
     static PANIC_AT: Slot<u32> = const { Slot::new(NO_PANIC) };
     static CALLS: Slot<u32> = const { Slot::new(0) };
+    static DROPS: Slot<u32> = const { Slot::new(0) };
 }
 
 const NO_PANIC: u32 = 0;
@@ -63,6 +64,17 @@ fn calls() -> u32 {
 
 fn reset_calls() {
     CALLS.with(|value| value.set(0));
+}
+
+/// Count destructors so a test can prove a panicking release really ran the role's
+/// destructor instead of returning early.
+fn drops() -> u32 {
+    DROPS.with(Slot::get)
+}
+
+fn release(slot: u32) {
+    DROPS.with(|value| value.set(value.get() + 1));
+    panic_if(slot);
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -124,7 +136,6 @@ mod draft {
 
     const MAX_EVENT_TEXT: usize = 8;
 
-    #[derive(Default)]
     pub struct Draft {
         text: String,
         cursor: usize,
@@ -132,12 +143,20 @@ mod draft {
         numbered: bool,
     }
 
+    impl Drop for Draft {
+        fn drop(&mut self) {
+            release(PANIC_DESTROY);
+        }
+    }
+
     impl author::Editor for Draft {
         fn create(style: u32) -> Option<Self> {
             enter(PANIC_CREATE);
             (style <= 1).then(|| Self {
+                text: String::new(),
+                cursor: 0,
+                selection: 0,
                 numbered: style == 1,
-                ..Self::default()
             })
         }
 
@@ -238,6 +257,12 @@ mod painter {
 
     pub struct Painter;
 
+    impl Drop for Painter {
+        fn drop(&mut self) {
+            release(PANIC_DESTROY);
+        }
+    }
+
     impl author::Renderer for Painter {
         fn create() -> Option<Self> {
             enter(PANIC_CREATE);
@@ -311,6 +336,12 @@ mod modal {
     use super::*;
 
     pub struct Modal;
+
+    impl Drop for Modal {
+        fn drop(&mut self) {
+            release(PANIC_DESTROY);
+        }
+    }
 
     impl author::Overlay for Modal {
         fn create() -> Option<Self> {
@@ -674,10 +705,12 @@ fn editor_panics_become_the_documented_failure_values() {
         clear_panics();
 
         // A panic inside destroy cannot be recovered without running the destructor
-        // twice; what must hold is that it does not abort the host.
+        // twice; what must hold is that the destructor ran and the host survived it.
+        let released = drops();
         panic_at(PANIC_DESTROY);
         (api.destroy)(other);
         clear_panics();
+        assert_eq!(drops(), released + 1);
 
         (api.destroy)(handle);
     }
@@ -767,7 +800,11 @@ fn renderer_slots_and_failures_match_the_contract() {
         assert!((api.create)().is_null());
         clear_panics();
 
+        let released = drops();
+        panic_at(PANIC_DESTROY);
         (api.destroy)(handle);
+        clear_panics();
+        assert_eq!(drops(), released + 1);
     }
 }
 
@@ -921,6 +958,10 @@ fn overlay_slots_and_failures_match_the_contract() {
         assert!((api.renderer.create)().is_null());
         clear_panics();
 
+        let released = drops();
+        panic_at(PANIC_DESTROY);
         (api.renderer.destroy)(handle);
+        clear_panics();
+        assert_eq!(drops(), released + 1);
     }
 }

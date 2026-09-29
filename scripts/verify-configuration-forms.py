@@ -229,9 +229,6 @@ class TerminalTransport:
         self.receipts: list[dict] = []
         self.errors: list[str] = []
         self.closed = False
-        self.snapshot_held = threading.Event()
-        self.snapshots = threading.Event()
-        self.snapshots.set()
         transport = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -271,9 +268,6 @@ class TerminalTransport:
                     for view in value["result"]["presentation"]["views"]:
                         view["title"] = transport.title(view)
                     payload = json.dumps(value).encode()
-                    if not transport.snapshots.is_set():
-                        transport.snapshot_held.set()
-                    assert transport.snapshots.wait(30), "snapshot release was not signalled"
                 if self.path in ("/action", "/private-input"):
                     action = json.loads(body)
                     if self.path == "/private-input":
@@ -320,7 +314,6 @@ class TerminalTransport:
         if self.closed:
             return
         self.closed = True
-        self.snapshots.set()
         self.server.shutdown()
         self.server.server_close()
         self.thread.join()
@@ -1349,7 +1342,6 @@ def main() -> None:
             finally:
                 try:
                     if terminal:
-                        terminal.transport.snapshots.set()
                         try:
                             terminal.driver.close()
                         finally:

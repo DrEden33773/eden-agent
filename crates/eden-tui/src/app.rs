@@ -140,7 +140,7 @@ pub struct App {
     form_target: Option<crate::forms::Target>,
     form_retry: Option<(String, Value, crate::forms::Target)>,
     form_applied: bool,
-    form_refresh: Option<u64>,
+    form_refresh: Option<Vec<u64>>,
     uncertain_checked: bool,
     form_drafts: BTreeMap<String, (crate::forms::Target, Dialog)>,
     pub theme: Option<crate::extensions::Theme>,
@@ -862,13 +862,6 @@ impl App {
                                         }
                                     }
                                 }
-                                if current
-                                    && request["action"]
-                                        .as_str()
-                                        .is_some_and(|a| a.ends_with(":refresh"))
-                                {
-                                    self.form_refresh = request["revision"].as_u64();
-                                }
                                 if self
                                     .form_retry
                                     .as_ref()
@@ -876,7 +869,27 @@ impl App {
                                         sent_route == &route && sent == &body
                                     })
                                 {
-                                    self.form_retry = None;
+                                    if request["action"]
+                                        .as_str()
+                                        .is_some_and(|a| a.ends_with(":refresh"))
+                                    {
+                                        // A reply can precede its snapshot, or arrive after the
+                                        // originating form has been saved and closed.
+                                        self.form_refresh = serde_json::from_value::<
+                                            Vec<eden_protocol::presentation::Revision>,
+                                        >(
+                                            value.clone()
+                                        )
+                                        .ok()
+                                        .map(|revisions| {
+                                            revisions
+                                                .into_iter()
+                                                .map(|revision| revision.value)
+                                                .collect()
+                                        });
+                                    } else {
+                                        self.form_retry = None;
+                                    }
                                 }
                                 if current
                                     && let Some(Dialog::Form { status, .. }) = &mut self.dialog
@@ -947,6 +960,9 @@ impl App {
                     }
                 }
             }
+        }
+        if self.form_refresh.is_some() {
+            self.rebind_applied_form();
         }
         if !self.saved && self.edited_at.elapsed().as_millis() >= 150 {
             self.persist();
@@ -1849,7 +1865,6 @@ impl App {
                 },
             ));
             self.form_applied = false;
-            self.form_refresh = None;
             self.form_target = Some(target);
             self.dialog = Some(dialog);
         } else {
@@ -1886,7 +1901,55 @@ impl App {
         }
     }
     fn rebind_applied_form(&mut self) {
-        if !self.form_applied && self.form_refresh.is_none() {
+        if let Some(revisions) = &self.form_refresh {
+            let Some((_, _, origin)) = &self.form_retry else {
+                return;
+            };
+            let Some((latest, fields)) = self
+                .snapshot
+                .presentation
+                .views
+                .iter()
+                .find(|view| view.owner == origin.owner && view.view.id == origin.view)
+                .and_then(|view| crate::forms::find(view, &origin.node))
+            else {
+                return;
+            };
+            // Publication revisions are globally unique. A delayed intermediate
+            // snapshot cannot complete this Refresh; a later authoritative one can.
+            if !revisions.contains(&latest.revision)
+                && revisions
+                    .iter()
+                    .max()
+                    .is_none_or(|last| latest.revision <= *last)
+            {
+                return;
+            }
+            let status = "Refreshed · draft retained; validate and preview before applying";
+            let key = format!("{}|{}|{}", origin.owner, origin.view, origin.node);
+            if let Some((target, dialog)) = self.form_drafts.get_mut(&key)
+                && target.binding == origin.binding
+            {
+                rebind_form_draft(dialog, fields.clone(), status);
+                *target = latest.clone();
+            }
+            if self.form_target.as_ref().is_some_and(|target| {
+                target.owner == origin.owner
+                    && target.view == origin.view
+                    && target.node == origin.node
+                    && target.binding == origin.binding
+            }) {
+                if let Some(dialog) = &mut self.dialog {
+                    rebind_form_draft(dialog, fields, status);
+                }
+                self.form_target = Some(latest);
+                self.form_applied = false;
+            }
+            self.form_refresh = None;
+            self.form_retry = None;
+            return;
+        }
+        if !self.form_applied {
             return;
         }
         let Some(target) = &self.form_target else {
@@ -1898,44 +1961,14 @@ impl App {
             .views
             .iter()
             .find(|v| v.owner == target.owner && v.view.id == target.view)
-            && let Some((latest, mut fields)) = crate::forms::find(view, &target.node)
+            && let Some((latest, fields)) = crate::forms::find(view, &target.node)
             && (latest.binding != target.binding || latest.revision != target.revision)
-            && self
-                .form_refresh
-                .is_none_or(|submitted| latest.revision > submitted)
         {
-            if let Some(Dialog::Form {
-                fields: current,
-                selected,
-                status,
-                ..
-            }) = &mut self.dialog
-            {
-                {
-                    for field in &mut fields {
-                        if let Some(old) = current.iter().find(|f| f.key == field.key)
-                            && !old.private
-                            && (old.value != old.initial || old.clear || old.inherit)
-                        {
-                            field.value = old.value.clone();
-                            field.clear = old.clear;
-                            field.inherit = old.inherit;
-                            field.cursor = old.cursor.min(field.value.len());
-                        }
-                    }
-                }
-                *current = fields;
-                *selected = (*selected).min(current.len().saturating_sub(1));
-                *status = if self.form_refresh.is_some() {
-                    "Refreshed · draft retained; validate and preview before applying"
-                } else {
-                    "Applied · editing current configuration"
-                }
-                .into();
+            if let Some(dialog) = &mut self.dialog {
+                rebind_form_draft(dialog, fields, "Applied · editing current configuration");
             }
             self.form_target = Some(latest);
             self.form_applied = false;
-            self.form_refresh = None;
         }
     }
     fn submit_form(&mut self, action: &str) {
@@ -2836,6 +2869,89 @@ mod form_reopen_tests {
     }
 
     #[tokio::test]
+    async fn refresh_waits_for_its_publication_not_an_intermediate_snapshot() {
+        let mut app = super::tests::app();
+        app.snapshot.presentation.views.push(view());
+        app.open_live("custom|settings|fields");
+        if let Some(Dialog::Form { fields, .. }) = &mut app.dialog {
+            fields[0].value = "my draft".into();
+        }
+        advance(&mut app, 2);
+        app.submit_form("refresh");
+        let body = app.form_retry.as_ref().unwrap().1.clone();
+        app.tx
+            .send(Update::Reply {
+                route: "/action".into(),
+                body,
+                result: Ok(json!([{ "value": 4 }])),
+            })
+            .unwrap();
+        app.tick();
+        advance(&mut app, 3);
+        app.rebind_applied_form();
+        assert_eq!(
+            app.form_target.as_ref().unwrap().revision,
+            1,
+            "an intermediate publication is not the Refresh result"
+        );
+        assert!(app.form_retry.is_some());
+        advance(&mut app, 4);
+        app.rebind_applied_form();
+        assert_eq!(app.form_target.as_ref().unwrap().revision, 4);
+        assert!(app.form_retry.is_none());
+        assert!(matches!(&app.dialog, Some(Dialog::Form { fields, .. })
+            if fields[0].value == "my draft" && fields[0].initial == "server-4"));
+    }
+
+    #[tokio::test]
+    async fn refresh_follows_its_saved_draft_when_closed_or_another_form_is_open() {
+        for switch in [false, true] {
+            let mut app = super::tests::app();
+            app.snapshot.presentation.views.push(view());
+            app.open_live("custom|settings|fields");
+            if let Some(Dialog::Form { fields, .. }) = &mut app.dialog {
+                fields[0].value = "saved draft".into();
+            }
+            advance(&mut app, 2);
+            app.submit_form("refresh");
+            let body = app.form_retry.as_ref().unwrap().1.clone();
+            app.dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            if switch {
+                let mut other = view();
+                other.owner = "other".into();
+                app.snapshot.presentation.views.push(other);
+                app.open_live("other|settings|fields");
+            }
+            app.tx
+                .send(Update::Reply {
+                    route: "/action".into(),
+                    body,
+                    result: Ok(json!([{ "value": 4 }])),
+                })
+                .unwrap();
+            app.tick();
+            advance(&mut app, 4);
+            app.rebind_applied_form();
+            if switch {
+                assert_eq!(app.form_target.as_ref().unwrap().owner, "other");
+            }
+            app.open_live("custom|settings|fields");
+            assert_eq!(
+                app.form_target.as_ref().unwrap().revision,
+                4,
+                "switch={switch}"
+            );
+            assert!(matches!(&app.dialog, Some(Dialog::Form { fields, .. })
+                if fields[0].value == "saved draft" && fields[0].initial == "server-4"));
+            app.submit_form("apply");
+            assert_eq!(
+                app.form_retry.as_ref().unwrap().1["values"]["binding"]["revision"],
+                4
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn refresh_uses_latest_target_without_submitting_or_validating_drafts() {
         let mut app = super::tests::app();
         app.snapshot.presentation.views.push(view());
@@ -2904,7 +3020,7 @@ mod form_reopen_tests {
                 })
                 .unwrap();
             app.tick();
-            assert!(app.form_retry.is_none());
+            assert_eq!(app.form_retry.is_none(), snapshot_first);
             // An explicitly recovered request may produce a second receipt before
             // the follower delivers the refreshed snapshot.
             app.tx
@@ -2915,7 +3031,7 @@ mod form_reopen_tests {
                 })
                 .unwrap();
             app.tick();
-            assert!(app.form_refresh.is_some());
+            assert_eq!(app.form_refresh.is_none(), snapshot_first);
             if !snapshot_first {
                 app.rebind_applied_form();
                 assert_eq!(
@@ -3082,6 +3198,31 @@ mod form_reopen_tests {
                 );
             }
         }
+    }
+}
+
+fn rebind_form_draft(dialog: &mut Dialog, mut fields: Vec<Field>, message: &str) {
+    if let Dialog::Form {
+        fields: current,
+        selected,
+        status,
+        ..
+    } = dialog
+    {
+        for field in &mut fields {
+            if let Some(old) = current.iter().find(|f| f.key == field.key)
+                && !old.private
+                && (old.value != old.initial || old.clear || old.inherit)
+            {
+                field.value = old.value.clone();
+                field.clear = old.clear;
+                field.inherit = old.inherit;
+                field.cursor = old.cursor.min(field.value.len());
+            }
+        }
+        *current = fields;
+        *selected = (*selected).min(current.len().saturating_sub(1));
+        *status = message.into();
     }
 }
 

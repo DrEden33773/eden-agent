@@ -557,7 +557,7 @@ pub(crate) fn reading(document: &eden_protocol::delivery::ReadingDocument) -> Ve
             entry
         };
         let id = index as u64 + 1;
-        let (role, title, body) = match content["type"]
+        let (role, title, body): (Role, String, String) = match content["type"]
             .as_str()
             .filter(|_| document.format == "eden-reading-v1")
         {
@@ -607,11 +607,66 @@ pub(crate) fn reading(document: &eden_protocol::delivery::ReadingDocument) -> Ve
                 content["name"].as_str().unwrap_or("Tool").into(),
                 serde_json::to_string_pretty(&content["arguments"]).unwrap_or_default(),
             ),
-            Some("tool_result") => (
-                Role::Tool,
-                format!("Tool result {}", content["call_id"].as_str().unwrap_or("")),
-                serde_json::to_string_pretty(content).unwrap_or_default(),
-            ),
+            Some("tool_result") => {
+                use base64::Engine;
+                let mut message = Message::new(
+                    id,
+                    Role::Tool,
+                    format!("Tool result {}", content["call_id"].as_str().unwrap_or("")),
+                    content["text"].as_str().unwrap_or(""),
+                );
+                let mut preview = content["text"]
+                    .as_str()
+                    .unwrap_or("Tool output")
+                    .lines()
+                    .next()
+                    .unwrap_or("Tool output")
+                    .to_owned();
+                if let Some(error) = content["error"].as_str() {
+                    preview.push_str(&format!("\n{}", error.lines().next().unwrap_or(error)));
+                }
+                message.preview = Some(preview);
+                message.failed = !content["error"].is_null()
+                    || content["exit_code"].as_i64().is_some_and(|code| code != 0);
+                for block in content["content"].as_array().into_iter().flatten() {
+                    if let Ok(block) = serde_json::from_value::<Block>(block.clone()) {
+                        if matches!(block, Block::Image { .. }) {
+                            message.images.push(std::sync::Arc::new(block));
+                        } else {
+                            message
+                                .body
+                                .push_str(&format!("\n{}", blocks(std::slice::from_ref(&block))));
+                        }
+                    }
+                }
+                for output in content["outputs"].as_array().into_iter().flatten() {
+                    let name = output["name"].as_str().unwrap_or("output");
+                    let media = output["media_type"]
+                        .as_str()
+                        .unwrap_or("application/octet-stream");
+                    if let Some(data) = output["data"].as_str()
+                        && let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data)
+                    {
+                        if media.starts_with("image/") {
+                            message.images.push(std::sync::Arc::new(Block::Image {
+                                media_type: media.into(),
+                                data: data.into(),
+                            }));
+                        } else if let Ok(text) = std::str::from_utf8(&bytes) {
+                            message
+                                .body
+                                .push_str(&format!("\n\nFull output: {name}\n{text}"));
+                        }
+                    }
+                }
+                // Retain the selected raw fields, including unknown or undecodable outputs.
+                message.body.push_str(&format!(
+                    "\n\nReading source\n{}",
+                    serde_json::to_string_pretty(content).unwrap_or_default()
+                ));
+                messages.push(message);
+                continue;
+            }
             Some("presentation") => {
                 let snapshot = serde_json::json!({
                     "version": 1,
@@ -901,6 +956,46 @@ mod tests {
 
 #[cfg(test)]
 mod reading_fallback_tests {
+    #[test]
+    fn reading_tool_result_exposes_exported_full_text_images_and_failure() {
+        use base64::Engine;
+        let image = serde_json::json!({
+            "type": "image",
+            "media_type": "image/png",
+            "data": "aW1hZ2U=",
+        });
+        let document = eden_protocol::delivery::ReadingDocument {
+            format: "eden-reading-v1".into(),
+            entries: vec![serde_json::json!({
+                "content": {
+                    "type": "tool_result",
+                    "call_id": "tool",
+                    "text": "short preview",
+                    "content": [image],
+                    "error": "failure detail",
+                    "exit_code": 1,
+                    "outputs": [{
+                        "name": "stdout.txt",
+                        "media_type": "text/plain",
+                        "data":
+                            base64::engine::general_purpose::STANDARD.encode("FULL_OUTPUT_MARKER"),
+                    }],
+                },
+            })],
+            diagnostic: None,
+        };
+        let messages = super::reading(&document);
+        assert!(messages[0].body.contains("FULL_OUTPUT_MARKER"));
+        assert_eq!(messages[0].images.len(), 1);
+        assert!(messages[0].failed);
+        let collapsed =
+            crate::text::message_rows(&messages[0], 80, &crate::model::Preferences::default());
+        assert!(
+            collapsed
+                .iter()
+                .any(|row| row.text.contains("short preview"))
+        );
+    }
     #[test]
     fn unknown_document_format_keeps_the_entire_source_entry() {
         let document = eden_protocol::delivery::ReadingDocument {

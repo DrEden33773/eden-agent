@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Installed product workflows through the same loopback host used by the terminal."""
 
+import base64
 import importlib.util
 import json
 import os
+import struct
 import subprocess
 import sys
 import tempfile
 import time
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -196,6 +199,73 @@ def main() -> None:
                     reader_tui.close()
             live.call(reader_endpoint, "/shutdown", {})
             results["reading_jsonl_read_only_and_pty"] = True
+
+            def chunk(kind: bytes, data: bytes) -> bytes:
+                return (
+                    struct.pack(">I", len(data))
+                    + kind
+                    + data
+                    + struct.pack(">I", zlib.crc32(kind + data))
+                )
+
+            png = (
+                b"\x89PNG\r\n\x1a\n"
+                + chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 1, 8, 2, 0, 0, 0))
+                + chunk(b"IDAT", zlib.compress(b"\0\xff\0\0\0\xff\0"))
+                + chunk(b"IEND", b"")
+            )
+            rich = root / "rich-reading.jsonl"
+            rich.write_text(
+                json.dumps({"format": "eden-reading-v1", "restorable": False})
+                + "\n"
+                + json.dumps(
+                    {
+                        "run_id": 1,
+                        "content": {
+                            "type": "tool_result",
+                            "call_id": "fixture",
+                            "text": "short preview",
+                            "content": [
+                                {
+                                    "type": "image",
+                                    "media_type": "image/png",
+                                    "data": base64.b64encode(png).decode(),
+                                }
+                            ],
+                            "outputs": [
+                                {
+                                    "name": "stdout.txt",
+                                    "media_type": "text/plain",
+                                    "data": base64.b64encode(b"FULL_OUTPUT_MARKER").decode(),
+                                }
+                            ],
+                            "exit_code": 0,
+                            "error": None,
+                        },
+                    }
+                )
+                + "\n"
+            )
+            rich_host = mutate("/manage/open", {"path": str(rich), "read_only": True})
+            rich_endpoint = json.loads(Path(rich_host["endpoint"]).read_text())
+            if os.name != "nt":
+                from tui_pty import Terminal
+
+                rich_tui = Terminal(binary, Path(rich_host["endpoint"]))
+                try:
+                    rich_tui.wait("short preview")
+                    rich_tui.command("/inspect")
+                    rich_tui.wait("FULL_OUTPUT_MARKER")
+                    rich_tui.send(b"\x1bOR")  # F3 closes the full-width Inspector at this size.
+                    rich_tui.wait("▀")
+                    assert "Unsupported (live)" not in rich_tui.display
+                finally:
+                    rich_tui.close()
+            live.call(rich_endpoint, "/shutdown", {})
+            results["selected_full_output_and_tool_image_reading"] = (
+                "passed" if os.name != "nt" else "parser passed; PTY skipped"
+            )
+
             snapshot = call("/tui/snapshot")
             assert (
                 models.SECRET not in json.dumps(snapshot) + history.read_text() + saved.read_text()

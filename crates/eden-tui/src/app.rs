@@ -310,8 +310,10 @@ impl App {
                 app.selected = index;
             }
         }
-        app.dispatch("/resources", Value::Null);
-        app.dispatch("/commands", Value::Null);
+        if !app.read_only {
+            app.dispatch("/resources", Value::Null);
+            app.dispatch("/commands", Value::Null);
+        }
         Ok(app)
     }
     fn project(&mut self) {
@@ -459,7 +461,7 @@ impl App {
             self.checkpoint.cursor = next.cursor;
         }
 
-        if self.dialog.is_none() {
+        if self.dialog.is_none() && !self.read_only {
             self.activity = Some((
                 eden_protocol::presentation::ActivityTarget::Composer,
                 Instant::now(),

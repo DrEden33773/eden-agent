@@ -45,7 +45,13 @@ def main() -> None:
     )
     parser.add_argument("--output", type=Path, default=ROOT / "artifacts/tui-performance.json")
     parser.add_argument("--records", type=int, nargs="+", default=[1000, 10000, 100000])
+    parser.add_argument("--no-color", action="store_true")
+    parser.add_argument(
+        "--search", action="store_true", help="navigate to the middle of the loaded history"
+    )
     args = parser.parse_args()
+    if any(count < 2 for count in args.records):
+        parser.error("record counts must be at least two")
     if os.name == "nt":
         raise SystemExit("This probe needs a POSIX PTY; use native state tests on Windows")
     binary, editor = args.binary.resolve(), args.editor.resolve()
@@ -62,6 +68,8 @@ def main() -> None:
         "binary": str(binary),
         "editor": str(editor),
         "viewport": [120, 36],
+        "no_color": args.no_color,
+        "search": args.search,
         "samples": 20,
         "observation_poll_ms": 2,
         "filesystem_caches_flushed": False,
@@ -117,7 +125,10 @@ def main() -> None:
                 terminal = Terminal(
                     binary,
                     endpoint_file,
-                    env={"EDEN_TUI_EDITOR": str(editor)},
+                    env={
+                        "EDEN_TUI_EDITOR": str(editor),
+                        **({"NO_COLOR": "1"} if args.no_color else {}),
+                    },
                     width=120,
                     height=36,
                 )
@@ -145,6 +156,29 @@ def main() -> None:
                     "host_peak_kib": peak_kib(host.pid),
                     "tui_peak_kib": peak_kib(terminal.process.pid),
                 }
+                if args.search:
+                    terminal.send(b"\x15")
+                    terminal.command("/search")
+                    terminal.wait("Search by name, ID or category")
+                    before_search = len(terminal.output)
+                    start = time.monotonic()
+                    os.write(terminal.master, f"{count // 2}:\r".encode())
+                    middle = f"{count // 2}: 中文"
+                    while (
+                        "⌕" in terminal.display
+                        or marker in terminal.display
+                        or middle not in terminal.display
+                    ):
+                        terminal.read(0.002)
+                        if time.monotonic() - start > 10:
+                            raise AssertionError(
+                                f"search did not navigate to the middle:\n{terminal.display}"
+                            )
+                    case["search_navigation_ms"] = (time.monotonic() - start) * 1000
+                    case["search_output_bytes"] = len(terminal.output) - before_search
+                    case["search_middle"] = True
+                if args.no_color:
+                    assert b"38;2;" not in terminal.output and b"48;2;" not in terminal.output
                 results["cases"].append(case)
                 print(json.dumps(case), flush=True)
             finally:

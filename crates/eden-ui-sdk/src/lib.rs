@@ -124,7 +124,7 @@ pub mod mocha {
 
 /// Replaceable structured message renderer, exported as `eden_renderer_v1`.
 /// Input is UTF-8 JSON: `{ "messages": [Message], "theme": { "foreground": RGB }, "scroll": 0 }`.
-/// Each message carries id, role, title, body, expanded, failed, pending, before/after and revision. Theme values are RGB integers or COLOR_DEFAULT; preferences and session identify the local view. Cells are viewport-relative.
+/// Each message carries id, role, title, body, expanded, failed, pending, before/after and revision. Optional preview text is an explicit collapsed summary; the complete body remains available. Theme values are RGB integers or COLOR_DEFAULT; preferences and session identify the local view. Cells are viewport-relative.
 /// Calls and callbacks follow the module ownership and serialization contract.
 #[repr(C)]
 pub struct RendererApi {

@@ -34,6 +34,8 @@ pub struct Message {
     pub role: Role,
     pub title: String,
     pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
     pub expanded: bool,
     pub failed: bool,
     #[serde(default)]
@@ -57,6 +59,7 @@ impl Message {
             role,
             title: title.into(),
             body: body.into(),
+            preview: None,
             expanded: false,
             failed: false,
             pending: false,

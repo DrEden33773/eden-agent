@@ -200,13 +200,16 @@ async fn retain_write_sides(
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .map_err(file_error)?;
     }
-    builder.create(&directory).map_err(file_error)?;
+    #[cfg(not(unix))]
+    std::fs::create_dir(&directory).map_err(file_error)?;
     let result = async {
         let mut artifacts = vec![];
         for (name, bytes) in [("before", before), ("after", after)] {

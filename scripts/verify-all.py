@@ -51,7 +51,11 @@ def execute(name: str, script: str, receipt_file: str, output: pathlib.Path) -> 
     directory.mkdir(parents=True, exist_ok=True)
     old_result = ROOT / "artifacts" / receipt_file
     old_result.unlink(missing_ok=True)
-    environment = {**os.environ, "EDEN_VERIFICATION_LOG": str(directory / "commands")}
+    environment = {
+        **os.environ,
+        "EDEN_VERIFICATION_LOG": str(directory / "commands"),
+        "EDEN_VERIFICATION_DIAGNOSTICS": str(directory / "diagnostics"),
+    }
     start = time.monotonic()
     print(f"Starting {name}", flush=True)
     result = run(

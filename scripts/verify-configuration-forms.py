@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise native-author configuration forms in the installed TUI and real Chromium."""
 
+import argparse
 import importlib.util
 import json
 import os
@@ -8,8 +9,14 @@ import pathlib
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
+import threading
 import time
+import traceback
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from install import ROOT, build_target, library, package, target
@@ -215,6 +222,111 @@ class Browser:
         self.run("close")
 
 
+class TerminalTransport:
+    """Stamp snapshot titles so a rendered palette proves which snapshot the TUI consumed."""
+
+    def __init__(self, endpoint: dict, directory: pathlib.Path):
+        self.receipts: list[dict] = []
+        self.errors: list[str] = []
+        self.closed = False
+        self.snapshot_held = threading.Event()
+        self.snapshots = threading.Event()
+        self.snapshots.set()
+        transport = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args):
+                pass
+
+            def do_GET(self):
+                self.handle_forward()
+
+            def do_POST(self):
+                self.handle_forward()
+
+            def handle_forward(self):
+                try:
+                    self.forward()
+                except Exception as error:
+                    transport.errors.append(type(error).__name__)
+                    self.send_error(502, "acceptance transport failed")
+
+            def forward(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                request = urllib.request.Request(
+                    f"http://{endpoint['address']}{self.path}",
+                    data=body if self.command == "POST" else None,
+                    headers={k: v for k, v in self.headers.items() if k.lower() != "host"},
+                    method=self.command,
+                )
+                try:
+                    response = urllib.request.urlopen(request, timeout=35)
+                except urllib.error.HTTPError as error:
+                    response = error
+                with response:
+                    payload, status = response.read(), response.getcode()
+                assert isinstance(status, int)
+                value = json.loads(payload)
+                if self.path.startswith("/tui/snapshot") and value.get("ok"):
+                    for view in value["result"]["presentation"]["views"]:
+                        view["title"] = transport.title(view)
+                    payload = json.dumps(value).encode()
+                    if not transport.snapshots.is_set():
+                        transport.snapshot_held.set()
+                    assert transport.snapshots.wait(30), "snapshot release was not signalled"
+                if self.path in ("/action", "/private-input"):
+                    action = json.loads(body)
+                    if self.path == "/private-input":
+                        action = action["request"]
+                    # Record identities and results only, never field values or private inputs.
+                    transport.receipts.append(
+                        {
+                            "request_id": action["request_id"],
+                            "action": action["action"],
+                            "revision": action["revision"],
+                            "binding": action["values"].get("binding"),
+                            "result": value,
+                        }
+                    )
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                try:
+                    self.wfile.write(payload)
+                except BrokenPipeError:
+                    pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = False
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.endpoint_file = directory / "terminal-endpoint.json"
+        self.endpoint_file.write_text(
+            json.dumps(
+                {
+                    **endpoint,
+                    "address": f"127.0.0.1:{self.server.server_port}",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def title(view: dict) -> str:
+        return f"{view['title']} [snapshot {view['revision']}]"
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        self.snapshots.set()
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join()
+        assert not self.errors, self.errors
+
+
 class Terminal:
     """Navigate official plugin dialogs while keeping D2 assertions on host facts."""
 
@@ -222,7 +334,8 @@ class Terminal:
         from tui_pty import Terminal as PtyTerminal
 
         self.endpoint = endpoint
-        self.driver = PtyTerminal(binary, endpoint_file, width=180, height=50)
+        self.transport = TerminalTransport(endpoint, endpoint_file.parent)
+        self.driver = PtyTerminal(binary, self.transport.endpoint_file, width=180, height=50)
         self.output = self.driver.output
         self.focus: tuple[str, str] | None = None
         self.instance: str | None = None
@@ -243,7 +356,7 @@ class Terminal:
             if self.instance is not None:
                 self.keys(b"\x1b")
             self.driver.command("/live")
-            self.driver.wait("Plugin views")
+            self.driver.wait(TerminalTransport.title(view))
             entries = [
                 (candidate["owner"], candidate["id"], item["id"])
                 for candidate in call(self.endpoint, "/snapshot")["presentation"]["views"]
@@ -254,8 +367,16 @@ class Terminal:
             self.keys(b"\x1b[B" * index + b"\r")
             self.driver.wait("Ctrl+S Apply")
             self.instance, self.selected = instance, 0
+        selected = [
+            index
+            for index, field in enumerate(node["fields"])
+            if re.search(r"› " + re.escape(field["label"]) + r"\s", self.display)
+        ]
+        assert len(selected) == 1, ("selected field is not visible", self.display)
+        self.selected = selected[0]
         new = paths.index(path)
         self.keys(b"\t" * ((new - self.selected) % len(paths)))
+        self.driver.wait("› " + node["fields"][new]["label"])
         self.selected = new
         self.focus = (instance, path)
 
@@ -267,31 +388,57 @@ class Terminal:
     def display(self) -> str:
         return self.driver.display
 
-    def action(self, key: bytes) -> None:
-        before = None
-        if key == b"\x06":
-            assert self.instance is not None
-            before = form(self.endpoint, self.instance)[0]["revision"]
-        self.keys(key)
+    def synchronize_snapshot(self) -> None:
+        # Closing/reopening saves the ordinary draft with its original binding. A
+        # stamped palette entry proves the newer snapshot is consumed before Refresh.
+        assert self.instance is not None
+        instance = self.instance
+        path = (
+            self.focus[1] if self.focus else form(self.endpoint, instance)[1]["fields"][0]["path"]
+        )
+        self.keys(b"\x1b")
+        self.instance = None
+        self.field(instance, path)
+
+    def action(self, key: bytes, *, rejected: bool = False) -> None:
         if key == b"\x04":
+            self.keys(key)
             self.selected = 0
             self.focus = None
-        if before is not None:
-            # A refresh publishes before its reply reaches the TUI. Until that reply is
-            # processed, form_retry still rejects Apply, even if the new view is visible.
-            deadline = time.monotonic() + 20
-            while time.monotonic() < deadline:
-                self.drain(0.1)
-                assert self.instance is not None
-                current = form(self.endpoint, self.instance)[0]["revision"]
-                if (
-                    current > before
-                    and f'"value":{current}' in self.display
-                    and "Refreshed · draft retained" in self.display
-                ):
-                    return
-            raise AssertionError((self.instance, "PTY refresh reply was not rendered"))
-        self.drain()
+            return
+        if key == b"\x06":
+            self.synchronize_snapshot()
+        before = len(self.transport.receipts)
+        self.keys(key)
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            self.drain(0.1)
+            receipts = self.transport.receipts[before:]
+            if receipts:
+                assert len(receipts) == 1, receipts
+                receipt = receipts[0]
+                result = receipt["result"]
+                if not result["ok"]:
+                    self.driver.wait(result["error"]["code"])
+                    raise AssertionError(receipt)
+                value = result["result"]
+                if key == b"\x06":
+                    if "Refreshed · draft retained" in self.display and any(
+                        f'"value":{item["value"]}' in self.display for item in value
+                    ):
+                        return
+                else:
+                    marker = (
+                        f'"operation":{value["operation"]},'
+                        if isinstance(value, dict) and "operation" in value
+                        else json.dumps(value, separators=(",", ":"), sort_keys=True)[:64]
+                    )
+                    if marker in self.display:
+                        return
+            elif rejected and "Configuration changed" in self.display:
+                # A local CAS rejection has no host receipt.
+                return
+        raise AssertionError((self.instance, "PTY action receipt was not rendered", self.display))
 
     def applied(self, receipt: dict) -> None:
         # A committed configuration is not evidence that the frontend has cleared its
@@ -531,9 +678,9 @@ def exercise(
         browser.fill("Count", "8")
         browser.action(HELPER, "apply")
         await_value(endpoint, HELPER, "count", 8)
-        terminal.drain()
+        terminal.synchronize_snapshot()
         revision = call(endpoint, "/configuration/inspect", {})["revision"]
-        terminal.action(b"\x13")
+        terminal.action(b"\x13", rejected=True)
         assert call(endpoint, "/configuration/inspect", {})["revision"] == revision
         assert "Configuration changed" in terminal.display, terminal.display
         terminal.action(b"\x04")
@@ -646,6 +793,43 @@ def exercise(
         "inspection": inspection,
         "snapshot": call(endpoint, "/snapshot"),
     }
+
+
+def refresh_draft_evidence(endpoint: dict, terminal: Terminal) -> None:
+    """A newer consumed snapshot must let Refresh retain an ordinary stale draft."""
+    call(endpoint, "/configuration/open", {"instance": HELPER})
+    terminal.edit(HELPER, "/label", "retained refresh draft")
+    original = configuration(endpoint, HELPER)["effective"]["label"]
+    result = call(
+        endpoint,
+        "/action",
+        action_request(
+            endpoint,
+            HELPER,
+            "apply",
+            [
+                {"operation": "set", "path": "/label", "value": "external refresh marker"},
+            ],
+        ),
+    )
+    assert result["status"] == "applied", result
+    terminal.synchronize_snapshot()
+    terminal.action(b"\x13", rejected=True)
+    assert "Configuration changed" in terminal.display, terminal.display
+    before = call(endpoint, "/configuration/inspect", {})["revision"]
+    terminal.action(b"\x06")
+    assert "retained refresh draft" in terminal.display, terminal.display
+    assert configuration(endpoint, HELPER)["effective"]["label"] == "external refresh marker"
+    assert call(endpoint, "/configuration/inspect", {})["revision"] == before
+    terminal.action(b"\x13")
+    assert configuration(endpoint, HELPER)["effective"]["label"] == "retained refresh draft"
+    # Restore the fixture through an ordinary acknowledged edit for the remaining cases.
+    terminal.edit(HELPER, "/label", original)
+    terminal.action(b"\x13")
+    assert configuration(endpoint, HELPER)["effective"]["label"] == original
+    terminal.keys(b"\x1b")
+    terminal.instance = None
+    terminal.focus = None
 
 
 def headless(endpoint: dict, terminal: Terminal | None, reason: str) -> dict:
@@ -840,10 +1024,6 @@ def private_evidence(endpoint: dict, terminal: Terminal | None, browser: Browser
                 else:
                     assert terminal is not None
                     terminal.field(instance, path)
-                    # The headless prelude may leave this form open on an old binding.
-                    # This scenario intentionally starts with no draft: discard/reopen
-                    # before requesting refresh, which itself requires a current binding.
-                    terminal.action(b"\x04")
                     terminal.action(b"\x06")
                     terminal.edit(instance, path, public_value)
                     if token is None:
@@ -1021,10 +1201,43 @@ def private_replay(
     }
 
 
+def frontend_reason(mode: str) -> str | None:
+    if mode == "headless":
+        return "headless selected explicitly"
+    reason = (
+        "agent-browser is not installed"
+        if not shutil.which("agent-browser")
+        else "Web renderer dist is not built"
+        if not (ROOT / "web/presentation/dist/index.html").is_file()
+        else None
+    )
+    if mode == "browser" and reason is not None:
+        raise RuntimeError(f"Requested browser acceptance cannot run: {reason}")
+    return reason
+
+
+def redact_private(text: str) -> str:
+    return re.sub(r"D2_[A-Z_]*CANARY", "[private input redacted]", text)
+
+
+def write_diagnostics(output: pathlib.Path, logs: dict[str, str]) -> None:
+    # Preserve failure evidence without publishing the fixture's private material.
+    for name, text in logs.items():
+        (output / name).write_text(redact_private(text), encoding="utf-8")
+    for text in logs.values():
+        assert_private_absent(text)
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--frontend", choices=("auto", "browser", "headless"), default="auto")
+    args = parser.parse_args()
+    browser_reason = frontend_reason(args.frontend)
     prepare()
     destination = installed(ROOT / "artifacts/install-configuration-forms", controlled=True)
-    output = ROOT / "artifacts/configuration-forms"
+    output = pathlib.Path(
+        os.environ.get("EDEN_VERIFICATION_DIAGNOSTICS", str(ROOT / "artifacts/configuration-forms"))
+    ).resolve()
     output.mkdir(parents=True, exist_ok=True)
     (output / "report.json").unlink(missing_ok=True)
     summary_file = ROOT / "artifacts/configuration-forms-verification.json"
@@ -1062,15 +1275,10 @@ def main() -> None:
                 assert host.poll() is None, host.communicate()
                 time.sleep(0.05)
             endpoint = json.loads(endpoint_file.read_text(encoding="utf-8"))
-            browser_reason = (
-                "agent-browser is not installed"
-                if not shutil.which("agent-browser")
-                else "Web renderer dist is not built"
-                if not (ROOT / "web/presentation/dist/index.html").is_file()
-                else None
-            )
             browser = Browser(endpoint, output) if browser_reason is None else None
             terminal = Terminal(binary, endpoint_file, endpoint) if os.name != "nt" else None
+            if terminal:
+                refresh_draft_evidence(endpoint, terminal)
             result = (
                 exercise(endpoint, terminal, browser, output)
                 if browser
@@ -1080,6 +1288,9 @@ def main() -> None:
             (output / "report.json").write_text(
                 json.dumps(result, indent=2) + "\n", encoding="utf-8"
             )
+            if terminal:
+                terminal.driver.close()
+                terminal.transport.close()
             call(endpoint, "/shutdown", {})
             assert host.wait(timeout=15) == 0
             result["private_replay"] = private_replay(binary, scratch, composition_file)
@@ -1102,6 +1313,7 @@ def main() -> None:
             summary = {
                 "status": "passed",
                 "browser": result["browser"],
+                "requested_frontend": args.frontend,
                 "pty": result["pty"],
                 "browser_skip_reason": result.get("browser_skip_reason"),
                 "pty_skip_reason": None if terminal else "POSIX PTY unavailable on Windows",
@@ -1122,7 +1334,7 @@ def main() -> None:
                     "native-business-configuration",
                     *(["pty-repeat-apply"] if terminal else []),
                 ],
-                "detail": "configuration-forms/report.json",
+                "detail": str(output / "report.json"),
             }
             summary_file.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
             print(
@@ -1131,21 +1343,37 @@ def main() -> None:
                 + ("; real PTY" if terminal else "; PTY unavailable on Windows")
             )
         finally:
-            if browser:
-                browser.close()
-            if terminal:
-                (output / "tui.ansi").write_bytes(terminal.output)
-                terminal.driver.close()
-            if host.poll() is None:
-                host.kill()
-            stdout, stderr = host.communicate()
-            (output / "host.stdout.log").write_text(stdout, encoding="utf-8")
-            (output / "host.stderr.log").write_text(stderr, encoding="utf-8")
-            assert_private_absent(stdout)
-            assert_private_absent(stderr)
-            if terminal:
-                assert_private_absent(terminal.output.decode("utf-8", errors="replace"))
+            try:
+                if browser:
+                    browser.close()
+            finally:
+                try:
+                    if terminal:
+                        terminal.transport.snapshots.set()
+                        try:
+                            terminal.driver.close()
+                        finally:
+                            terminal.transport.close()
+                finally:
+                    if host.poll() is None:
+                        host.kill()
+                    stdout, stderr = host.communicate()
+                    logs = {"host.stdout.log": stdout, "host.stderr.log": stderr}
+                    if terminal:
+                        logs["tui.ansi"] = terminal.output.decode("utf-8", errors="replace")
+                        logs["tui-actions.json"] = json.dumps(terminal.transport.receipts, indent=2)
+                    write_diagnostics(output, logs)
+
+
+def cli() -> None:
+    try:
+        main()
+    except Exception as error:
+        # Cleanup failures can embed terminal bytes in a chained exception. Sanitize
+        # that final stderr boundary too, before the runner captures command logs.
+        print(redact_private("".join(traceback.format_exception(error))), file=sys.stderr, end="")
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":
-    main()
+    cli()

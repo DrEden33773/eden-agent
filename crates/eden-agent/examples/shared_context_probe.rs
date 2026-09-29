@@ -74,19 +74,11 @@ async fn gated(session: &Session) -> Result<()> {
     .await?;
     Ok(())
 }
-async fn model_images(
-    session: &Session,
-    blocks_path: &str,
-    address: &str,
-) -> Result<serde_json::Value> {
-    use eden_protocol::{
-        context_edit::{ImageAction, ImageEdit},
-        models::{AuthRequest, ModelSelection},
-    };
-    use std::collections::BTreeMap;
+async fn authenticate_fixture(session: &Session, provider: &str) -> Result<()> {
+    use eden_protocol::models::AuthRequest;
     let auth = session
         .wait(session.authenticate(AuthRequest::Start {
-            provider: "fixture".into(),
+            provider: provider.into(),
         })?)
         .await?;
     assert!(auth.cleanup_errors.is_empty());
@@ -105,6 +97,19 @@ async fn model_images(
         })?,
     )
     .await?;
+    Ok(())
+}
+async fn model_images(
+    session: &Session,
+    blocks_path: &str,
+    address: &str,
+) -> Result<serde_json::Value> {
+    use eden_protocol::{
+        context_edit::{ImageAction, ImageEdit},
+        models::ModelSelection,
+    };
+    use std::collections::BTreeMap;
+    authenticate_fixture(session, "fixture").await?;
     completed(
         session,
         session.select_model(ModelSelection {
@@ -269,7 +274,24 @@ async fn main() -> Result<()> {
         },
     )
     .await?;
-    let mode = args[4].as_str();
+    let requested_mode = args[4].as_str();
+    if requested_mode == "notes" {
+        authenticate_fixture(&session, "openai").await?;
+        completed(
+            &session,
+            session.select_model(eden_protocol::models::ModelSelection {
+                provider: "openai".into(),
+                model: "controlled-model".into(),
+                thinking: None,
+            })?,
+        )
+        .await?;
+    }
+    let mode = if requested_mode == "notes" {
+        "compact-rebuild"
+    } else {
+        requested_mode
+    };
     let mut report = json!({ "mode": mode });
     if mode == "model-images" {
         report["images"] = model_images(&session, &args[6], &args[5]).await?;

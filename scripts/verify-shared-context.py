@@ -193,6 +193,7 @@ def main() -> None:
                             item["config"] = {
                                 "catalog": {
                                     "offline": True,
+                                    "allowed_models": ["openai/controlled-model"],
                                     "cache_path": str(catalog),
                                     "models": [
                                         {
@@ -221,9 +222,7 @@ def main() -> None:
                                 },
                             }
                     fixture.write(config, configured)
-                report = invoke(
-                    config, history, "compact-rebuild" if mode == "notes" else mode, server
-                )
+                report = invoke(config, history, mode, server)
                 inputs = [
                     json.dumps(body.get("input", body.get("messages"))) for body in server.requests
                 ]

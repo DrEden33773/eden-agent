@@ -69,8 +69,44 @@ class Browser:
     def __init__(self, endpoint: dict, output: pathlib.Path):
         self.session = f"configuration-native-{os.getpid()}"
         self.output = output
+        self.endpoint = endpoint
         self.run("open", f"http://{endpoint['address']}/?token={endpoint['token']}")
         self.wait('document.body.innerText.includes("Connected to the shared session")')
+        # Capture only operation identity and outcome, never request values or secret material.
+        self.evaluate("""(() => {
+            const original = window.fetch;
+            window.configurationProbe = null;
+            window.fetch = async (...args) => {
+                const path = new URL(String(args[0]), location.href).pathname;
+                const probe = window.configurationProbe;
+                let matches = false;
+                if (probe && ['/action', '/private-input', '/configuration/open'].includes(path)) {
+                    const body = JSON.parse(args[1]?.body ?? '{}');
+                    const request = path === '/private-input' ? body.request : body;
+                    matches = path === '/configuration/open'
+                        ? probe.action === 'open' && request.instance === probe.instance
+                        : request.values?.binding?.instance === probe.instance
+                          && request.action?.split(':').pop() === probe.action;
+                }
+                try {
+                    const response = await original(...args);
+                    if (matches) {
+                        const reply = await response.clone().json();
+                        probe.result = {
+                            ok: reply.ok,
+                            code: reply.error?.code,
+                            status: reply.result?.status,
+                            application: reply.result?.application,
+                            validation: Array.isArray(reply.result?.errors),
+                        };
+                    }
+                    return response;
+                } catch (error) {
+                    if (matches) probe.result = {ok: false, code: 'TransportFailure'};
+                    throw error;
+                }
+            };
+        })()""")
 
     def run(self, *args: str) -> Any:
         result = subprocess.run(
@@ -99,25 +135,66 @@ class Browser:
     def fill(self, label: str, value: str) -> None:
         self.run("find", "label", label, "fill", value, "--exact")
 
-    def action(self, instance: str, action: str) -> None:
-        # Observe the real fetch completion; an absent pending label before React's
-        # first render is not evidence that the requested action has settled.
-        started = self.evaluate(
-            f"(() => {{ const form = Array.from(document.querySelectorAll('form.configuration')).find(form => form.innerText.includes('Instance {instance} ·')); const button = Array.from(form.querySelectorAll('button')).find(button => button.textContent === {json.dumps(action)}); if (button.disabled) return null; performance.clearResourceTimings(); const started = performance.now(); button.click(); return started; }})()"
+    def begin_operation(self, instance: str, action: str) -> None:
+        self.evaluate(
+            f"window.configurationProbe = {{instance: {json.dumps(instance)}, action: {json.dumps(action)}, result: null}}"
         )
-        if started is not None and action in {
-            "validate",
-            "preview",
-            "apply",
-            "refresh",
-            "cancel_apply",
-        }:
-            self.wait(
-                f"performance.getEntriesByType('resource').some(entry => entry.startTime >= {started} && ['/action', '/private-input'].includes(new URL(entry.name).pathname))"
-            )
+
+    def await_operation(self, instance: str, action: str) -> dict:
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            result = self.evaluate("window.configurationProbe.result")
+            if result is not None:
+                assert result.get("ok"), (instance, action, result)
+                return result
+            time.sleep(0.1)
+        raise AssertionError((instance, action, "matching operation did not complete"))
+
+    def current_binding(self, instance: str) -> None:
+        # Server completion precedes the polling adapter's React render.
+        _, node = form(self.endpoint, instance)
+        binding = node["binding"]
+        label = (
+            f"Instance {instance} · configuration revision {binding['revision']} · "
+            f"generation {binding['generation'] if binding['generation'] is not None else 'not running'}"
+        )
+        self.wait(
+            f"Array.from(document.querySelectorAll('form.configuration > p')).some(node => node.textContent === {json.dumps(label)})"
+        )
+
+    def open_settings(self, instance: str) -> None:
+        self.fill("Configuration instance", instance)
+        self.begin_operation(instance, "open")
+        self.run("find", "role", "button", "click", "--name", "Open settings", "--exact")
+        self.await_operation(instance, "open")
+        self.current_binding(instance)
+
+    def action(self, instance: str, action: str, *, expected_status: str = "applied") -> None:
+        server_action = action in {"validate", "preview", "apply", "refresh", "cancel_apply"}
+        if server_action:
+            self.begin_operation(instance, action)
+        clicked = self.evaluate(
+            f"(() => {{ const form = Array.from(document.querySelectorAll('form.configuration')).find(form => form.innerText.includes('Instance {instance} ·')); const button = Array.from(form.querySelectorAll('button')).find(button => button.textContent === {json.dumps(action)}); if (button.disabled) return false; button.click(); return true; }})()"
+        )
+        if server_action:
+            assert clicked, (instance, action, "server action is disabled")
+            result = self.await_operation(instance, action)
+            if action in {"apply", "cancel_apply"}:
+                assert result.get("status") == expected_status, (instance, action, result)
+            elif action == "validate":
+                assert result.get("validation"), (instance, action, result)
+            elif action == "preview":
+                assert result.get("application") or result.get("validation"), (
+                    instance,
+                    action,
+                    result,
+                )
         self.wait('!document.body.innerText.includes("Configuration request pending…")')
+        if server_action and action in {"apply", "refresh", "cancel_apply"}:
+            self.current_binding(instance)
 
     def fill_field(self, instance: str, path: str, value: str) -> None:
+        self.current_binding(instance)
         self.evaluate(
             f"Array.from(document.querySelectorAll('form.configuration')).find(form => form.innerText.includes('Instance {instance} ·')).querySelectorAll('fieldset') && Array.from(Array.from(document.querySelectorAll('form.configuration')).find(form => form.innerText.includes('Instance {instance} ·')).querySelectorAll('fieldset')).find(field => field.querySelector('legend').textContent.includes('({path})')).querySelector('input').setAttribute('data-budget-probe', 'selected')"
         )
@@ -331,13 +408,11 @@ def composition() -> dict:
 def exercise(
     endpoint: dict, terminal: Terminal | None, browser: Browser, output: pathlib.Path
 ) -> dict:
-    browser.fill("Configuration instance", HELPER)
-    browser.run("find", "role", "button", "click", "--name", "Open settings", "--exact")
+    browser.open_settings(HELPER)
     if terminal:
         terminal.driver.command(f"/config {CUSTOM}")
     else:
-        browser.fill("Configuration instance", CUSTOM)
-        browser.run("find", "role", "button", "click", "--name", "Open settings", "--exact")
+        browser.open_settings(CUSTOM)
     browser.wait('document.body.innerText.includes("Direct author settings")')
     assert configuration(endpoint, HELPER)["generation"] is not None
     assert configuration(endpoint, CUSTOM)["generation"] is not None
@@ -516,9 +591,7 @@ def exercise(
         ("note-style-context-management", [256, 384, 512, 640]),
         ("cache-warmer", [2, 3, 4, 5]),
     ]:
-        browser.fill("Configuration instance", instance)
-        browser.run("find", "role", "button", "click", "--name", "Open settings", "--exact")
-        browser.wait(f"document.body.innerText.includes('Instance {instance} ·')")
+        browser.open_settings(instance)
         for budget in budgets[:2]:
             browser.fill_field(instance, "/max_output_tokens", str(budget))
             browser.action(instance, "validate")

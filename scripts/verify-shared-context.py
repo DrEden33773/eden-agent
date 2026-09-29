@@ -101,6 +101,42 @@ def main() -> None:
             def respond(
                 body: dict[str, Any], index: int, mode: str = mode
             ) -> tuple[int, dict[str, Any]]:
+                if mode == "notes":
+                    tool = index == 0
+                    if tool:
+                        delta = {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "effect",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "bash",
+                                        "arguments": json.dumps(
+                                            {"command": "printf x >> execution-count.txt"}
+                                        ),
+                                    },
+                                }
+                            ]
+                        }
+                    elif not body.get("tools"):
+                        serialized = json.dumps(body["messages"])
+                        assert (
+                            "EDITED-CONTEXT" in serialized and "ORIGINAL-CONTEXT" not in serialized
+                        )
+                        delta = {"content": "EDITED-SUMMARY"}
+                    else:
+                        delta = {"content": "source response " + "retained information " * 400}
+                    return 200, {
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": delta,
+                                "finish_reason": "tool_calls" if tool else "stop",
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                    }
                 if mode == "next-request" and index == 1:
                     return 503, {"error": {"code": "server_error"}}
                 if (mode == "in-flight" and index == 1) or (
@@ -146,10 +182,47 @@ def main() -> None:
                 config = fixture.configure(
                     destination, selected_composition, server, mode, keep_recent=1
                 )
+                if mode == "notes":
+                    configured = json.loads(config.read_text(encoding="utf-8"))
+                    catalog = scratch / "notes-catalog.json"
+                    fixture.write(
+                        catalog, {"default": {"provider": "openai", "model": "controlled-model"}}
+                    )
+                    for item in configured["packages"]:
+                        if item["descriptor"]["package"] == "model-access":
+                            item["config"] = {
+                                "catalog": {
+                                    "offline": True,
+                                    "cache_path": str(catalog),
+                                    "models": [
+                                        {
+                                            "provider": "openai",
+                                            "model": "controlled-model",
+                                            "api": "openai-completions",
+                                            "base_url": f"http://{server.address}",
+                                            "limits": {
+                                                "context_window": 1048576,
+                                                "max_output_tokens": 393216,
+                                            },
+                                            "capabilities": {"tools": True, "images": True},
+                                            "source": {
+                                                "kind": "fixture",
+                                                "location": "controlled notes target",
+                                            },
+                                        }
+                                    ],
+                                },
+                                "credentials": {
+                                    "providers": {"openai": {"env": "EDEN_CONTEXT_KEY"}}
+                                },
+                            }
+                    fixture.write(config, configured)
                 report = invoke(
                     config, history, "compact-rebuild" if mode == "notes" else mode, server
                 )
-                inputs = [json.dumps(body["input"]) for body in server.requests]
+                inputs = [
+                    json.dumps(body.get("input", body.get("messages"))) for body in server.requests
+                ]
                 assert "ORIGINAL-CONTEXT" in inputs[0]
                 if mode == "persistent":
                     assert "EDITED-CONTEXT" in inputs[1] and "ORIGINAL-CONTEXT" not in inputs[1]

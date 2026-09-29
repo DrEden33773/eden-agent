@@ -187,9 +187,12 @@ def exercise(binary: Path, composition: Path, scratch: Path) -> dict:
     terminal: Terminal | None = None
     endpoint: dict = {}
     try:
-        config = fixture.configure(
-            scratch, json.loads(composition.read_text(encoding="utf-8")), server, "tui-controlled"
-        )
+        configured = json.loads(composition.read_text(encoding="utf-8"))
+        for item in configured["packages"]:
+            native = Path(item["library"])
+            if not native.is_absolute():
+                item["library"] = str((composition.resolve().parent / native).resolve())
+        config = fixture.configure(scratch, configured, server, "tui-controlled")
         endpoint_file = scratch / "host.json"
         session_file = scratch / "target.jsonl"
         host = subprocess.Popen(
@@ -317,6 +320,7 @@ def exercise(binary: Path, composition: Path, scratch: Path) -> dict:
         assert gate.run_id is not None
         gate.release.set()
         terminal.wait("Operation completed")
+        terminal.wait("result refreshed")
         rebuilt = wait_record(endpoint, "context_rebuild")
         assert len(server.requests) == before_rebuild_requests, "rebuild called a model"
         assert session_file.read_bytes().startswith(original_bytes), (
@@ -361,13 +365,13 @@ def exercise(binary: Path, composition: Path, scratch: Path) -> dict:
         assert any(block.get("data") == image for block in frozen["content"])
         source_records = fixture.records(source)
         grown = {
-            "schema_version": 1,
+            "schema_version": 2,
             "session_id": source_records[0]["session_id"],
             "sequence": max(r["sequence"] for r in source_records) + 1,
             "parent_id": frozen["source"]["head"],
             "branch": frozen["source"]["branch"],
             "run_id": 0,
-            "kind": "user_message",
+            "kind": "message",
             "payload": {
                 "type": "message",
                 "role": "user",
@@ -375,7 +379,9 @@ def exercise(binary: Path, composition: Path, scratch: Path) -> dict:
             },
         }
         with source.open("ab") as output:
-            output.write((json.dumps(grown) + "\n").encode())
+            output.write(
+                (json.dumps({"schema_version": 2, "transaction": [grown]}) + "\n").encode()
+            )
         assert source.read_bytes().startswith(initial_source)
         assert "SOURCE-GREW-LATER" in json.dumps(
             call(endpoint, "/reference/preview", {"path": str(source)})

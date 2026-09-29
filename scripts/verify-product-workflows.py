@@ -26,6 +26,28 @@ def load(name: str, filename: str):
     return module
 
 
+WINDOWS_EXIT_BARRIER = """
+$ErrorActionPreference = 'Stop'
+Get-Process | Where-Object { $_.Path -eq $env:EDEN_VERIFICATION_BINARY } | ForEach-Object {
+    if (-not $_.WaitForExit(15000)) { throw 'Installed host did not exit' }
+}
+"""
+
+
+def wait_installed_exit(binary: Path) -> None:
+    """Wait for this isolated Windows image after all host shutdowns were requested."""
+    # Endpoint removal precedes runtime/process exit. Waiting for its disappearance
+    # alone can still leave Windows holding the executable's image mapping.
+    subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", WINDOWS_EXIT_BARRIER],
+        env={**os.environ, "EDEN_VERIFICATION_BINARY": str(binary.resolve())},
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+
 def main() -> None:
     prepare()
     live = load("workflow_live", "verify-tui.py")
@@ -339,7 +361,11 @@ def main() -> None:
                     while child_endpoint.exists() and time.monotonic() < deadline:
                         time.sleep(0.02)
                     assert not child_endpoint.exists(), "switched host did not finish shutdown"
-            server.close()
+            try:
+                if os.name == "nt":
+                    wait_installed_exit(binary)
+            finally:
+                server.close()
     destination = ROOT / "artifacts/product-workflows-verification.json"
     destination.write_text(json.dumps(results, indent=2) + "\n")
     print(json.dumps(results))

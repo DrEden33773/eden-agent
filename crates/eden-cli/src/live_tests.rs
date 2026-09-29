@@ -6,7 +6,7 @@ use eden_protocol::{AGENT_LOOP, CONTEXT, Composition, PROVIDER, RunInput, TOOL};
 use eden_tui_client::{HostClient, RequestStatus};
 use std::collections::BTreeMap;
 
-async fn session() -> Session {
+pub(super) async fn session() -> Session {
     session_with_preview_barrier(None).await
 }
 async fn session_with_preview_barrier(

@@ -27,26 +27,28 @@ pub(super) async fn management_read(
     match route {
         "/manage/sessions/start" => {
             let attachment = field::<u64>(body, "attachment")?;
-            shared.session.presentation_heartbeat(attachment)?;
             let directory = body["directory"]
                 .as_str()
                 .filter(|s| !s.is_empty())
                 .map(|path| Path::new(shared.session.cwd()).join(path))
                 .unwrap_or_else(|| Path::new(shared.session.cwd()).join(".eden/sessions"));
             let id = token()?;
-            let scan = Session::scan_saved_sessions(directory);
-            shared
+            let mut scans = shared
                 .management
                 .scans
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(
-                    id.clone(),
-                    DirectoryReader {
-                        attachment,
-                        reader: Arc::new(tokio::sync::Mutex::new(scan)),
-                    },
-                );
+                .unwrap_or_else(|e| e.into_inner());
+            // Admission and publication share the cleanup map lock: detach cannot miss
+            // a reader admitted immediately before its lease ends.
+            shared.session.presentation_heartbeat(attachment)?;
+            let scan = Session::scan_saved_sessions(directory);
+            scans.insert(
+                id.clone(),
+                DirectoryReader {
+                    attachment,
+                    reader: Arc::new(tokio::sync::Mutex::new(scan)),
+                },
+            );
             Ok(json!({ "scan_id": id }))
         }
         "/manage/sessions/poll" => {
@@ -69,6 +71,9 @@ pub(super) async fn management_read(
                 entries.push(entry?);
             }
             let done = scan.finished();
+            if done {
+                scan.cancel_and_wait().await;
+            }
             drop(scan);
             if done {
                 shared
@@ -82,14 +87,21 @@ pub(super) async fn management_read(
         }
         "/manage/sessions/cancel" => {
             let id = field::<String>(body, "scan_id")?;
-            let scan = shared
+            let reader = shared
                 .management
                 .scans
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .remove(&id);
-            if let Some(entry) = scan {
-                entry.reader.lock().await.cancel_and_wait().await;
+                .get(&id)
+                .map(|entry| entry.reader.clone());
+            if let Some(reader) = reader {
+                reader.lock().await.cancel_and_wait().await;
+                shared
+                    .management
+                    .scans
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&id);
             }
             Ok(json!({ "cancelled": true }))
         }
@@ -216,24 +228,94 @@ pub(super) async fn management_submit(
 }
 
 pub(super) async fn detach_scans(shared: &Shared, attachment: u64) {
-    let readers = {
-        let mut scans = shared
+    let readers = shared
+        .management
+        .scans
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|(_, entry)| entry.attachment == attachment)
+        .map(|(id, entry)| (id.clone(), entry.reader.clone()))
+        .collect::<Vec<_>>();
+    for (id, reader) in readers {
+        // Keep the shared barrier discoverable until it has joined the producer.
+        // Concurrent cancel, expiry and explicit detach wait on this same reader.
+        reader.lock().await.cancel_and_wait().await;
+        shared
             .management
             .scans
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let mut readers = vec![];
-        scans.retain(|_, entry| {
-            if entry.attachment == attachment {
-                readers.push(entry.reader.clone());
-                false
-            } else {
-                true
-            }
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn concurrent_owner_cleanup_waits_for_the_same_scan_worker() {
+        let session = super::super::tests::session().await;
+        let (stop, _) = watch::channel(false);
+        let shared = Arc::new(Shared {
+            management: Default::default(),
+            session: session.clone(),
+            token: "fixture".into(),
+            web_root: None,
+            submissions: Mutex::new((HashMap::new(), VecDeque::new())),
+            history: tokio::sync::Mutex::new(None),
+            stop,
         });
-        readers
-    };
-    for reader in readers {
-        reader.lock().await.cancel_and_wait().await;
+        let attachment = session.attach_presentation("tui").unwrap();
+        let directory =
+            std::env::temp_dir().join(format!("eden-scan-barrier-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        for index in 0..40 {
+            std::fs::write(directory.join(format!("{index}.jsonl")), b"{bad").unwrap();
+        }
+        let scan = management_read(
+            &shared,
+            "/manage/sessions/start",
+            &json!({ "attachment": attachment, "directory": directory }),
+        )
+        .await
+        .unwrap();
+        let id = scan["scan_id"].as_str().unwrap();
+        let reader = shared
+            .management
+            .scans
+            .lock()
+            .unwrap()
+            .get(id)
+            .unwrap()
+            .reader
+            .clone();
+        let held = reader.lock().await;
+        let mut observer = Box::pin(detach_scans(&shared, attachment));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(observer.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        let mut explicit = Box::pin(dispatch(
+            &shared,
+            "POST",
+            "/detach",
+            json!({ "attachment": attachment }),
+        ));
+        let early = tokio::time::timeout(Duration::from_millis(20), &mut explicit).await;
+        let acknowledged_early = early.is_ok();
+        drop(held);
+        observer.await;
+        match early {
+            Ok(result) => result.unwrap(),
+            Err(_) => explicit.await.unwrap(),
+        };
+        session.shutdown().await.unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+        assert!(
+            !acknowledged_early,
+            "detach bypassed an already-closing scan"
+        );
     }
 }

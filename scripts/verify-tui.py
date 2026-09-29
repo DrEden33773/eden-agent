@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Installed official terminal, saved-history and independent UI-author acceptance.
 
-The default uses the shared frozen installation and SDK-author preparation. Explicit
---binary/--composition/--author paths exercise existing bytes without reinstalling.
+The default uses the shared frozen installation and SDK-author preparation, and runs
+both independent UI authors through the same assertions. Explicit
+--binary/--composition/--author paths exercise existing bytes without reinstalling;
+add --macro-author there to include the second author, otherwise that parity pass is
+skipped and reported as not exercised.
 No model/provider request or system clipboard read is made.
 """
 
@@ -69,11 +72,94 @@ def write_receipt(result: dict, destination: Path | None) -> None:
     print(json.dumps(result))
 
 
+def independent_roles(binary, endpoint, endpoint_file, env, author):
+    """Installed acceptance of one independent author library across all five roles.
+
+    The hand-written fixture and the macro-authored one are run through this same
+    function, so identical assertions passing for both is the parity evidence.
+    """
+    terminal = Terminal(binary, endpoint_file, env={**env, "EDEN_TUI_EDITOR": str(author)})
+    try:
+        terminal.wait("Connected")
+        terminal.send(b"author-input-marker")
+        assert "author-input-marker" not in terminal.display and "\u203a A" in terminal.display, (
+            terminal.display
+        )
+        terminal.send(b"\x03")
+        terminal.command("/shell printf AUTHOR_EDITOR_INPUT")
+        wait_for(
+            endpoint,
+            lambda frame: any(
+                record["kind"] == "user_shell" and "AUTHOR_EDITOR_INPUT" in json.dumps(record)
+                for record in frame["history"]
+            ),
+        )
+        deadline = time.monotonic() + 8
+        while terminal.display.count("\u2713 bash \u00b7 user command") < 2:
+            terminal.read(0.1)
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    f"Second durable shell card did not render:\n{terminal.display}"
+                )
+        terminal.send(b"\x1b[17~\x1b[B\x0f\x1b[17~")
+        terminal.wait("AUTHOR_EDITOR_INPUT")
+    finally:
+        terminal.close()
+    terminal = Terminal(
+        binary,
+        endpoint_file,
+        env={**env, "EDEN_TUI_RENDERER": str(author)},
+    )
+    try:
+        terminal.wait("AUTHOR RENDERER")
+    finally:
+        terminal.close()
+    terminal = Terminal(
+        binary,
+        endpoint_file,
+        env={
+            **env,
+            "EDEN_TUI_OVERLAY": str(author),
+            "EDEN_TUI_THEME": str(author),
+            "EDEN_TUI_RENDERER": str(author),
+            "EDEN_TUI_EDITOR": str(author),
+        },
+    )
+    try:
+        terminal.wait("AUTHOR RENDERER")
+        terminal.send(b"/models\r")
+        terminal.wait("AUTHOR OVERLAY")
+        terminal.send(b"\x1b[20~")
+        deadline = time.monotonic() + 5
+        while "AUTHOR OVERLAY" in terminal.display:
+            terminal.read(0.05)
+            assert time.monotonic() < deadline, "overlay F9 did not close the modal"
+        assert b"38;2;18;171;52" in terminal.output
+    finally:
+        terminal.close()
+    terminal = Terminal(binary, endpoint_file, env={**env, "EDEN_TUI_THEME": str(author)})
+    try:
+        terminal.wait("Connected")
+        assert b"38;2;18;171;52" in terminal.output, "independent theme accent not emitted"
+    finally:
+        terminal.close()
+    terminal = Terminal(binary, endpoint_file, env={**env, "EDEN_TUI_FRONTEND": str(author)})
+    try:
+        terminal.wait("AUTHOR FRONTEND session")
+    finally:
+        terminal.close(screen=False)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path)
     parser.add_argument("--composition", type=Path)
     parser.add_argument("--author", type=Path)
+    parser.add_argument(
+        "--macro-author",
+        type=Path,
+        help="second independent author library for the parity pass; required to include it in --binary runs",
+    )
     parser.add_argument("--editor", type=Path)
     args = parser.parse_args()
     receipt = None if args.binary else ROOT / "artifacts/tui-verification.json"
@@ -90,6 +176,7 @@ def main():
             receipt,
         )
         return
+    macro_author = args.macro_author.resolve() if args.macro_author else None
     if args.binary:
         if not args.author or not args.composition:
             parser.error("--binary requires --composition and --author")
@@ -98,6 +185,11 @@ def main():
             args.composition.resolve(),
             args.author.resolve(),
         )
+        if macro_author is None:
+            print(
+                "No --macro-author given; the macro-author parity pass is not exercised",
+                file=sys.stderr,
+            )
     else:
         prepare()
         destination = installed(ROOT / "artifacts/install-tui")
@@ -106,6 +198,7 @@ def main():
             destination / "composition.json",
             author_artifact("tui-editor"),
         )
+        macro_author = macro_author or author_artifact("ui-macro")
     env = {"EDEN_TUI_EDITOR": str(args.editor.resolve())} if args.editor else {}
     with tempfile.TemporaryDirectory(prefix="eden-official-tui-") as directory:
         scratch = Path(directory)
@@ -186,79 +279,12 @@ def main():
             finally:
                 terminal.close()
             assert host.poll() is None, "detach stopped the shared host"
-            terminal = Terminal(binary, endpoint_file, env={**env, "EDEN_TUI_EDITOR": str(author)})
-            try:
-                terminal.wait("Connected")
-                terminal.send(b"author-input-marker")
-                assert (
-                    "author-input-marker" not in terminal.display and "› A" in terminal.display
-                ), terminal.display
-                terminal.send(b"\x03")
-                terminal.command("/shell printf AUTHOR_EDITOR_INPUT")
-                wait_for(
-                    endpoint,
-                    lambda frame: any(
-                        record["kind"] == "user_shell"
-                        and "AUTHOR_EDITOR_INPUT" in json.dumps(record)
-                        for record in frame["history"]
-                    ),
-                )
-                deadline = time.monotonic() + 8
-                while terminal.display.count("✓ bash · user command") < 2:
-                    terminal.read(0.1)
-                    if time.monotonic() >= deadline:
-                        raise AssertionError(
-                            f"Second durable shell card did not render:\n{terminal.display}"
-                        )
-                terminal.send(b"\x1b[17~\x1b[B\x0f\x1b[17~")
-                terminal.wait("AUTHOR_EDITOR_INPUT")
-            finally:
-                terminal.close()
-            terminal = Terminal(
-                binary,
-                endpoint_file,
-                env={**env, "EDEN_TUI_RENDERER": str(author)},
-            )
-            try:
-                terminal.wait("AUTHOR RENDERER")
-            finally:
-                terminal.close()
-            terminal = Terminal(
-                binary,
-                endpoint_file,
-                env={
-                    **env,
-                    "EDEN_TUI_OVERLAY": str(author),
-                    "EDEN_TUI_THEME": str(author),
-                    "EDEN_TUI_RENDERER": str(author),
-                    "EDEN_TUI_EDITOR": str(author),
-                },
-            )
-            try:
-                terminal.wait("AUTHOR RENDERER")
-                terminal.send(b"/models\r")
-                terminal.wait("AUTHOR OVERLAY")
-                terminal.send(b"\x1b[20~")
-                deadline = time.monotonic() + 5
-                while "AUTHOR OVERLAY" in terminal.display:
-                    terminal.read(0.05)
-                    assert time.monotonic() < deadline, "overlay F9 did not close the modal"
-                assert b"38;2;18;171;52" in terminal.output
-            finally:
-                terminal.close()
-            terminal = Terminal(binary, endpoint_file, env={**env, "EDEN_TUI_THEME": str(author)})
-            try:
-                terminal.wait("Connected")
-                assert b"38;2;18;171;52" in terminal.output, "independent theme accent not emitted"
-            finally:
-                terminal.close()
-            terminal = Terminal(
-                binary, endpoint_file, env={**env, "EDEN_TUI_FRONTEND": str(author)}
-            )
-            try:
-                terminal.wait("AUTHOR FRONTEND session")
-            finally:
-                terminal.close(screen=False)
+            # Both independent UI authors answer the same installed assertions: the
+            # hand-written fixture stays the ABI reference, the macro library is the
+            # `export_ui!` output. A difference in either direction fails here.
+            independent_roles(binary, endpoint, endpoint_file, env, author)
+            if macro_author is not None:
+                independent_roles(binary, endpoint, endpoint_file, env, macro_author)
         finally:
             stop(host, endpoint)
         reader_endpoint = scratch / "read.json"
@@ -323,6 +349,8 @@ def main():
             "independent_theme": True,
             "independent_frontend": True,
             "independent_overlay": True,
+            "macro_author_roles": macro_author is not None,
+            "author_parity": macro_author is not None,
             "combined_overlay_renderer_theme": True,
             "external_editor_success_and_failure": True,
             "suspend_resume_modes": True,

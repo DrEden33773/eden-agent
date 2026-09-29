@@ -336,7 +336,15 @@ fn drive(
                     app.paste(&text);
                     dirty = true
                 }
-                Event::Mouse(mouse) => dirty |= input::mouse(app, &geometry, mouse, &mut pointer),
+                Event::Mouse(mouse) => {
+                    if matches!(
+                        mouse.kind,
+                        event::MouseEventKind::Down(_) | event::MouseEventKind::Drag(_)
+                    ) {
+                        app.clipboard_generation += 1;
+                    }
+                    dirty |= input::mouse(app, &geometry, mouse, &mut pointer);
+                }
                 Event::Resize(..) => {
                     terminal.clear()?;
                     dirty = true

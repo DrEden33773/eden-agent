@@ -35,13 +35,34 @@ pub enum Update {
         before: Attachment,
         result: std::result::Result<Attachment, String>,
     },
-    Clipboard(std::result::Result<crate::clipboard::ClipboardContent, String>),
+    Clipboard(
+        ClipboardRequest,
+        std::result::Result<crate::clipboard::ClipboardContent, String>,
+    ),
     Copied(std::result::Result<crate::clipboard::CopyOutcome, String>),
     Connection(String),
     Reply {
         route: String,
         body: Value,
         result: std::result::Result<Value, Fault>,
+    },
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClipboardRequest {
+    generation: u64,
+    target: PasteTarget,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PasteTarget {
+    Composer(u64),
+    Field {
+        owner: String,
+        view: String,
+        node: String,
+        path: String,
+        binding: Option<eden_protocol::configuration_form::Binding>,
+        kind: String,
+        private: bool,
     },
 }
 pub struct App {
@@ -95,6 +116,7 @@ pub struct App {
     pub suspend: bool,
     pub copied: Option<String>,
     pub clipboard_read: bool,
+    pub clipboard_generation: u64,
     pub clipboard_escape: Option<String>,
     pub snapshot: Snapshot,
     pub lease: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
@@ -212,6 +234,7 @@ impl App {
             suspend: false,
             copied: None,
             clipboard_read: false,
+            clipboard_generation: 0,
             clipboard_escape: None,
             snapshot,
             lease: None,
@@ -316,13 +339,47 @@ impl App {
             Phase::Idle
         };
     }
+    fn clipboard_request(&self) -> Option<ClipboardRequest> {
+        let target = match &self.dialog {
+            None if self.focus == Focus::Editor => {
+                PasteTarget::Composer(self.snapshot.presentation.session_id)
+            }
+            Some(Dialog::Form {
+                fields, selected, ..
+            }) => {
+                let field = fields.get(*selected)?;
+                if field.readonly {
+                    return None;
+                }
+                let target = self.form_target.as_ref()?;
+                PasteTarget::Field {
+                    owner: target.owner.clone(),
+                    view: target.view.clone(),
+                    node: target.node.clone(),
+                    path: field.key.clone(),
+                    binding: target.binding.clone(),
+                    kind: field.kind.clone(),
+                    private: field.private,
+                }
+            }
+            _ => return None,
+        };
+        Some(ClipboardRequest {
+            generation: self.clipboard_generation,
+            target,
+        })
+    }
     pub fn clipboard_worker(&mut self) {
         if self.clipboard_read {
             self.clipboard_read = false;
-            let tx = self.tx.clone();
-            self.runtime.spawn_blocking(move || {
-                let _ = tx.send(Update::Clipboard(crate::clipboard::read()));
-            });
+            if let Some(request) = self.clipboard_request() {
+                let tx = self.tx.clone();
+                self.runtime.spawn_blocking(move || {
+                    let _ = tx.send(Update::Clipboard(request, crate::clipboard::read()));
+                });
+            } else {
+                self.notice = "Focus the composer or an editable field before pasting".into();
+            }
         }
         if let Some(text) = self.copied.take() {
             let tx = self.tx.clone();
@@ -562,27 +619,34 @@ impl App {
                     self.connection = "Connected".into();
                     self.apply_messages(messages);
                 }
-                Update::Clipboard(result) => match result {
-                    Ok(crate::clipboard::ClipboardContent::Text(text)) => self.paste(&text),
-                    Ok(crate::clipboard::ClipboardContent::Image { media_type, bytes }) => {
-                        if self.dialog.is_none() {
-                            self.attachments.push(Attachment {
-                                name: format!(
-                                    "clipboard.{}",
-                                    media_type.split('/').nth(1).unwrap_or("png")
-                                ),
-                                source: String::new(),
-                                bytes: bytes.into(),
-                                media_type: Some(media_type),
-                                image: true,
-                            });
-                            self.changed();
-                        } else {
-                            self.notice = "Image paste belongs in the composer".into();
-                        }
+                Update::Clipboard(request, result) => {
+                    if self.clipboard_request().as_ref() != Some(&request) {
+                        self.notice =
+                            "Paste target changed · clipboard content was not inserted".into();
+                        continue;
                     }
-                    Err(error) => self.notice = error,
-                },
+                    match result {
+                        Ok(crate::clipboard::ClipboardContent::Text(text)) => self.paste(&text),
+                        Ok(crate::clipboard::ClipboardContent::Image { media_type, bytes }) => {
+                            if self.dialog.is_none() {
+                                self.attachments.push(Attachment {
+                                    name: format!(
+                                        "clipboard.{}",
+                                        media_type.split('/').nth(1).unwrap_or("png")
+                                    ),
+                                    source: String::new(),
+                                    bytes: bytes.into(),
+                                    media_type: Some(media_type),
+                                    image: true,
+                                });
+                                self.changed();
+                            } else {
+                                self.notice = "Image paste belongs in the composer".into();
+                            }
+                        }
+                        Err(error) => self.notice = error,
+                    }
+                }
                 Update::Copied(result) => match result {
                     Ok(crate::clipboard::CopyOutcome::System) => {
                         self.notice = "Copied to system clipboard".into()
@@ -593,6 +657,7 @@ impl App {
                     Err(error) => self.notice = error,
                 },
                 Update::Connection(error) => {
+                    self.clipboard_generation += 1;
                     self.connection = error;
                     if let Some(Dialog::Form { fields, .. }) = &mut self.dialog {
                         for field in fields.iter_mut().filter(|f| f.private) {
@@ -841,6 +906,7 @@ impl App {
         }
     }
     pub fn open(&mut self, kind: &str) {
+        self.clipboard_generation += 1;
         self.end_activity();
         self.autocomplete.dismiss();
         self.dialog_scroll = 0;
@@ -1319,6 +1385,7 @@ impl App {
         }
     }
     pub fn paste(&mut self, text: &str) {
+        self.clipboard_generation += 1;
         if let Some(Dialog::Form {
             fields, selected, ..
         }) = &mut self.dialog
@@ -1355,6 +1422,7 @@ impl App {
         }
     }
     pub fn dialog_key(&mut self, key: KeyEvent) {
+        self.clipboard_generation += 1;
         if key.code == KeyCode::Esc {
             if let Some(mut dialog) = self.dialog.take()
                 && let Dialog::Form { fields, .. } = &mut dialog
@@ -1636,6 +1704,7 @@ impl App {
         self.changed();
     }
     fn open_live(&mut self, id: &str) {
+        self.clipboard_generation += 1;
         self.end_activity();
         let parts: Vec<_> = id.split('|').collect();
         if parts.len() != 3 {
@@ -1852,6 +1921,9 @@ impl App {
 
 impl App {
     pub fn key(&mut self, key: KeyEvent) {
+        if key.kind != KeyEventKind::Release {
+            self.clipboard_generation += 1;
+        }
         if !matches!(key.code, KeyCode::Up | KeyCode::Down) {
             self.history_position = None;
         }
@@ -2535,12 +2607,13 @@ mod repair_tests {
     async fn encoded_clipboard_image_keeps_its_mime_at_submission() {
         let mut app = app();
         app.tx
-            .send(Update::Clipboard(Ok(
-                crate::clipboard::ClipboardContent::Image {
+            .send(Update::Clipboard(
+                app.clipboard_request().unwrap(),
+                Ok(crate::clipboard::ClipboardContent::Image {
                     media_type: "image/tiff".into(),
                     bytes: vec![0, 255, 1],
-                },
-            )))
+                }),
+            ))
             .unwrap();
         app.tick();
         assert!(
@@ -2780,5 +2853,47 @@ fn acknowledge_edits(fields: &mut [Field], request: &Value) {
             field.clear = false;
             field.inherit = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod clipboard_focus_tests {
+    use super::*;
+    #[tokio::test]
+    async fn late_private_field_paste_never_becomes_a_saved_composer_draft() {
+        let mut app = super::tests::app();
+        let mut field = Field::text("Private", "");
+        field.private = true;
+        field.key = "/token".into();
+        app.dialog = Some(Dialog::Form {
+            title: "Private".into(),
+            fields: vec![field],
+            selected: 0,
+            status: String::new(),
+        });
+        app.form_target = Some(crate::forms::Target {
+            owner: "config".into(),
+            view: "settings".into(),
+            revision: 1,
+            node: "fields".into(),
+            action: "apply".into(),
+            binding: None,
+        });
+        app.tx
+            .send(Update::Clipboard(
+                app.clipboard_request().unwrap(),
+                Ok(crate::clipboard::ClipboardContent::Text(
+                    "PRIVATE_CLIPBOARD_CANARY".into(),
+                )),
+            ))
+            .unwrap();
+        app.dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.tick();
+        assert!(app.draft().text.is_empty());
+        assert!(
+            !serde_json::to_string(&app.draft())
+                .unwrap()
+                .contains("PRIVATE_CLIPBOARD_CANARY")
+        );
     }
 }

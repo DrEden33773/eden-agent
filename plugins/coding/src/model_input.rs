@@ -69,6 +69,17 @@ pub(crate) fn prepare(
     settings: &Settings,
     choices: &Choices,
 ) -> Result<PreparedImages, Fault> {
+    prepare_new(document, target, history, run_id, settings, choices, None)
+}
+fn prepare_new(
+    document: &e::Document,
+    target: &Option<ModelTarget>,
+    history: &[Record],
+    run_id: u64,
+    settings: &Settings,
+    choices: &Choices,
+    new_entry: Option<&str>,
+) -> Result<PreparedImages, Fault> {
     // The legacy Responses route predates model catalogs and already accepts image blocks.
     // Keep that route usable; a known catalog target still owns its explicit capabilities.
     if target.is_none() && settings.image_limits.max_body_bytes.is_some() {
@@ -124,7 +135,10 @@ pub(crate) fn prepare(
                 Some(version) => version.image.clone(),
                 None => ImageRecord::new(block.clone()).map_err(fault)?,
             };
-            if prior.is_none() && !is_new_entry(&entry.id, &path, run_id) {
+            if prior.is_none()
+                && new_entry != Some(entry.id.as_str())
+                && !is_new_entry(&entry.id, &path, run_id)
+            {
                 // Legacy history already represents sent bytes; target identity is unknown.
                 let mut historical = ModelTarget::default();
                 historical.capabilities.images = true;
@@ -247,6 +261,35 @@ fn fault(error: InputError) -> Fault {
     Fault::new(code, "model-input", error.to_string())
 }
 
+pub(crate) enum Preparation {
+    Request,
+    Operation,
+    Draft(String),
+}
+fn process(
+    document: &e::Document,
+    target: &Option<ModelTarget>,
+    history: &[Record],
+    run_id: u64,
+    settings: &Settings,
+    choices: &Choices,
+    mode: &Preparation,
+) -> Result<PreparedImages, Fault> {
+    match mode {
+        Preparation::Request => prepare(document, target, history, run_id, settings, choices),
+        Preparation::Operation => operation(document, target, history, run_id, settings, choices),
+        Preparation::Draft(id) => prepare_new(
+            document,
+            target,
+            history,
+            run_id,
+            settings,
+            choices,
+            Some(id),
+        ),
+    }
+}
+
 /// The scope joins the blocking worker before library unload, including after root cancellation.
 pub(crate) async fn background(
     cx: &CallContext,
@@ -255,7 +298,7 @@ pub(crate) async fn background(
     history: &[Record],
     settings: &Settings,
     choices: &Choices,
-    explicit: bool,
+    mode: Preparation,
 ) -> Result<PreparedImages, Fault> {
     let has_images = document.entries.iter().any(|entry| {
         let content = match &entry.item {
@@ -268,11 +311,15 @@ pub(crate) async fn background(
             .any(|block| matches!(block, Block::Image { .. }))
     });
     if !has_images {
-        return if explicit {
-            operation(document, target, history, cx.run_id(), settings, choices)
-        } else {
-            prepare(document, target, history, cx.run_id(), settings, choices)
-        };
+        return process(
+            document,
+            target,
+            history,
+            cx.run_id(),
+            settings,
+            choices,
+            &mode,
+        );
     }
     let document = document.clone();
     let target = target.clone();
@@ -291,11 +338,9 @@ pub(crate) async fn background(
                     "image preparation cancelled",
                 ));
             }
-            if explicit {
-                operation(&document, &target, &history, run_id, &settings, &choices)
-            } else {
-                prepare(&document, &target, &history, run_id, &settings, &choices)
-            }
+            process(
+                &document, &target, &history, run_id, &settings, &choices, &mode,
+            )
         })
         .await
         .map_err(|error| Fault::new("ImageProcessingFailure", "model-input", error.to_string()))?;

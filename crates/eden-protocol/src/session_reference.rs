@@ -228,12 +228,7 @@ fn quote(
                 content,
                 "[Source image omitted; explicit selection required]".into(),
             ),
-            Block::File {
-                name, media_type, ..
-            } => text(
-                content,
-                format!("[Source file: {name} ({media_type}); binary omitted]"),
-            ),
+            Block::File { .. } => content.push(block.clone()),
         }
     }
     Ok(())
@@ -380,5 +375,21 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+    #[test]
+    fn selected_file_attachments_keep_their_captured_bytes() {
+        let mut source = preview();
+        let file = Block::File {
+            name: "report.pdf".into(),
+            media_type: "application/pdf".into(),
+            data: "cGRmLWZpeHR1cmU=".into(),
+        };
+        if let Item::Message { content, .. } = &mut source.entries[0].item {
+            content.push(file.clone());
+        }
+        let frozen = source
+            .freeze("file-reference".into(), &Selection::default())
+            .unwrap();
+        assert!(frozen.content.contains(&file));
     }
 }

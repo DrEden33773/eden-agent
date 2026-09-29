@@ -570,6 +570,7 @@ fn wrap_lines(m: &Message, width: usize, lines: Vec<RichLine>) -> Vec<Row> {
                 .collect();
             let row_inset = inset + if row_index == 0 { 0 } else { hanging };
             rows.push(Row {
+                image: None,
                 tree_stem: rich.tree_stem && row_inset > 2,
                 inset: row_inset as u16,
                 summary: m.summary.is_some(),

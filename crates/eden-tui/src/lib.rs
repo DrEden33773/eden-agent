@@ -17,6 +17,7 @@ mod storage;
 mod summary;
 mod terminal;
 mod text;
+mod transcript_images;
 mod view;
 
 pub use terminal::{Options, run};

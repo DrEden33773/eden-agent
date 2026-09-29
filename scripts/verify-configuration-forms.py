@@ -645,13 +645,16 @@ def await_private_operation(endpoint: dict, revision: int, status: str) -> dict:
 
 def private_evidence(endpoint: dict, terminal: Terminal | None, browser: Browser | None) -> dict:
     """PC-06: native material delivery, shared transactions, masking and material-free retry."""
-    peer = call(endpoint, "/attach", {"frontend": "web"})["attachment"]
     receipts = []
     unrelated = configuration(endpoint, "note-style-context-management")["generation"]
 
     def public_surfaces() -> None:
         assert_private_absent(call(endpoint, "/snapshot"))
-        assert_private_absent(call(endpoint, f"/snapshot?attachment={peer}"))
+        peer = call(endpoint, "/attach", {"frontend": "web"})["attachment"]
+        try:
+            assert_private_absent(call(endpoint, f"/snapshot?attachment={peer}"))
+        finally:
+            call(endpoint, "/detach", {"attachment": peer})
         assert_private_absent(call(endpoint, "/configuration/inspect", {}))
         if browser:
             assert_private_absent(browser.evaluate("JSON.stringify(sessionStorage)"))
@@ -660,188 +663,183 @@ def private_evidence(endpoint: dict, terminal: Terminal | None, browser: Browser
             terminal.drain()
             assert_private_absent(terminal.output.decode("utf-8", errors="replace"))
 
-    try:
-        # Keep the custom author on its direct form so the two native authoring styles are covered.
-        call(endpoint, "/configuration/open", {"instance": CUSTOM})
-        if configuration(endpoint, CUSTOM)["effective"]["style"] != "direct":
-            result = call(
+    # Keep the custom author on its direct form so the two native authoring styles are covered.
+    call(endpoint, "/configuration/open", {"instance": CUSTOM})
+    if configuration(endpoint, CUSTOM)["effective"]["style"] != "direct":
+        result = call(
+            endpoint,
+            "/action",
+            action_request(
                 endpoint,
-                "/action",
-                action_request(
-                    endpoint,
-                    CUSTOM,
-                    "apply",
-                    [{"operation": "set", "path": "/style", "value": "direct"}],
-                ),
-            )
-            assert result["status"] == "applied", result
-        author_paths = {HELPER: "/label", CUSTOM: "/endpoint"}
-        paths = {**author_paths, DEFAULT_MODEL: "/model"}
-        adapters = ["headless", *(["browser"] if browser else []), *(["pty"] if terminal else [])]
-        for adapter in adapters:
-            for instance, path in paths.items():
-                secret_path = "/api_key" if instance == DEFAULT_MODEL else "/token"
-                call(endpoint, "/configuration/open", {"instance": instance})
-                for step, token in [
-                    ("set", "D2_SET_CANARY"),
-                    ("replace", "D2_REPLACE_CANARY"),
-                    ("clear", None),
-                ]:
-                    before = configuration(endpoint, instance)
-                    revision = call(endpoint, "/configuration/inspect", {})["revision"]
-                    public_value = (
-                        f"https://{adapter}-{step}.invalid"
-                        if instance == CUSTOM
-                        else f"{adapter}-{step}"
-                    )
-                    edits = [{"operation": "set", "path": path, "value": public_value}]
-                    inputs = (
-                        [{"operation": "clear", "path": secret_path}]
-                        if token is None
-                        else [{"operation": "set", "path": secret_path, "value": token}]
-                    )
-                    if adapter == "headless":
-                        for action in ("validate", "preview", "apply"):
-                            request = action_request(endpoint, instance, action, edits)
-                            result = call(
-                                endpoint, "/private-input", {"request": request, "inputs": inputs}
-                            )
-                            assert_private_absent(result)
-                            if action == "validate":
-                                assert result["errors"] == [], result
-                            elif action == "preview":
-                                assert result["application"] == "restart", result
-                            else:
-                                assert result["status"] == "applied", result
-                            assert (
-                                call(endpoint, "/private-input", {"request": request, "inputs": []})
-                                == result
-                            )
-                    elif adapter == "browser":
-                        assert browser is not None
-                        browser.action(instance, "refresh")
-                        browser.action(instance, "Discard draft and use current values")
-                        browser.fill_field(instance, path, public_value)
-                        if token is None:
-                            browser.field_action(instance, secret_path, "Clear secret")
-                        else:
-                            browser.fill_field(instance, secret_path, token)
-                        public_surfaces()
-                        browser.action(instance, "apply")
-                        browser.wait(
-                            "Array.from(document.querySelectorAll('input[type=password]')).every(input => input.value === '')"
-                        )
-                    else:
-                        assert terminal is not None
-                        terminal.field(instance, path)
-                        terminal.action(b"\x06")
-                        terminal.action(b"\x04")
-                        terminal.edit(instance, path, public_value)
-                        if token is None:
-                            terminal.field(instance, secret_path)
-                            terminal.keys(b"\x05")
-                        else:
-                            terminal.edit(instance, secret_path, token)
-                        public_surfaces()
-                        terminal.action(b"\x13")
-                    receipt = await_private_operation(endpoint, revision, "applied")
-                    receipts.append(
-                        {"adapter": adapter, "instance": instance, "step": step, "receipt": receipt}
-                    )
-                    after = configuration(endpoint, instance)
-                    assert after["effective"][path[1:]] == public_value
-                    assert after["secrets_configured"][secret_path] == (token is not None)
-                    assert after["generation"] != before["generation"]
-                    assert (
-                        configuration(endpoint, "note-style-context-management")["generation"]
-                        == unrelated
-                    )
-                    public_surfaces()
-        # Both native initializers return a diagnostic containing the submitted value.
-        # The shared rollback must restore the public edit as well as the secret state.
-        for instance, path in author_paths.items():
-            call(endpoint, "/configuration/open", {"instance": instance})
-            baseline = call(
-                endpoint,
-                "/private-input",
-                {
-                    "request": action_request(endpoint, instance, "apply", []),
-                    "inputs": [
-                        {"operation": "set", "path": "/token", "value": "D2_REPLACE_CANARY"}
-                    ],
-                },
-            )
-            assert baseline["status"] == "applied", baseline
-            before = configuration(endpoint, instance)
-            request = action_request(
-                endpoint,
-                instance,
+                CUSTOM,
                 "apply",
-                [{"operation": "set", "path": path, "value": "must-be-rolled-back"}],
-            )
-            failed = call(
-                endpoint,
-                "/private-input",
-                {
-                    "request": request,
-                    "inputs": [{"operation": "set", "path": "/token", "value": "D2_FAIL_CANARY"}],
-                },
-            )
-            assert failed["status"] == "restored", failed
-            assert call(endpoint, "/private-input", {"request": request, "inputs": []}) == failed
-            after = configuration(endpoint, instance)
-            assert after["effective"] == before["effective"]
-            assert after["secrets_configured"] == before["secrets_configured"]
-            receipts.append(
-                {
-                    "adapter": "headless",
-                    "instance": instance,
-                    "step": "failed-restored",
-                    "receipt": failed,
-                }
-            )
-            public_surfaces()
+                [{"operation": "set", "path": "/style", "value": "direct"}],
+            ),
+        )
+        assert result["status"] == "applied", result
+    author_paths = {HELPER: "/label", CUSTOM: "/endpoint"}
+    paths = {**author_paths, DEFAULT_MODEL: "/model"}
+    adapters = ["headless", *(["browser"] if browser else []), *(["pty"] if terminal else [])]
+    for adapter in adapters:
+        for instance, path in paths.items():
+            secret_path = "/api_key" if instance == DEFAULT_MODEL else "/token"
             call(endpoint, "/configuration/open", {"instance": instance})
-            marker = (
-                "https://private-replay-required.invalid"
-                if instance == CUSTOM
-                else "private-replay-required"
-            )
-            request = action_request(
-                endpoint, instance, "apply", [{"operation": "set", "path": path, "value": marker}]
-            )
-            retained = call(
-                endpoint,
-                "/private-input",
-                {
-                    "request": request,
-                    "inputs": [{"operation": "set", "path": "/token", "value": "D2_REPLAY_CANARY"}],
-                },
-            )
-            assert retained["status"] == "applied", retained
-            assert call(endpoint, "/private-input", {"request": request, "inputs": []}) == retained
-            receipts.append(
-                {
-                    "adapter": "headless",
-                    "instance": instance,
-                    "step": "retained-for-replay",
-                    "receipt": retained,
-                }
-            )
-            public_surfaces()
-        return {
-            "scenario": "PC-06",
-            "adapters": adapters,
-            "receipts": receipts,
-            "material_free_retry": True,
-            "default_model_access": {
-                "instance": DEFAULT_MODEL,
-                "private_path": "/api_key",
-                "provider_called": False,
+            for step, token in [
+                ("set", "D2_SET_CANARY"),
+                ("replace", "D2_REPLACE_CANARY"),
+                ("clear", None),
+            ]:
+                before = configuration(endpoint, instance)
+                revision = call(endpoint, "/configuration/inspect", {})["revision"]
+                public_value = (
+                    f"https://{adapter}-{step}.invalid"
+                    if instance == CUSTOM
+                    else f"{adapter}-{step}"
+                )
+                edits = [{"operation": "set", "path": path, "value": public_value}]
+                inputs = (
+                    [{"operation": "clear", "path": secret_path}]
+                    if token is None
+                    else [{"operation": "set", "path": secret_path, "value": token}]
+                )
+                if adapter == "headless":
+                    for action in ("validate", "preview", "apply"):
+                        request = action_request(endpoint, instance, action, edits)
+                        result = call(
+                            endpoint, "/private-input", {"request": request, "inputs": inputs}
+                        )
+                        assert_private_absent(result)
+                        if action == "validate":
+                            assert result["errors"] == [], result
+                        elif action == "preview":
+                            assert result["application"] == "restart", result
+                        else:
+                            assert result["status"] == "applied", result
+                        assert (
+                            call(endpoint, "/private-input", {"request": request, "inputs": []})
+                            == result
+                        )
+                elif adapter == "browser":
+                    assert browser is not None
+                    browser.action(instance, "refresh")
+                    browser.action(instance, "Discard draft and use current values")
+                    browser.fill_field(instance, path, public_value)
+                    if token is None:
+                        browser.field_action(instance, secret_path, "Clear secret")
+                    else:
+                        browser.fill_field(instance, secret_path, token)
+                    public_surfaces()
+                    browser.action(instance, "apply")
+                    browser.wait(
+                        "Array.from(document.querySelectorAll('input[type=password]')).every(input => input.value === '')"
+                    )
+                else:
+                    assert terminal is not None
+                    terminal.field(instance, path)
+                    terminal.action(b"\x06")
+                    terminal.action(b"\x04")
+                    terminal.edit(instance, path, public_value)
+                    if token is None:
+                        terminal.field(instance, secret_path)
+                        terminal.keys(b"\x05")
+                    else:
+                        terminal.edit(instance, secret_path, token)
+                    public_surfaces()
+                    terminal.action(b"\x13")
+                receipt = await_private_operation(endpoint, revision, "applied")
+                receipts.append(
+                    {"adapter": adapter, "instance": instance, "step": step, "receipt": receipt}
+                )
+                after = configuration(endpoint, instance)
+                assert after["effective"][path[1:]] == public_value
+                assert after["secrets_configured"][secret_path] == (token is not None)
+                assert after["generation"] != before["generation"]
+                assert (
+                    configuration(endpoint, "note-style-context-management")["generation"]
+                    == unrelated
+                )
+                public_surfaces()
+    # Both native initializers return a diagnostic containing the submitted value.
+    # The shared rollback must restore the public edit as well as the secret state.
+    for instance, path in author_paths.items():
+        call(endpoint, "/configuration/open", {"instance": instance})
+        baseline = call(
+            endpoint,
+            "/private-input",
+            {
+                "request": action_request(endpoint, instance, "apply", []),
+                "inputs": [{"operation": "set", "path": "/token", "value": "D2_REPLACE_CANARY"}],
             },
-        }
-    finally:
-        call(endpoint, "/detach", {"attachment": peer})
+        )
+        assert baseline["status"] == "applied", baseline
+        before = configuration(endpoint, instance)
+        request = action_request(
+            endpoint,
+            instance,
+            "apply",
+            [{"operation": "set", "path": path, "value": "must-be-rolled-back"}],
+        )
+        failed = call(
+            endpoint,
+            "/private-input",
+            {
+                "request": request,
+                "inputs": [{"operation": "set", "path": "/token", "value": "D2_FAIL_CANARY"}],
+            },
+        )
+        assert failed["status"] == "restored", failed
+        assert call(endpoint, "/private-input", {"request": request, "inputs": []}) == failed
+        after = configuration(endpoint, instance)
+        assert after["effective"] == before["effective"]
+        assert after["secrets_configured"] == before["secrets_configured"]
+        receipts.append(
+            {
+                "adapter": "headless",
+                "instance": instance,
+                "step": "failed-restored",
+                "receipt": failed,
+            }
+        )
+        public_surfaces()
+        call(endpoint, "/configuration/open", {"instance": instance})
+        marker = (
+            "https://private-replay-required.invalid"
+            if instance == CUSTOM
+            else "private-replay-required"
+        )
+        request = action_request(
+            endpoint, instance, "apply", [{"operation": "set", "path": path, "value": marker}]
+        )
+        retained = call(
+            endpoint,
+            "/private-input",
+            {
+                "request": request,
+                "inputs": [{"operation": "set", "path": "/token", "value": "D2_REPLAY_CANARY"}],
+            },
+        )
+        assert retained["status"] == "applied", retained
+        assert call(endpoint, "/private-input", {"request": request, "inputs": []}) == retained
+        receipts.append(
+            {
+                "adapter": "headless",
+                "instance": instance,
+                "step": "retained-for-replay",
+                "receipt": retained,
+            }
+        )
+        public_surfaces()
+    return {
+        "scenario": "PC-06",
+        "adapters": adapters,
+        "receipts": receipts,
+        "material_free_retry": True,
+        "default_model_access": {
+            "instance": DEFAULT_MODEL,
+            "private_path": "/api_key",
+            "provider_called": False,
+        },
+    }
 
 
 def private_replay(

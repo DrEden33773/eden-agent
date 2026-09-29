@@ -152,6 +152,11 @@ pub fn history(records: &[Record]) -> Vec<Message> {
                         }
                     ));
                 }
+                message.images = content
+                    .into_iter()
+                    .filter(|block| matches!(block, Block::Image { .. }))
+                    .map(std::sync::Arc::new)
+                    .collect();
                 messages.push(message);
             }
             Ok(Item::ToolCall {
@@ -204,6 +209,12 @@ pub fn history(records: &[Record]) -> Vec<Message> {
                     .body
                     .push_str(&format!("\n\nOutput\n{}", result_body(&result)));
                 apply_diff(&mut message, &result.details);
+                message.images = result
+                    .content
+                    .into_iter()
+                    .filter(|block| matches!(block, Block::Image { .. }))
+                    .map(std::sync::Arc::new)
+                    .collect();
                 message.revision = record.sequence;
                 if let Some(index) = index {
                     messages[index] = message;
@@ -227,12 +238,18 @@ pub fn history(records: &[Record]) -> Vec<Message> {
                     if let Ok(content) =
                         serde_json::from_value::<Vec<Block>>(record.payload["content"].clone())
                     {
-                        messages.push(Message::new(
+                        let mut message = Message::new(
                             record.sequence,
                             Role::User,
                             "You · queued",
                             blocks(&content),
-                        ));
+                        );
+                        message.images = content
+                            .into_iter()
+                            .filter(|block| matches!(block, Block::Image { .. }))
+                            .map(std::sync::Arc::new)
+                            .collect();
+                        messages.push(message);
                     }
                 }
                 "context_edit" => {

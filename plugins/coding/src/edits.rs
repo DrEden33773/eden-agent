@@ -141,7 +141,7 @@ pub(crate) async fn service(
             &history,
             &settings,
             &Default::default(),
-            false,
+            super::model_input::Preparation::Draft("inserted:submission-preview".into()),
         )
         .await?
         .document;
@@ -395,7 +395,7 @@ pub(crate) async fn prepare(
         &before.records,
         settings,
         &Default::default(),
-        false,
+        super::model_input::Preparation::Request,
     )
     .await?;
     images.document.replace_input(&mut model);
@@ -611,7 +611,7 @@ async fn edit_images(
         &before.records,
         &settings,
         &choices,
-        true,
+        super::model_input::Preparation::Operation,
     )
     .await?;
     if !prepared.records.is_empty() {
@@ -686,6 +686,100 @@ fn decorate(original: e::Document, model: &ModelInput) -> Result<e::Document, Fa
         entries,
         tools: model.tools.clone(),
     })
+}
+
+pub(crate) async fn recover_request(
+    cx: &CallContext,
+    input: &ContextInput,
+    model: &ModelInput,
+    applied: &[u64],
+    settings: &Settings,
+    request_id: &str,
+    first_sequence: u64,
+) -> Result<ModelInput, Fault> {
+    let retry = if applied.is_empty() {
+        let history: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
+        reject_late_changes(&history.records, first_sequence)?;
+        let mut recovery = input.clone();
+        recovery.action = "overflow".into();
+        recovery.records = history.records;
+        let compacted: ModelInput = cx.call(CONTEXT, &recovery).await?;
+        let after: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
+        reject_late_changes(&after.records, first_sequence)?;
+        recovery.records = after.records;
+        // A context strategy returns original image blocks. Every actual attempt must still
+        // use committed image versions and the frozen model-specific input limits.
+        prepare(&recovery, compacted, cx, settings).await?
+    } else {
+        let compacted = context::recover_edited(input, model, cx, settings).await?;
+        let history: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
+        e::Prepared {
+            input: compacted,
+            revision: e::Revision {
+                session_id: history.session_id,
+                sequence: history.sequence,
+                head: history.active_head,
+                branch: history.active_branch,
+            },
+            edits: applied.to_vec(),
+            image_records: vec![],
+            references: false,
+            prompt_cache: Value::Null,
+        }
+    };
+    let mut records = retry.image_records;
+    records.push(RecordDraft {
+        kind: "model_request_revision".into(),
+        payload: json!({
+            "request_id": request_id,
+            "input": retry.input,
+            "prompt_cache": retry.prompt_cache,
+        }),
+    });
+    let committed: StoreReply = cx
+        .call(
+            STORE,
+            &StoreRequest::AppendChecked {
+                run_id: cx.run_id(),
+                session_id: retry.revision.session_id,
+                sequence: retry.revision.sequence,
+                head: retry.revision.head,
+                branch: retry.revision.branch,
+                new_branch: None,
+                entries: records,
+            },
+        )
+        .await?;
+    cx.emit(
+        "committed",
+        json!({ "sequence": committed.sequence, "kind": "model_request_revision" }),
+    )?;
+    Ok(retry.input)
+}
+fn reject_late_changes(records: &[Record], first_sequence: u64) -> Result<(), Fault> {
+    if records.iter().any(|record| {
+        record.sequence > first_sequence
+            && matches!(
+                record.kind.as_str(),
+                "context_edit"
+                    | "context_rebuild"
+                    | "image_version"
+                    | "message"
+                    | "tool_intent"
+                    | "tool_result"
+                    | "provider_state"
+                    | "queue_delivered"
+                    | "user_shell"
+            )
+    }) {
+        return Err(Fault::new(
+            "ContextConflict",
+            "context-edit",
+            "context changed after this request started; retry as a new request to use the \
+             accepted change",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

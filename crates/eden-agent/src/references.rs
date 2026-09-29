@@ -16,11 +16,19 @@ fn source(path: &Path, records: &[Record]) -> Result<Source, Fault> {
     let (head, branch) = history::branch_state(records)?;
     Ok(Source {
         session_id: records.first().map_or(0, |record| record.session_id),
-        label: path
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned(),
+        label: records
+            .iter()
+            .rev()
+            .find(|record| record.kind == "session_metadata")
+            .and_then(|record| record.payload["name"].as_str())
+            .filter(|name| !name.trim().is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                path.file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            }),
         path: path.to_string_lossy().into_owned(),
         branch,
         head,

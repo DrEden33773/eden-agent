@@ -505,31 +505,14 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
                     && !prepared.references
                     && matches!(error.code.as_str(), "ContextOverflow" | "RecoverableLength") =>
             {
-                let history: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
-                let compacted: ModelInput = if !prepared.edits.is_empty() {
-                    context::recover_edited(&context_input, &projected, &cx, &settings).await?
-                } else {
-                    cx.call(
-                        CONTEXT,
-                        &ContextInput {
-                            target: input.target.clone(),
-                            resources: resources.clone(),
-                            tools: selected_tools.clone(),
-                            action: "overflow".into(),
-                            records: history.records,
-                            instructions: String::new(),
-                            limits: limits.clone(),
-                            cwd: input.cwd.clone(),
-                            items: vec![],
-                        },
-                    )
-                    .await?
-                };
-                projected = compacted;
-                append(
+                projected = edits::recover_request(
                     &cx,
-                    "model_request_revision",
-                    json!({ "request_id": request_id, "input": projected }),
+                    &context_input,
+                    &projected,
+                    &prepared.edits,
+                    &settings,
+                    &request_id,
+                    committed.sequence,
                 )
                 .await?;
                 cx.emit(

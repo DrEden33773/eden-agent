@@ -2,6 +2,7 @@
 
 import importlib
 import unittest
+from unittest.mock import patch
 
 verifier = importlib.import_module("verify-all")
 
@@ -20,6 +21,13 @@ class SchedulingTests(unittest.TestCase):
         self.assertEqual(order[0], "workspace")
         self.assertEqual(set(order), set(verifier.SUITES))
         self.assertEqual(len(order), len(verifier.SUITES))
+
+    def test_every_platform_schedule_runs_all_registered_suites(self):
+        for platform in ["linux", "darwin", "win32"]:
+            with self.subTest(platform=platform), patch.object(verifier.sys, "platform", platform):
+                order = verifier.suite_order()
+                self.assertEqual(set(order), set(verifier.SUITES))
+                self.assertEqual(len(order), len(verifier.SUITES))
 
     def test_explicit_overrides_win_and_task_count_caps_the_pool(self):
         workers, order = verifier.choose_schedule(1, 5, "longest")

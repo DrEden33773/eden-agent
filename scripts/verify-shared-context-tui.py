@@ -82,6 +82,9 @@ class CompletionGate:
     """Relay the real host; hold only a management terminal receipt for UI observation."""
 
     def __init__(self, upstream: dict):
+        self.preview_hold = False
+        self.preview_requested = threading.Event()
+        self.preview_release = threading.Event()
         self.hold = False
         self.requested = threading.Event()
         self.release = threading.Event()
@@ -107,6 +110,9 @@ class CompletionGate:
                         owner.run_id = body["run_id"]
                         owner.requested.set()
                         assert owner.release.wait(15), "management completion gate not released"
+                    if owner.preview_hold and self.path == "/reference/preview":
+                        owner.preview_requested.set()
+                        assert owner.preview_release.wait(15), "source preview gate not released"
                     output = json.dumps({"ok": True, "result": result}).encode()
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
@@ -128,6 +134,7 @@ class CompletionGate:
 
     def close(self) -> None:
         self.release.set()
+        self.preview_release.set()
         self.http.shutdown()
         self.http.server_close()
         self.thread.join()
@@ -231,6 +238,7 @@ def exercise(binary: Path, composition: Path, scratch: Path) -> dict:
         original_bytes = session_file.read_bytes()
         source = sources / "00-reference-source.jsonl"
         source.write_bytes(session_file.read_bytes())
+        (sources / "99-unrelated.jsonl").write_bytes(session_file.read_bytes())
         initial_source = source.read_bytes()
         gate = CompletionGate(endpoint)
         proxy_file = scratch / "frontend.json"
@@ -242,6 +250,12 @@ def exercise(binary: Path, composition: Path, scratch: Path) -> dict:
             "TMUX": "verification-raster-fallback",
         }
         terminal = Terminal(binary, proxy_file, env=environment, width=120, height=38)
+        terminal.wait("Connected")
+        terminal.wait("▀")
+        assert "Context ·" not in terminal.display, "pixels only appeared inside inspector"
+        terminal.resize(60, 18)
+        terminal.wait("▀")
+        terminal.resize(120, 38)
         terminal.wait("Connected")
         terminal.command("/context")
         terminal.wait("Captured shared model input")
@@ -314,7 +328,24 @@ def exercise(binary: Path, composition: Path, scratch: Path) -> dict:
         terminal.send(b"\x1b")
         terminal.send(b"@session\t")
         terminal.wait("choose a saved session")
-        terminal.wait("00-reference-source")
+        terminal.wait("2 of 2 sessions")
+        terminal.send(b"00-reference-source")
+        terminal.wait("1 of 2 sessions")
+        terminal.send(b"\r")
+        terminal.wait("choose a source branch")
+        gate.preview_hold = True
+        terminal.send(b"\r")
+        assert gate.preview_requested.wait(10), "source preview was not requested"
+        terminal.send(b"\x1b")
+        terminal.send(b"\x03@session\t")
+        terminal.wait("choose a saved session")
+        terminal.send(b"00-reference-source")
+        terminal.wait("1 of 2 sessions")
+        gate.preview_hold = False
+        gate.preview_release.set()
+        terminal.read(0.3)
+        assert "choose a saved session" in terminal.display
+        assert "fixed source preview" not in terminal.display, "late source reply replaced search"
         terminal.send(b"\r")
         terminal.wait("choose a source branch")
         terminal.send(b"\r")
@@ -386,6 +417,9 @@ def exercise(binary: Path, composition: Path, scratch: Path) -> dict:
             "unsaved_context_draft_retained": True,
             "image_version_record": image_record["sequence"],
             "original_and_sent_raster_preview": True,
+            "main_transcript_original_image_pixels": True,
+            "reference_catalog_search": True,
+            "late_source_preview_preserves_current_search": True,
             "reference_catalog_branch_preview": True,
             "reference_images_explicit": True,
             "source_growth_does_not_change_reference": True,
@@ -398,6 +432,7 @@ def exercise(binary: Path, composition: Path, scratch: Path) -> dict:
     finally:
         if gate:
             gate.release.set()
+            gate.preview_release.set()
         try:
             if terminal and not terminal.closed:
                 for _ in range(3):

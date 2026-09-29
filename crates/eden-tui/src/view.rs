@@ -595,7 +595,7 @@ fn draw_nav(app: &App, buf: &mut Buffer, area: Rect, p: Palette) {
         );
     }
 }
-fn draw_transcript(app: &mut App, buf: &mut Buffer, area: Rect, p: Palette, _mono: bool) {
+fn draw_transcript(app: &mut App, buf: &mut Buffer, area: Rect, p: Palette, mono: bool) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -610,6 +610,7 @@ fn draw_transcript(app: &mut App, buf: &mut Buffer, area: Rect, p: Palette, _mon
             app.preferences.thinking,
             app.preferences.diff_split,
             app.preferences.basic,
+            app.transcript_images.revision(m.id),
         )
     };
     let common = if app.cache.is_empty() {
@@ -654,10 +655,11 @@ fn draw_transcript(app: &mut App, buf: &mut Buffer, area: Rect, p: Palette, _mon
             let key = key_for(m);
             app.row_keys.push(key);
             app.row_starts.push(app.rows.len());
-            let value = app
-                .cache
-                .entry(key)
-                .or_insert_with(|| text::message_rows(m, width, &app.preferences));
+            let value = app.cache.entry(key).or_insert_with(|| {
+                let mut rows = text::message_rows(m, width, &app.preferences);
+                app.transcript_images.append_rows(m, width, &mut rows);
+                rows
+            });
             app.rows.extend_from_slice(value);
         }
         if checkpoint.is_some_and(|checkpoint| !checkpoint.matches(&app.rows)) {
@@ -700,6 +702,18 @@ fn draw_transcript(app: &mut App, buf: &mut Buffer, area: Rect, p: Palette, _mon
         .take(area.height as usize)
         .enumerate()
     {
+        if let Some(image) = &row.image {
+            crate::image_preview::raster_row(
+                &image.image,
+                buf,
+                Rect::new(area.x, area.y + i as u16, image.width.min(area.width), 1),
+                image.width,
+                image.height,
+                image.y,
+                mono,
+            );
+            continue;
+        }
         let color = if (row.failed && row.anchor.line == 0)
             || row.text.trim_start().starts_with(['−', '✗'])
         {

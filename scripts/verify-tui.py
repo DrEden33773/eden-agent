@@ -203,6 +203,13 @@ def main():
                         for record in frame["history"]
                     ),
                 )
+                deadline = time.monotonic() + 8
+                while terminal.display.count("✓ bash · user command") < 2:
+                    terminal.read(0.1)
+                    if time.monotonic() >= deadline:
+                        raise AssertionError(
+                            f"Second durable shell card did not render:\n{terminal.display}"
+                        )
                 terminal.send(b"\x1b[17~\x1b[B\x0f\x1b[17~")
                 terminal.wait("AUTHOR_EDITOR_INPUT")
             finally:

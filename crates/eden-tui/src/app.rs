@@ -10,7 +10,7 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-pub type LayoutKey = (u64, usize, u64, bool, bool, bool, bool, bool);
+pub type LayoutKey = (u64, usize, u64, bool, bool, bool, bool, bool, u64);
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub enum Update {
     Attachment {
@@ -79,6 +79,7 @@ pub struct App {
     history_position: Option<usize>,
     history_draft: Draft,
     pub messages: Vec<Message>,
+    pub transcript_images: crate::transcript_images::Thumbnails,
     pub selected: usize,
     pub preferences: Preferences,
     pub focus: Focus,
@@ -200,6 +201,7 @@ impl App {
             history_position: None,
             history_draft: Draft::default(),
             messages: vec![],
+            transcript_images: Default::default(),
             selected: 0,
             preferences: Preferences::default(),
             focus: Focus::Editor,
@@ -318,6 +320,7 @@ impl App {
             .filter(|m| m.role == Role::User)
             .map(|m| m.body.clone())
             .collect();
+        self.transcript_images.refresh(&messages);
         self.messages = messages;
         self.selected = self.selected.min(self.messages.len().saturating_sub(1));
         if let Some(record) = self
@@ -541,7 +544,10 @@ impl App {
         if let Some(error) = self.store.as_ref().and_then(DraftStore::error) {
             self.notice = error;
         }
-        let mut changed = self.autocomplete.poll() | self.poll_context_images();
+        let mut changed = self.autocomplete.poll()
+            | self.poll_context_images()
+            | self.transcript_images.poll()
+            | self.poll_references();
         for _ in 0..64 {
             let Ok(update) = self.rx.try_recv() else {
                 break;

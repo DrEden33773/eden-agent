@@ -24,7 +24,7 @@ APIS = (
 )
 SECRET = "G2-PRIVATE-stored-key-canary"
 MARKERS = ("first-cloud-read-content", "second-distinct-cloud-read-content")
-PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII="
+PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII="
 DEPLOYMENT = "explicit-azure-deployment"
 
 

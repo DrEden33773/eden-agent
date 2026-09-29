@@ -15,6 +15,12 @@ pub struct Decoded {
     png: String,
 }
 pub fn decode(block: &Block) -> Result<Decoded, String> {
+    decode_bounded(block, 1024, 1024)
+}
+pub fn decode_thumbnail(block: &Block) -> Result<Decoded, String> {
+    decode_bounded(block, 160, 80)
+}
+fn decode_bounded(block: &Block, max_width: u32, max_height: u32) -> Result<Decoded, String> {
     let Block::Image { data, .. } = block else {
         return Err("Not an image payload".into());
     };
@@ -27,7 +33,7 @@ pub fn decode(block: &Block) -> Result<Decoded, String> {
     reader.limits(limits);
     let image = reader.decode().map_err(|e| e.to_string())?;
     let (width, height) = (image.width(), image.height());
-    let preview = image.thumbnail(1024, 1024);
+    let preview = image.thumbnail(max_width, max_height);
     let mut png = Cursor::new(Vec::new());
     preview
         .write_to(&mut png, ImageFormat::Png)
@@ -67,46 +73,67 @@ pub fn fit(image: &Decoded, area: Rect) -> Rect {
 pub fn raster(image: &Decoded, buf: &mut Buffer, area: Rect, mono: bool) {
     let area = fit(image, area);
     for y in 0..area.height {
-        for x in 0..area.width {
-            let pixel = |row: u32| {
-                let px = u32::from(x) * image.raster.width() / u32::from(area.width).max(1);
-                let py = row * image.raster.height() / (u32::from(area.height) * 2).max(1);
-                image
-                    .raster
-                    .get_pixel(
-                        px.min(image.raster.width() - 1),
-                        py.min(image.raster.height() - 1),
-                    )
-                    .0
-            };
-            let top = pixel(u32::from(y) * 2);
-            let bottom = pixel(u32::from(y) * 2 + 1);
-            if let Some(cell) = buf.cell_mut((area.x + x, area.y + y)) {
-                if mono {
-                    let brightness =
-                        (u32::from(top[0]) + u32::from(top[1]) + u32::from(top[2])) / 3;
-                    cell.set_symbol(
-                        [" ", ".", ":", "*", "#", "@"][((255 - brightness) * 5 / 255) as usize],
-                    )
-                    .set_fg(Color::Reset)
-                    .set_bg(Color::Reset);
-                } else {
-                    let color = |p: [u8; 4]| {
-                        if p[3] < 128 {
-                            Color::Reset
-                        } else {
-                            Color::Rgb(p[0], p[1], p[2])
-                        }
-                    };
-                    if top[3] < 128 {
-                        cell.set_symbol(if bottom[3] < 128 { " " } else { "▄" })
-                            .set_fg(color(bottom))
-                            .set_bg(Color::Reset);
+        raster_row(
+            image,
+            buf,
+            Rect::new(area.x, area.y + y, area.width, 1),
+            area.width,
+            area.height,
+            y,
+            mono,
+        );
+    }
+}
+pub fn raster_row(
+    image: &Decoded,
+    buf: &mut Buffer,
+    area: Rect,
+    width: u16,
+    height: u16,
+    y: u16,
+    mono: bool,
+) {
+    if area.is_empty() {
+        return;
+    }
+    for x in 0..width.min(area.width) {
+        let pixel = |row: u32| {
+            let px = u32::from(x) * image.raster.width() / u32::from(width).max(1);
+            let py = row * image.raster.height() / (u32::from(height) * 2).max(1);
+            image
+                .raster
+                .get_pixel(
+                    px.min(image.raster.width() - 1),
+                    py.min(image.raster.height() - 1),
+                )
+                .0
+        };
+        let top = pixel(u32::from(y) * 2);
+        let bottom = pixel(u32::from(y) * 2 + 1);
+        if let Some(cell) = buf.cell_mut((area.x + x, area.y)) {
+            if mono {
+                let brightness = (u32::from(top[0]) + u32::from(top[1]) + u32::from(top[2])) / 3;
+                cell.set_symbol(
+                    [" ", ".", ":", "*", "#", "@"][((255 - brightness) * 5 / 255) as usize],
+                )
+                .set_fg(Color::Reset)
+                .set_bg(Color::Reset);
+            } else {
+                let color = |p: [u8; 4]| {
+                    if p[3] < 128 {
+                        Color::Reset
                     } else {
-                        cell.set_symbol("▀")
-                            .set_fg(color(top))
-                            .set_bg(color(bottom));
+                        Color::Rgb(p[0], p[1], p[2])
                     }
+                };
+                if top[3] < 128 {
+                    cell.set_symbol(if bottom[3] < 128 { " " } else { "▄" })
+                        .set_fg(color(bottom))
+                        .set_bg(Color::Reset);
+                } else {
+                    cell.set_symbol("▀")
+                        .set_fg(color(top))
+                        .set_bg(color(bottom));
                 }
             }
         }

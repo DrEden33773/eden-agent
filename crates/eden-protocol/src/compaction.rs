@@ -30,6 +30,10 @@ pub struct Request {
     pub request_id: String,
     pub input: ContextInput,
     pub projected: Vec<crate::coding::Item>,
+    /// Effective prefix supplied by the coordinator when structural edits change record layout.
+    /// Policies must summarize these items rather than reconstructing the original records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_prefix: Option<Vec<crate::coding::Item>>,
     pub reason: Reason,
     pub suggested_cut: usize,
     pub max_cut: usize,

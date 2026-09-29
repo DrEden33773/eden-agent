@@ -18,6 +18,17 @@ use tokio::io::AsyncReadExt;
 /// Linux-only and the barriers below skip it elsewhere.
 #[cfg(target_os = "linux")]
 fn live_group_members(group: i32) -> Vec<i32> {
+    live_group_members_with(group, |pid| {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+    })
+}
+
+// Inject the read so a test can reap a member after getpgid confirmed ownership.
+#[cfg(target_os = "linux")]
+fn live_group_members_with(
+    group: i32,
+    mut read_status: impl FnMut(i32) -> std::io::Result<String>,
+) -> Vec<i32> {
     let mut members = Vec::new();
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return members;
@@ -34,18 +45,53 @@ fn live_group_members(group: i32) -> Vec<i32> {
         if unsafe { libc::getpgid(pid) } != group {
             continue;
         }
-        let state = std::fs::read_to_string(format!("/proc/{pid}/stat"))
-            .ok()
-            .and_then(|stat| {
-                stat.rsplit_once(')')
-                    .and_then(|(_, rest)| rest.split_whitespace().next())
-                    .and_then(|state| state.chars().next())
-            });
-        if state != Some('Z') {
+        let stat = match read_status(pid) {
+            Ok(stat) => stat,
+            Err(error)
+                if matches!(error.raw_os_error(), Some(libc::ENOENT) | Some(libc::ESRCH)) =>
+            {
+                continue;
+            }
+            Err(error) => panic!("cannot inspect group member {pid}: {error}"),
+        };
+        let state = stat
+            .rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .and_then(|state| state.chars().next())
+            .expect("group member has a process state");
+        if state != 'Z' {
             members.push(pid);
         }
     }
     members
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn liveness_probe_does_not_count_a_member_reaped_between_its_reads() {
+    use std::os::unix::process::CommandExt;
+    let mut child = Joiner(
+        std::process::Command::new("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()
+            .expect("start probe member"),
+    );
+    let group = child.id() as i32;
+    let mut reaped = false;
+    let members = live_group_members_with(group, |pid| {
+        if pid == group {
+            child.0.kill().expect("stop probe member");
+            child.0.wait().expect("reap probe member");
+            reaped = true;
+        }
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+    });
+    assert!(reaped, "probe did not observe the owned member");
+    assert!(
+        members.is_empty(),
+        "reaped process counted as live: {members:?}"
+    );
 }
 
 /// Barrier assertion helper: on Linux the group must be empty of live members.

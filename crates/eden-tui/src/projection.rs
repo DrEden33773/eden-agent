@@ -133,7 +133,31 @@ pub fn history(records: &[Record]) -> Vec<Message> {
                     "assistant" => (Role::Assistant, "Eden"),
                     other => (Role::Notice, other),
                 };
-                messages.push(Message::new(record.sequence, kind, title, blocks(&content)));
+                let mut message = Message::new(record.sequence, kind, title, blocks(&content));
+                for reference in record.payload["references"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                {
+                    let source = &reference["source"];
+                    message.body.push_str(&format!(
+                        "\n[Fixed session reference: {} / {} @ {} · source system {}]",
+                        source["label"].as_str().unwrap_or("unknown"),
+                        source["branch"].as_str().unwrap_or("unknown"),
+                        source["head"],
+                        if reference["source_system"].is_null() {
+                            "unknown"
+                        } else {
+                            "captured"
+                        }
+                    ));
+                }
+                message.images = content
+                    .into_iter()
+                    .filter(|block| matches!(block, Block::Image { .. }))
+                    .map(std::sync::Arc::new)
+                    .collect();
+                messages.push(message);
             }
             Ok(Item::ToolCall {
                 call_id,
@@ -185,6 +209,12 @@ pub fn history(records: &[Record]) -> Vec<Message> {
                     .body
                     .push_str(&format!("\n\nOutput\n{}", result_body(&result)));
                 apply_diff(&mut message, &result.details);
+                message.images = result
+                    .content
+                    .into_iter()
+                    .filter(|block| matches!(block, Block::Image { .. }))
+                    .map(std::sync::Arc::new)
+                    .collect();
                 message.revision = record.sequence;
                 if let Some(index) = index {
                     messages[index] = message;
@@ -208,13 +238,35 @@ pub fn history(records: &[Record]) -> Vec<Message> {
                     if let Ok(content) =
                         serde_json::from_value::<Vec<Block>>(record.payload["content"].clone())
                     {
-                        messages.push(Message::new(
+                        let mut message = Message::new(
                             record.sequence,
                             Role::User,
                             "You · queued",
                             blocks(&content),
-                        ));
+                        );
+                        message.images = content
+                            .into_iter()
+                            .filter(|block| matches!(block, Block::Image { .. }))
+                            .map(std::sync::Arc::new)
+                            .collect();
+                        messages.push(message);
                     }
+                }
+                "context_edit" => {
+                    messages.push(Message::new(
+                        record.sequence,
+                        Role::Notice,
+                        "Context edited",
+                        format!(
+                            "Edit #{} · {} · {} · original transcript retained · F7 inspects \
+                             effective input",
+                            record.sequence,
+                            record.payload["source"]
+                                .as_str()
+                                .unwrap_or("unknown source"),
+                            record.payload["scope"].as_str().unwrap_or("unknown scope")
+                        ),
+                    ));
                 }
                 "model_attempt" => {
                     let status = record.payload["status"].as_str().unwrap_or("interrupted");

@@ -70,6 +70,7 @@ impl Palette {
 }
 #[derive(Clone, Debug, Default)]
 pub struct Geometry {
+    pub image: Option<crate::image_preview::Placement>,
     pub hits: Vec<Hit>,
     pub field_editor: Option<Rect>,
     pub latest: Option<Rect>,
@@ -238,6 +239,12 @@ pub fn render(
     if area.width < 8 || area.height < 5 {
         label(buf, area, "Resize · /quit", p.style());
         return (g, None);
+    }
+    if app.reference_picker.open {
+        return crate::references::render(app, buf, area, p);
+    }
+    if app.context.open {
+        return crate::context::render(app, buf, area, p, mono);
     }
     let tiny = area.height < 16;
     let pad = if area.width >= 90 { 2 } else { 1 };
@@ -475,7 +482,7 @@ pub fn render(
             if app.read_only {
                 "Read only · / for commands"
             } else {
-                "Ask anything…  / commands  @ files"
+                "Ask anything…  / commands  @ files/session"
             },
             Style::default().fg(p.muted),
         );
@@ -491,7 +498,13 @@ pub fn render(
             first,
             vec![
                 Span::styled(app.model.clone(), Style::default().fg(p.function)),
-                Span::styled("  ·  usage unavailable", dim),
+                Span::styled(
+                    format!(
+                        "  ·  {} fixed references · usage unavailable",
+                        app.references.len()
+                    ),
+                    dim,
+                ),
             ],
         );
         let second = row_rect(first, 1);
@@ -582,7 +595,7 @@ fn draw_nav(app: &App, buf: &mut Buffer, area: Rect, p: Palette) {
         );
     }
 }
-fn draw_transcript(app: &mut App, buf: &mut Buffer, area: Rect, p: Palette, _mono: bool) {
+fn draw_transcript(app: &mut App, buf: &mut Buffer, area: Rect, p: Palette, mono: bool) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -597,6 +610,7 @@ fn draw_transcript(app: &mut App, buf: &mut Buffer, area: Rect, p: Palette, _mon
             app.preferences.thinking,
             app.preferences.diff_split,
             app.preferences.basic,
+            app.transcript_images.revision(m.id),
         )
     };
     let common = if app.cache.is_empty() {
@@ -641,10 +655,11 @@ fn draw_transcript(app: &mut App, buf: &mut Buffer, area: Rect, p: Palette, _mon
             let key = key_for(m);
             app.row_keys.push(key);
             app.row_starts.push(app.rows.len());
-            let value = app
-                .cache
-                .entry(key)
-                .or_insert_with(|| text::message_rows(m, width, &app.preferences));
+            let value = app.cache.entry(key).or_insert_with(|| {
+                let mut rows = text::message_rows(m, width, &app.preferences);
+                app.transcript_images.append_rows(m, width, &mut rows);
+                rows
+            });
             app.rows.extend_from_slice(value);
         }
         if checkpoint.is_some_and(|checkpoint| !checkpoint.matches(&app.rows)) {
@@ -687,6 +702,18 @@ fn draw_transcript(app: &mut App, buf: &mut Buffer, area: Rect, p: Palette, _mon
         .take(area.height as usize)
         .enumerate()
     {
+        if let Some(image) = &row.image {
+            crate::image_preview::raster_row(
+                &image.image,
+                buf,
+                Rect::new(area.x, area.y + i as u16, image.width.min(area.width), 1),
+                image.width,
+                image.height,
+                image.y,
+                mono,
+            );
+            continue;
+        }
         let color = if (row.failed && row.anchor.line == 0)
             || row.text.trim_start().starts_with(['−', '✗'])
         {
@@ -1403,7 +1430,7 @@ const HELP_LINES: &[&str] = &[
     "Alt+S Steering · Alt+F Follow-up · /queue Review and withdraw",
     "Ctrl+G External editor · Ctrl+Z Undo · Ctrl+Alt+Z Suspend (Unix)",
     "Ctrl+F Search loaded branch · PgUp/PgDn Read · Ctrl+End Latest",
-    "F2 Commands · F3 Inspector · F4 Turns · F6 Focus · F10 Style",
+    "F2 Commands · F3 Inspector · F4 Turns · F6 Focus · F7 Context · F10 Style",
     "Ctrl+O Expand tool · Ctrl+T Thinking · /copy Last answer",
     "@file Content snapshot · /attachments Review / refresh / remove",
     "!command Shell in context · !!command Shell excluded from context",

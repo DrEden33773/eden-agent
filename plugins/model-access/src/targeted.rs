@@ -17,6 +17,15 @@ pub(crate) async fn request(
     emit: impl FnMut(&str, Value) -> Result<(), Fault>,
 ) -> Result<ModelReply, Fault> {
     if target.api == "bedrock-converse-stream" {
+        if target.compat["eden_image_limits"]["max_body_bytes"].is_number()
+            || target.compat["image_limits"]["max_body_bytes"].is_number()
+        {
+            return Err(Fault::new(
+                "UnsupportedImageLimit",
+                "model-input",
+                "this transport cannot validate a configured serialized-body byte limit",
+            ));
+        }
         return crate::bedrock::request(target, credential, input, emit).await;
     }
     let prepared = prepare(target, input)?;
@@ -138,6 +147,7 @@ async fn send_inner(
         options,
         ..
     } = prepared;
+    projection::body_limit(target, body)?;
     let url = routes::endpoint(target, credential, suffix)?;
     if target.api == "openai-codex-responses"
         && let Some(reply) =

@@ -11,6 +11,7 @@ use std::{
 };
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
+    Session,
     Command,
     File(PathBuf),
     Path,
@@ -180,6 +181,17 @@ fn path_token(text: &str, cursor: usize) -> Option<Token> {
 pub fn commands() -> Vec<Candidate> {
     [
         ("help", "Keyboard shortcuts"),
+        ("session", "Insert a frozen session quotation"),
+        ("references", "Review or remove draft session references"),
+        ("context", "Inspect and edit shared model input"),
+        (
+            "compact",
+            "Compact context with the configured model policy",
+        ),
+        (
+            "context-rebuild",
+            "Rebuild an original branch with selected persistent edits",
+        ),
         ("style", "Display and input settings"),
         ("search", "Search loaded branch content"),
         ("attach", "Attach a content snapshot"),
@@ -208,7 +220,12 @@ pub fn commands() -> Vec<Candidate> {
     .collect()
 }
 fn references() -> Vec<Candidate> {
-    Vec::new()
+    vec![Candidate {
+        label: "@session".into(),
+        description: "Choose a saved session and branch to quote".into(),
+        insert: String::new(),
+        action: Action::Session,
+    }]
 }
 fn matches(candidate: &Candidate, query: &str) -> bool {
     let q = query.to_lowercase();

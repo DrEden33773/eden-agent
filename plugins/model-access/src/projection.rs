@@ -56,6 +56,24 @@ fn visible(value: &Value) -> String {
     text
 }
 pub(crate) fn items(input: &ModelInput, target: &ModelTarget) -> Result<Vec<Item>, Fault> {
+    if !target.capabilities.images
+        && input.items.iter().any(|item| {
+            let blocks = match item {
+                Item::Message { content, .. } => content.as_slice(),
+                Item::ToolResult { result, .. } => result.content.as_slice(),
+                _ => &[],
+            };
+            blocks
+                .iter()
+                .any(|block| matches!(block, Block::Image { .. }))
+        })
+    {
+        return Err(Fault::new(
+            "ImageUnsupported",
+            "model-input",
+            "this model does not support images; explicitly omit them or select an image model",
+        ));
+    }
     let mut ids = BTreeMap::new();
     for item in &input.items {
         if let Item::ToolCall { call_id, .. } = item {
@@ -79,19 +97,7 @@ pub(crate) fn items(input: &ModelInput, target: &ModelTarget) -> Result<Vec<Item
                 .or_insert(if valid { call_id.clone() } else { next });
         }
     }
-    let blocks = |content: &[Block]| {
-        content
-            .iter()
-            .map(|b| match b {
-                Block::Image { .. } if !target.capabilities.images => Block::Text {
-                    text: "(image omitted: model does not support images; original attachment \
-                           retained in history)"
-                        .into(),
-                },
-                other => other.clone(),
-            })
-            .collect()
-    };
+    let blocks = |content: &[Block]| content.to_vec();
     let mut output = Vec::new();
     for item in &input.items {
         output.push(match item {
@@ -189,6 +195,32 @@ pub(crate) fn test_target(api: &str) -> ModelTarget {
     }))
     .unwrap()
 }
+pub(crate) fn body_limit(target: &ModelTarget, body: &Value) -> Result<(), Fault> {
+    let limit = [
+        target.compat["image_limits"]["max_body_bytes"].as_u64(),
+        target.compat["eden_image_limits"]["max_body_bytes"].as_u64(),
+    ]
+    .into_iter()
+    .flatten()
+    .min();
+    if let Some(limit) = limit {
+        let length = serde_json::to_vec(body)
+            .map_err(|error| failure(error.to_string()))?
+            .len() as u64;
+        if length > limit {
+            return Err(Fault::new(
+                "ImageBodyLimit",
+                "model-input",
+                format!(
+                    "serialized request is {length} bytes, exceeding model limit {limit}; adjust \
+                     context or images"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,7 +229,8 @@ mod tests {
     }
     #[test]
     fn cross_target_preserves_visible_thinking_without_signature_and_original_images() {
-        let source = test_target("anthropic-messages");
+        let mut source = test_target("anthropic-messages");
+        source.capabilities.images = true;
         let destination = test_target("openai-completions");
         let original = input(vec![
             state(
@@ -212,14 +245,15 @@ mod tests {
                 }],
             },
         ]);
-        let transformed = items(&original, &destination).unwrap();
+        assert_eq!(
+            items(&original, &destination).unwrap_err().code,
+            "ImageUnsupported"
+        );
+        let mut text_only = original.clone();
+        text_only.items.pop();
+        let transformed = items(&text_only, &destination).unwrap();
         assert!(
             matches!(&transformed[0], Item::Message { content, .. } if content == &vec![Block::Text { text:"visible".into() }])
-        );
-        assert!(
-            serde_json::to_string(&transformed[1])
-                .unwrap()
-                .contains("image omitted")
         );
         assert!(
             matches!(&original.items[1], Item::Message { content, .. } if matches!(content[0], Block::Image { .. }))

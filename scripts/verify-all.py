@@ -36,6 +36,8 @@ SUITES = {
     "coding": ("verify-coding.py", "coding-verification.json"),
     "sessions": ("verify-sessions.py", "session-verification.json"),
     "context": ("verify-context.py", "context-verification.json"),
+    "shared-context": ("verify-shared-context.py", "shared-context-verification.json"),
+    "shared-context-tui": ("verify-shared-context-tui.py", "shared-context-tui-verification.json"),
     "workspace": ("verify-workspace.py", "workspace-verification.json"),
     "models": ("verify-model-access.py", "model-access-verification.json"),
     "cloud-models": ("verify-cloud-model-access.py", "cloud-model-access-verification.json"),
@@ -49,7 +51,11 @@ def execute(name: str, script: str, receipt_file: str, output: pathlib.Path) -> 
     directory.mkdir(parents=True, exist_ok=True)
     old_result = ROOT / "artifacts" / receipt_file
     old_result.unlink(missing_ok=True)
-    environment = {**os.environ, "EDEN_VERIFICATION_LOG": str(directory / "commands")}
+    environment = {
+        **os.environ,
+        "EDEN_VERIFICATION_LOG": str(directory / "commands"),
+        "EDEN_VERIFICATION_DIAGNOSTICS": str(directory / "diagnostics"),
+    }
     start = time.monotonic()
     print(f"Starting {name}", flush=True)
     result = run(
@@ -102,6 +108,8 @@ def suite_order() -> list[str]:
         return [
             "workspace",
             "context",
+            "shared-context",
+            "shared-context-tui",
             "models",
             "coding",
             "sessions",
@@ -125,6 +133,8 @@ def suite_order() -> list[str]:
             "sessions",
             "models",
             "context",
+            "shared-context",
+            "shared-context-tui",
             "coding",
             "router-models",
             "delivery",
@@ -141,6 +151,8 @@ def suite_order() -> list[str]:
         "configuration-forms",
         "coding",
         "context",
+        "shared-context",
+        "shared-context-tui",
         "sessions",
         "models",
         "delivery",

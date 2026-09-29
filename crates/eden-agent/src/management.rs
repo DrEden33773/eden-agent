@@ -224,9 +224,20 @@ fn copy_records(
             copy.payload["usage_generation"] = json!(mapping.get(&generation).filter(|_| {
                 records
                     .get((generation - 1) as usize)
-                    .is_some_and(|record| record.kind == "compaction")
+                    .is_some_and(|record| {
+                        matches!(
+                            record.kind.as_str(),
+                            "compaction" | "context_edit" | "context_rebuild" | "image_version"
+                        )
+                    })
             }));
         }
+        eden_protocol::context_edit::remap_record(
+            &copy.kind,
+            &mut copy.payload,
+            &mapping,
+            public_only,
+        );
         mapping.insert(record.sequence, copy.sequence);
         output.push(copy);
     }
@@ -815,13 +826,15 @@ impl Session {
             )
         })
     }
-    async fn context_resources(&self) -> Result<Option<eden_protocol::resources::Snapshot>, Fault> {
+    pub(crate) async fn context_resources(
+        &self,
+    ) -> Result<Option<eden_protocol::resources::Snapshot>, Fault> {
         if !self.has_role(eden_protocol::resources::SOURCE) {
             return Ok(None);
         }
         self.resources().await.map(Some)
     }
-    async fn context_tools(&self) -> Result<Option<Vec<c::ToolDefinition>>, Fault> {
+    pub(crate) async fn context_tools(&self) -> Result<Option<Vec<c::ToolDefinition>>, Fault> {
         use eden_protocol::resources as r;
         if !self.has_role(r::TOOL_CATALOG) {
             return Ok(None);

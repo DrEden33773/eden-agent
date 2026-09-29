@@ -24,6 +24,8 @@ pub struct ToolSummary {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Message {
+    #[serde(skip)]
+    pub images: Vec<std::sync::Arc<eden_protocol::coding::Block>>,
     pub id: u64,
     #[serde(default)]
     pub children: Vec<ToolSummary>,
@@ -48,6 +50,7 @@ impl Message {
     }
     pub fn new(id: u64, role: Role, title: impl Into<String>, body: impl Into<String>) -> Self {
         Self {
+            images: vec![],
             id,
             children: vec![],
             summary: None,
@@ -72,8 +75,10 @@ pub struct Attachment {
     pub media_type: Option<String>,
     pub image: bool,
 }
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Draft {
+    #[serde(default)]
+    pub references: Vec<std::sync::Arc<eden_protocol::session_reference::Reference>>,
     pub text: String,
     pub cursor: usize,
     pub attachments: Vec<Attachment>,
@@ -259,6 +264,7 @@ pub struct TextSpan {
 }
 #[derive(Clone, Debug)]
 pub struct Row {
+    pub image: Option<crate::transcript_images::Slice>,
     pub tree_stem: bool,
     pub inset: u16,
     pub summary: bool,

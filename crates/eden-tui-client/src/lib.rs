@@ -200,6 +200,98 @@ impl HostClient {
         )
         .await
     }
+    /// Read the shared effective request without sending a prompt or consuming temporary edits.
+    pub async fn inspect_context(&self) -> Result<eden_protocol::context_edit::Snapshot, Fault> {
+        self.post("/context/inspect", Value::Null).await
+    }
+    /// Apply the exact reviewed version through the host's idempotent receipt path.
+    pub async fn edit_context(
+        &self,
+        request_id: &str,
+        edit: eden_protocol::context_edit::Apply,
+    ) -> Result<eden_protocol::context_edit::Snapshot, Fault> {
+        self.post(
+            "/context/apply",
+            json!({ "request_id": request_id, "edit": edit }),
+        )
+        .await
+    }
+    /// Rebuild on a new branch; wait for the returned run before reading its committed view.
+    pub async fn rebuild_context(
+        &self,
+        request_id: &str,
+        rebuild: eden_protocol::context_edit::Rebuild,
+    ) -> Result<u64, Fault> {
+        let value: Value = self
+            .post(
+                "/context/rebuild",
+                json!({ "request_id": request_id, "rebuild": rebuild }),
+            )
+            .await?;
+        value["run_id"]
+            .as_u64()
+            .ok_or_else(|| fault("InvalidResponse", "missing rebuild run"))
+    }
+    /// Explicitly summarize effective context using the configured compaction policy.
+    pub async fn compact(&self, request_id: &str, instructions: &str) -> Result<u64, Fault> {
+        let value: Value = self
+            .post(
+                "/context/compact",
+                json!({ "request_id": request_id, "instructions": instructions }),
+            )
+            .await?;
+        value["run_id"]
+            .as_u64()
+            .ok_or_else(|| fault("InvalidResponse", "missing compaction run"))
+    }
+    /// Read saved-session choices without opening a source writer.
+    pub async fn session_catalog(
+        &self,
+    ) -> Result<Vec<eden_protocol::session_reference::CatalogEntry>, Fault> {
+        self.post("/session/catalog", Value::Null).await
+    }
+    /// List explicit source heads without changing the source branch.
+    pub async fn session_branches(
+        &self,
+        path: &str,
+    ) -> Result<Vec<eden_protocol::session_reference::Branch>, Fault> {
+        self.post("/session/branches", json!({ "path": path }))
+            .await
+    }
+    /// Capture an effective source preview; freezing selected entries is local and deterministic.
+    pub async fn reference_preview(
+        &self,
+        path: &str,
+        head: Option<u64>,
+    ) -> Result<eden_protocol::session_reference::Preview, Fault> {
+        self.post("/reference/preview", json!({ "path": path, "head": head }))
+            .await
+    }
+    /// Send a self-contained reference snapshot with ordinary content.
+    pub async fn submit_referenced(
+        &self,
+        request_id: &str,
+        content: Vec<Block>,
+        references: Vec<eden_protocol::session_reference::Reference>,
+    ) -> Result<u64, Fault> {
+        self.run(
+            "/prompt",
+            json!({ "request_id": request_id, "content": content, "references": references }),
+        )
+        .await
+    }
+    /// Preserve the reviewed image version decision through receipt recovery.
+    pub async fn edit_images(
+        &self,
+        request_id: &str,
+        edit: eden_protocol::context_edit::ImageEdit,
+    ) -> Result<eden_protocol::context_edit::Snapshot, Fault> {
+        self.post(
+            "/context/images",
+            json!({ "request_id": request_id, "edit": edit }),
+        )
+        .await
+    }
     /// Inspect pending inputs on the active branch.
     pub async fn queued(&self) -> Result<Vec<QueueEntry>, Fault> {
         self.post("/queue/inspect", Value::Null).await

@@ -2,18 +2,22 @@
 mod app;
 mod autocomplete;
 mod clipboard;
+mod context;
 mod extensions;
 mod fields;
 mod forms;
+mod image_preview;
 mod input;
 mod model;
 mod plugin;
 mod projection;
+mod references;
 mod selection;
 mod storage;
 mod summary;
 mod terminal;
 mod text;
+mod transcript_images;
 mod view;
 
 pub use terminal::{Options, run};

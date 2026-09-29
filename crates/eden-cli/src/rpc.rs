@@ -53,6 +53,13 @@ const METHODS: &[&str] = &[
     "command",
     "metadata",
     "navigate",
+    "context.inspect",
+    "context.apply",
+    "context.rebuild",
+    "context.images",
+    "session.catalog",
+    "session.branches",
+    "reference.preview",
     "compact",
     "attachment.include",
     "models",
@@ -262,7 +269,19 @@ fn dispatch(
         "config.status" => Dispatch::Immediate(json!(
             session.configuration_operation(field(request, "operation")?)?
         )),
-        "prompt" => Dispatch::Run(session.submit_blocks(content(request)?)?, false),
+        "prompt" => Dispatch::Run(
+            session.submit_referenced(
+                content(request)?,
+                parameter(
+                    request
+                        .params
+                        .get("references")
+                        .cloned()
+                        .unwrap_or(json!([])),
+                )?,
+            )?,
+            false,
+        ),
         "resume" => Dispatch::Run(session.resume()?, false),
         "shell" => Dispatch::Run(
             session.user_shell(
@@ -333,7 +352,18 @@ fn dispatch(
                 _ => field(request, "kind")?,
             };
             let content = content(request)?;
-            query(async move { Ok(json!(s.enqueue(&kind, content).await?)) })
+            let references = parameter(
+                request
+                    .params
+                    .get("references")
+                    .cloned()
+                    .unwrap_or(json!([])),
+            )?;
+            query(async move {
+                Ok(json!(
+                    s.enqueue_referenced(&kind, content, references).await?
+                ))
+            })
         }
         "queue.withdraw" => {
             let ids = field(request, "ids")?;
@@ -387,6 +417,29 @@ fn dispatch(
             )?,
             false,
         ),
+        "session.catalog" => query(async move { Ok(json!(s.session_catalog().await?)) }),
+        "session.branches" => {
+            let path: String = field(request, "path")?;
+            query(async move { Ok(json!(s.session_branches(path).await?)) })
+        }
+        "reference.preview" => {
+            let path: String = field(request, "path")?;
+            let head = request.params["head"].as_u64();
+            query(async move { Ok(json!(s.reference_preview(path, head).await?)) })
+        }
+        "context.images" => {
+            let edit = parameter(request.params.clone())?;
+            query(async move { Ok(json!(s.edit_images(edit).await?)) })
+        }
+        "context.rebuild" => Dispatch::Run(
+            session.rebuild_context(parameter(request.params.clone())?)?,
+            false,
+        ),
+        "context.inspect" => query(async move { Ok(json!(s.inspect_context().await?)) }),
+        "context.apply" => {
+            let edit = parameter(request.params.clone())?;
+            query(async move { Ok(json!(s.edit_context(edit).await?)) })
+        }
         "compact" => Dispatch::Run(
             session.compact(
                 request

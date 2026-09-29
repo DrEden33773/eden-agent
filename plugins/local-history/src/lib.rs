@@ -160,6 +160,7 @@ impl Store {
                 sequence,
                 head,
                 branch,
+                new_branch,
                 entries,
             } => {
                 let (current_head, current_branch) = branch_state(&self.records)?;
@@ -174,7 +175,13 @@ impl Store {
                         "history changed before checkpoint commit",
                     ));
                 }
-                self.append(run_id, entries)?;
+                if let Some(branch) = &new_branch
+                    && (branch.trim().is_empty()
+                        || self.records.iter().any(|record| &record.branch == branch))
+                {
+                    return Err(fault("new branch must be nonempty and unused"));
+                }
+                self.append_on(run_id, entries, new_branch)?;
             }
             StoreRequest::Navigate { target, branch } => {
                 self.available()?;
@@ -220,8 +227,17 @@ impl Store {
     }
 
     fn append(&mut self, run_id: u64, entries: Vec<RecordDraft>) -> Result<(), Fault> {
+        self.append_on(run_id, entries, None)
+    }
+    fn append_on(
+        &mut self,
+        run_id: u64,
+        entries: Vec<RecordDraft>,
+        new_branch: Option<String>,
+    ) -> Result<(), Fault> {
         self.available()?;
         let (mut parent_id, branch) = branch_state(&self.records)?;
+        let branch = new_branch.unwrap_or(branch);
         let mut pending = Vec::with_capacity(entries.len());
         for (index, entry) in entries.into_iter().enumerate() {
             if entry.kind == "branch_selected" {
@@ -398,6 +414,7 @@ mod tests {
             })
             .unwrap();
         let request = StoreRequest::AppendChecked {
+            new_branch: None,
             run_id: 1,
             session_id: 7,
             sequence: 0,

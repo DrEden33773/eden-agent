@@ -97,6 +97,9 @@ pub enum Item {
 /// resolved cwd, and whether this continues a session instead of adding a turn.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunInput {
+    /// Fixed reference snapshots are expanded only against the actual request's final system.
+    #[serde(default)]
+    pub references: Vec<crate::session_reference::Reference>,
     /// Immutable, non-secret model target for this run, including summary requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<crate::models::ModelTarget>,
@@ -312,6 +315,9 @@ pub enum StoreRequest {
         sequence: u64,
         head: Option<u64>,
         branch: String,
+        /// Atomically fork at the checked head before appending. An existing branch is refused.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_branch: Option<String>,
         entries: Vec<RecordDraft>,
     },
     Navigate {
@@ -348,6 +354,9 @@ pub struct StoreReply {
 // Field and variant names state the payload; see docs/development-checks.md#doc-comments.
 #[allow(missing_docs)]
 pub struct QueueEntry {
+    /// Reference content is captured at enqueue time; system comparison waits for delivery.
+    #[serde(default)]
+    pub references: Vec<crate::session_reference::Reference>,
     #[serde(default = "main_branch")]
     pub branch: String,
     pub id: u64,
@@ -378,6 +387,11 @@ pub enum QueueRequest {
     Enqueue {
         kind: String,
         content: Vec<Block>,
+    },
+    EnqueueReferenced {
+        kind: String,
+        content: Vec<Block>,
+        references: Vec<crate::session_reference::Reference>,
     },
     Take {
         kind: String,

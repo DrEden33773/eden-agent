@@ -77,7 +77,7 @@ def effect() -> list[dict[str, Any]]:
 
 
 def summary(body: dict[str, Any]) -> bool:
-    return body["tools"] == []
+    return body.get("tools", []) == []
 
 
 class Server:
@@ -131,6 +131,8 @@ class Server:
                                 "cancelled client did not finish gate scenario"
                             )
                         self.wfile.write(("data: " + json.dumps(payload) + "\n\n").encode())
+                        if "messages" in body:
+                            self.wfile.write(b"data: [DONE]\n\n")
                     else:
                         self.wfile.write(json.dumps(payload).encode())
                     self.wfile.flush()
@@ -263,7 +265,7 @@ def main() -> None:
         image = scratch / "pixel.png"
         image.write_bytes(
             base64.b64decode(
-                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR5kAAAAASUVORK5CYII="
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII="
             )
         )
         summary_count = [0]

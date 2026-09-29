@@ -211,6 +211,24 @@ impl Session {
         )
         .await
     }
+    pub(crate) async fn inspect_model_target(&self) -> Result<Option<m::ModelTarget>, Fault> {
+        if !self.has_role(m::MODEL_CATALOG) {
+            return Ok(None);
+        }
+        let selection = self.model_selection().await?;
+        match self
+            .service::<_, m::CatalogReply>(
+                0,
+                m::MODEL_CATALOG,
+                &m::CatalogRequest::Resolve { selection },
+            )
+            .await
+        {
+            Ok(reply) => Ok(reply.target),
+            Err(error) if error.code == "ModelUnavailable" => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
     pub(crate) async fn freeze_model(&self, run_id: u64) -> Result<Option<m::ModelTarget>, Fault> {
         if !self.has_role(m::MODEL_CATALOG) {
             return Ok(None);

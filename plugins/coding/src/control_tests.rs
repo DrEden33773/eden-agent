@@ -94,6 +94,7 @@ struct Host {
     provider_calls: AtomicUsize,
     cancellations: AtomicUsize,
     retrying: tokio::sync::Notify,
+    overflow_requests: Mutex<Option<Vec<ModelInput>>>,
 }
 unsafe extern "C" fn request(host: usize, bytes: Bytes, reply: Reply) -> u64 {
     // SAFETY: The test keeps its boxed host alive until the instance stop barrier.
@@ -107,6 +108,20 @@ unsafe extern "C" fn request(host: usize, bytes: Bytes, reply: Reply) -> u64 {
                 StoreRequest::Read => vec![],
                 StoreRequest::Append { kind, payload, .. } => vec![RecordDraft { kind, payload }],
                 StoreRequest::AppendBatch { entries, .. } => entries,
+                StoreRequest::AppendChecked {
+                    session_id,
+                    sequence,
+                    head,
+                    branch,
+                    entries,
+                    ..
+                } => {
+                    assert_eq!(session_id, 1);
+                    assert_eq!(sequence, records.len() as u64);
+                    assert_eq!(head, records.last().map(|record| record.sequence));
+                    assert_eq!(branch, "main");
+                    entries
+                }
                 _ => panic!("unexpected store operation"),
             };
             for draft in drafts {
@@ -121,6 +136,41 @@ unsafe extern "C" fn request(host: usize, bytes: Bytes, reply: Reply) -> u64 {
                 sequence: records.len() as u64,
                 records: records.clone(),
             }))
+        }
+        CONTEXT => {
+            let input: ContextInput = serde_json::from_value(request.payload).unwrap();
+            let mut items = vec![context::system_item(&input)];
+            items.extend(context::project_records(&input.records).unwrap());
+            Ok(json!(ModelInput {
+                target: input.target,
+                max_output_tokens: None,
+                items,
+                tools: input.tools.unwrap_or_else(tools)
+            }))
+        }
+        eden_plugin_sdk::protocol::runtime::HOST => Ok(json!(0)),
+        QUEUE if host.overflow_requests.lock().unwrap().is_some() => Ok(json!([])),
+        PROVIDER if host.overflow_requests.lock().unwrap().is_some() => {
+            let mut guard = host.overflow_requests.lock().unwrap();
+            let requests = guard.as_mut().unwrap();
+            requests.push(serde_json::from_value(request.payload).unwrap());
+            if requests.len() == 1 {
+                Err(Fault::new(
+                    "ContextOverflow",
+                    "fixture",
+                    "compact and retry",
+                ))
+            } else {
+                Ok(json!(ModelReply {
+                    items: vec![Item::Message {
+                        role: "assistant".into(),
+                        content: vec![Block::Text {
+                            text: "done".into()
+                        }]
+                    }],
+                    usage: Value::Null
+                }))
+            }
         }
         PROVIDER => {
             host.provider_calls.fetch_add(1, Ordering::SeqCst);
@@ -369,6 +419,190 @@ async fn changed_delivery_mode_applies_to_next_take_without_rewriting_delivered_
             .filter(|r| r.kind == "queue_delivered" && r.payload["id"] == first[0].id)
             .count(),
         1
+    );
+    package.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn context_service_inspection_is_read_only_and_stale_edit_keeps_original() {
+    use eden_plugin_sdk::protocol::context_edit as e;
+    let host = Box::<Host>::default();
+    let mut original = record(1, "message");
+    original.payload = json!(Item::Message {
+        role: "user".into(),
+        content: vec![Block::Text {
+            text: "original".into()
+        }]
+    });
+    host.records.lock().unwrap().push(original.clone());
+    let package = instance(&host, create(Value::Null).unwrap());
+    let input = ContextInput {
+        target: None,
+        resources: None,
+        tools: Some(vec![]),
+        action: "inspect".into(),
+        records: vec![],
+        instructions: String::new(),
+        limits: ModelLimits::default(),
+        cwd: "/fixture".into(),
+        items: vec![],
+    };
+    let snapshot: e::Snapshot = serde_json::from_value(
+        call(
+            &package,
+            e::SERVICE,
+            e::Request::Inspect {
+                input: input.clone(),
+            },
+        )
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(host.records.lock().unwrap().len(), 1);
+    assert_eq!(host.provider_calls.load(Ordering::SeqCst), 0);
+    let mut document = snapshot.effective.clone();
+    document.entries[1].item = Item::Message {
+        role: "user".into(),
+        content: vec![Block::Text {
+            text: "edited".into(),
+        }],
+    };
+    let edit = e::Apply {
+        revision: snapshot.revision,
+        document,
+        scope: e::Scope::Branch,
+        source: "frontend-a".into(),
+    };
+    call(
+        &package,
+        e::SERVICE,
+        e::Request::Apply {
+            input: input.clone(),
+            edit: edit.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        call(
+            &package,
+            e::SERVICE,
+            e::Request::Apply {
+                input: input.clone(),
+                edit
+            }
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "ContextConflict"
+    );
+    let reopened: e::Snapshot = serde_json::from_value(
+        call(&package, e::SERVICE, e::Request::Inspect { input })
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(reopened.edits, vec![2]);
+    assert_ne!(
+        reopened.effective.entries[1].item,
+        reopened.original.entries[1].item
+    );
+    assert_eq!(host.records.lock().unwrap()[0].payload, original.payload);
+    package.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn draft_image_preflight_adapts_without_claiming_a_historical_sent_version() {
+    use eden_plugin_sdk::protocol::context_edit as e;
+    let host = Box::<Host>::default();
+    let package = instance(
+        &host,
+        create(json!({ "images": { "limits": { "max_width": 2 } } })).unwrap(),
+    );
+    let mut target = eden_plugin_sdk::protocol::models::ModelTarget::default();
+    target.capabilities.images = true;
+    let content = vec![Block::Image {media_type:"image/png".into(),data:"iVBORw0KGgoAAAANSUhEUgAAAAQAAAACCAIAAADwyuo0AAAAEElEQVR4nGP4z8AARwzIHABvqgf5gNwAKAAAAABJRU5ErkJggg==".into()}];
+    let input = ContextInput {
+        target: Some(target),
+        resources: None,
+        tools: Some(vec![]),
+        action: "inspect".into(),
+        records: vec![],
+        instructions: String::new(),
+        limits: ModelLimits::default(),
+        cwd: "/fixture".into(),
+        items: vec![],
+    };
+    let result = call(
+        &package,
+        e::SERVICE,
+        e::Request::CheckInput {
+            input,
+            content: content.clone(),
+            references: vec![],
+        },
+    )
+    .await;
+    let snapshot: e::Snapshot =
+        serde_json::from_value(result.expect("new draft image must be adapted before admission"))
+            .unwrap();
+    let Item::Message { content: sent, .. } = &snapshot.effective.entries.last().unwrap().item
+    else {
+        panic!("preview message missing")
+    };
+    assert_ne!(sent, &content);
+    assert!(host.records.lock().unwrap().is_empty());
+    assert_eq!(host.provider_calls.load(Ordering::SeqCst), 0);
+    package.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn overflow_retry_keeps_omitted_images_and_request_limits() {
+    let host = Box::<Host>::default();
+    *host.overflow_requests.lock().unwrap() = Some(vec![]);
+    let image = Block::Image {media_type:"image/png".into(),data:"iVBORw0KGgoAAAANSUhEUgAAAAQAAAACCAIAAADwyuo0AAAAEElEQVR4nGP4z8AARwzIHABvqgf5gNwAKAAAAABJRU5ErkJggg==".into()};
+    let mut target = eden_plugin_sdk::protocol::models::ModelTarget::default();
+    target.capabilities.images = true;
+    let version = eden_model_input::ImageRecord::new(image.clone())
+        .unwrap()
+        .prepare(
+            eden_model_input::ImageChoice::Omit,
+            &target,
+            &Default::default(),
+        )
+        .unwrap();
+    let mut message = record(1, "message");
+    message.payload = json!(Item::Message {
+        role: "user".into(),
+        content: vec![image]
+    });
+    let mut metadata = record(2, "image_version");
+    metadata.payload = json!({ "entry_id": "record:1:0", "block_index": 0, "image": version });
+    host.records.lock().unwrap().extend([message, metadata]);
+    let package = instance(&host, create(Value::Null).unwrap());
+    call(
+        &package,
+        LOOP,
+        RunInput {
+            references: vec![],
+            target: Some(target),
+            resume: true,
+            cwd: "/fixture".into(),
+            content: vec![],
+        },
+    )
+    .await
+    .unwrap();
+    let requests = host.overflow_requests.lock().unwrap().clone().unwrap();
+    assert_eq!(requests.len(), 2);
+    for request in &requests {
+        assert!(!request.items.iter().any(|item| matches!(item,Item::Message {content,..} if content.iter().any(|block| matches!(block,Block::Image {..})))));
+    }
+    assert_eq!(
+        requests[0].target.as_ref().unwrap().compat["eden_image_limits"],
+        requests[1].target.as_ref().unwrap().compat["eden_image_limits"]
     );
     package.stop().await.unwrap();
 }

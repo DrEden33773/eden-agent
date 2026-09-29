@@ -633,6 +633,22 @@ impl Hub {
         });
         Ok(())
     }
+    /// Observe explicit detach, natural expiry or shutdown without refreshing the lease.
+    pub async fn wait_for_detach(&self, attachment: u64) {
+        let mut changed = self.changed.subscribe();
+        loop {
+            changed.borrow_and_update();
+            let live = self
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .attachments
+                .contains_key(&attachment);
+            if !live || changed.changed().await.is_err() {
+                return;
+            }
+        }
+    }
     /// Detach one frontend and clear its transient input activity.
     pub fn detach(&self, attachment: u64) -> Result<(), Fault> {
         let hub = self;

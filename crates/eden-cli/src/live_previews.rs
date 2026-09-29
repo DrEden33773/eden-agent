@@ -240,6 +240,7 @@ pub(super) async fn detach(shared: &Shared, attachment: u64) {
                 Some("/delivery/preview" | "/manage/copy/preview")
             )
             && body["body"]["attachment"].as_u64() == Some(attachment)
+            && result.is_ok()
         {
             *result = Err(fault("Cancelled", "preview owner detached"));
         }
@@ -252,7 +253,8 @@ pub(super) fn completed_result(
     body: &Value,
     result: Result<Value, Fault>,
 ) -> Result<Value, Fault> {
-    if matches!(route, "/delivery/preview" | "/manage/copy/preview")
+    if result.is_ok()
+        && matches!(route, "/delivery/preview" | "/manage/copy/preview")
         && body["attachment"].as_u64().is_some_and(|owner| {
             shared
                 .management

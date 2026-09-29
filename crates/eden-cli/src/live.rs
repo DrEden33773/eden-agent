@@ -429,11 +429,22 @@ async fn dispatch(
     match (method, route) {
         ("POST", "/attach") => {
             let frontend: String = field(&body, "frontend")?;
-            Ok(json!({ "attachment": session.attach_presentation(&frontend)? }))
+            let attachment = session.attach_presentation(&frontend)?;
+            let owner = shared.clone();
+            tokio::spawn(async move {
+                owner.session.wait_presentation_detach(attachment).await;
+                previews::detach(&owner, attachment).await;
+                detach_scans(&owner, attachment).await;
+            });
+            Ok(json!({ "attachment": attachment }))
         }
         ("POST", "/detach") => {
             let attachment = field(&body, "attachment")?;
-            session.detach_presentation(attachment)?;
+            if let Err(error) = session.detach_presentation(attachment)
+                && error.code != "InvalidInput"
+            {
+                return Err(error);
+            }
             previews::detach(shared, attachment).await;
             detach_scans(shared, attachment).await;
             Ok(json!({ "detached": true }))

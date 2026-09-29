@@ -132,3 +132,7 @@ Startup-only process paths, environment and composition selection remain explici
 ## Overlay replacement
 
 `EDEN_TUI_OVERLAY` selects an explicitly trusted native library exporting `eden_overlay_v1` from `eden-ui-sdk`. It receives the actual modal items, selection, query, masked field display values and semantic theme, and can render cells and map keys to validated host navigation. Host action targets and mouse hit regions remain authoritative. A rejected frame or event falls back to the built-in interface. The Overlay table has its own full-size header check; renderer/editor/theme/frontend replacements continue to load independently. No Rust framework value or allocator crosses these C tables.
+
+## Reproducing terminal measurements
+
+Build with `cargo build --release --locked -p eden-cli -p eden-terminal-editor`, then run `python3 scripts/measure-tui.py`. The POSIX probe opens isolated committed histories with 1k, 10k and 100k messages, measures host startup and the first observed 120×36 PTY frame, and samples 20 composer edits. Its JSON report includes input-to-observed-text timings, emitted bytes and Linux process peak memory. The observation loop has 2 ms resolution; freshly generated files use normal filesystem caching. These measurements do not include a physical display or IME, and no model or account is involved.

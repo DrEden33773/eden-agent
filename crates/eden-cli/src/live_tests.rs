@@ -574,3 +574,73 @@ async fn detached_preview_receipt_does_not_retain_the_artifact() {
     assert_eq!(receipt["result"]["Err"]["code"], "Cancelled");
     assert!(!receipt.to_string().contains("application/x-ndjson"));
 }
+
+#[tokio::test]
+async fn lease_expiry_cleans_preview_before_reattachment_and_exit() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let cleaned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let session =
+        session_with_preview_barrier(Some((started.clone(), release.clone(), cleaned.clone())))
+            .await;
+    let (stop, _) = watch::channel(false);
+    let shared = Arc::new(Shared {
+        management: Default::default(),
+        session: session.clone(),
+        token: "fixture".into(),
+        web_root: None,
+        submissions: Mutex::new((HashMap::new(), VecDeque::new())),
+        history: tokio::sync::Mutex::new(None),
+        stop,
+    });
+    let old = dispatch(&shared, "POST", "/attach", json!({ "frontend": "tui" }))
+        .await
+        .unwrap()["attachment"]
+        .clone();
+    let preparing = shared.clone();
+    let owner = old.clone();
+    let mut task = tokio::spawn(async move {
+        dispatch(
+            &preparing,
+            "POST",
+            "/delivery/preview",
+            json!({ "request_id": "expired-preview", "attachment": owner, "selection": {} }),
+        )
+        .await
+    });
+    started.notified().await;
+    let sequence = session.presentation_snapshot().sequence;
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        session.presentation_changed(sequence),
+    )
+    .await
+    .unwrap();
+    assert!(
+        session
+            .presentation_heartbeat(old.as_u64().unwrap())
+            .is_err()
+    );
+    let automatic = tokio::time::timeout(Duration::from_secs(2), &mut task).await;
+    let automatically_cleaned = automatic.is_ok();
+    if !automatically_cleaned {
+        release.notify_one();
+        let _ = task.await;
+    }
+    let repeated = dispatch(&shared, "POST", "/detach", json!({ "attachment": old })).await;
+    let next = dispatch(&shared, "POST", "/attach", json!({ "frontend": "tui" }))
+        .await
+        .unwrap()["attachment"]
+        .clone();
+    dispatch(&shared, "POST", "/detach", json!({ "attachment": next }))
+        .await
+        .unwrap();
+    session.shutdown().await.unwrap();
+    assert!(
+        automatically_cleaned,
+        "expired attachment retained its pending preview"
+    );
+    assert!(repeated.is_ok(), "expired owner cleanup must be idempotent");
+    assert_ne!(old, next);
+    assert!(cleaned.load(std::sync::atomic::Ordering::SeqCst));
+}

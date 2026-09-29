@@ -19,6 +19,7 @@ from typing import Any
 from install import ROOT, Composition, build_target, install, library, target
 
 AUTHORS = (
+    "tui-editor",
     "configuration-forms",
     "configuration-custom",
     "notes",
@@ -226,6 +227,8 @@ def export_authors(destination: pathlib.Path) -> None:
     for name in (
         "eden-protocol",
         "eden-plugin-sdk",
+        "eden-ui-sdk",
+        "eden-tui-client",
         "eden-kernel",
         "eden-workspace",
         "eden-presentation",

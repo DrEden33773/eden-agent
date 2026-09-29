@@ -199,6 +199,30 @@ pub enum Family {
         #[arg(long, value_name = "DIR")]
         web_root: Option<PathBuf>,
     },
+    /// Restore a stopped history as a live host without executing another turn
+    ResumeLive {
+        /// Local endpoint description
+        #[arg(long, value_name = "PATH")]
+        endpoint: PathBuf,
+        /// Built browser adapter directory
+        #[arg(long, value_name = "DIR")]
+        web_root: Option<PathBuf>,
+    },
+    /// Open the interactive terminal, creating a host unless explicitly attaching or reading
+    Tui {
+        /// Attach only to this live endpoint
+        #[arg(long, conflicts_with = "read")]
+        endpoint: Option<PathBuf>,
+        /// Open committed history without loading saved plugins
+        #[arg(long)]
+        read: Option<PathBuf>,
+        /// Local draft identity; use distinct identities for concurrent terminals
+        #[arg(long, default_value = "terminal")]
+        frontend: String,
+        /// Explicit native editor replacement
+        #[arg(long)]
+        editor: Option<PathBuf>,
+    },
     /// Read a saved presentation through the same adapters without loading business plugins
     Read {
         /// Committed public history file
@@ -210,7 +234,7 @@ pub enum Family {
         #[arg(long, value_name = "DIR")]
         web_root: Option<PathBuf>,
     },
-    /// Attach the minimal Ratatui adapter to an explicitly selected live host
+    /// Attach the interactive terminal to an explicitly selected live host
     LiveTui {
         /// Endpoint description issued by `eden live`
         #[arg(long, value_name = "PATH")]

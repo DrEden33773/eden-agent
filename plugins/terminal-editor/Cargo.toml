@@ -1,0 +1,17 @@
+[package]
+name = "eden-terminal-editor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+eden-ui-sdk = { path = "../../crates/eden-ui-sdk", version = "0.1.0" }
+unicode-segmentation = "1.13.3"
+unicode-width = "0.2.0"

@@ -9,6 +9,7 @@ from verification import ROOT, prepare, run
 def main() -> None:
     selection = importlib.import_module("ci-cache").test_selection(os.environ["CI_CACHE_OS"])
     run(["node", "scripts/checks.mjs", "clippy"], ROOT, timeout=None)
+    run(["cargo", "build", "-p", "eden-terminal-editor", "--locked"], ROOT, timeout=None)
     targets = [arg for name in selection["packages"] for arg in ("-p", name)] or ["--workspace"]
     run(["cargo", "test", "--locked", "--no-run", *targets], ROOT, timeout=None)
     run(["node", "scripts/checks.mjs", "test", "--no-run"], ROOT, timeout=None)

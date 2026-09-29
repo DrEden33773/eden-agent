@@ -11,7 +11,6 @@ pub mod delivery;
 pub mod environment;
 /// Explicit local process hosting multiple live frontend attachments.
 pub mod live;
-mod live_tui;
 /// Model and API-key operations through the shared session services.
 pub mod model_commands;
 /// Structured stdout presentation and machine record framing.
@@ -24,6 +23,8 @@ pub mod session_commands;
 pub mod shell;
 /// Terminal palette shared by clap's rendering and runtime messages.
 pub mod style;
+/// Thin launch boundary for the independent terminal frontend.
+pub mod tui;
 mod validation;
 /// Resources, explicit project trust and contributed commands.
 pub mod workspace_commands;

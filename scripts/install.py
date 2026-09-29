@@ -96,6 +96,10 @@ def install(
         build_target() / profile / ("eden-launch" + suffix),
         destination / "bin" / ("eden-launch" + suffix),
     )
+    ui_dir = destination / "ui"
+    ui_dir.mkdir(exist_ok=True)
+    editor = library("eden_terminal_editor")
+    shutil.copy2(build_target() / profile / editor, ui_dir / editor)
     name = library("eden_standard")
     if controlled:
         shutil.copy2(build_target() / profile / name, plugin_dir / name)

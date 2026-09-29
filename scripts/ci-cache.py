@@ -59,6 +59,10 @@ PLATFORM_PACKAGES = (
     "eden-process",
     "eden-search",
     "eden-workspace",
+    "eden-tui",
+    "eden-tui-client",
+    "eden-terminal-editor",
+    "eden-ui-sdk",
 )
 TEST_SELECTIONS = {
     "ubuntu-24.04": ("workspace-suites", ()),

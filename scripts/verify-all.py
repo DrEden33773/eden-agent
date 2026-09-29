@@ -23,6 +23,7 @@ from verification import (
 )
 
 SUITES = {
+    "tui": ("verify-tui.py", "tui-verification.json"),
     "configuration-forms": (
         "verify-configuration-forms.py",
         "configuration-forms-verification.json",
@@ -109,6 +110,7 @@ def suite_order() -> list[str]:
             "cloud-models",
             "oauth-models",
             "presentation",
+            "tui",
             "configuration-forms",
             "notes",
             "cache-warmer",
@@ -118,6 +120,7 @@ def suite_order() -> list[str]:
         return [
             "workspace",
             "presentation",
+            "tui",
             "configuration-forms",
             "sessions",
             "models",
@@ -134,6 +137,7 @@ def suite_order() -> list[str]:
     return [
         "workspace",
         "presentation",
+        "tui",
         "configuration-forms",
         "coding",
         "context",

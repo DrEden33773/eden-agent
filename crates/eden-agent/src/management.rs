@@ -618,6 +618,17 @@ impl Session {
         history: PathBuf,
         cwd: Option<PathBuf>,
     ) -> Result<Self, Fault> {
+        Self::open_saved_with_workspace(composition, history, cwd, WorkspaceOptions::default())
+            .await
+    }
+    /// Reopen stopped history with explicit resource, trust and configuration overrides, without
+    /// starting a model run. The recorded cwd remains authoritative unless explicitly supplied.
+    pub async fn open_saved_with_workspace(
+        composition: impl AsRef<Path>,
+        history: PathBuf,
+        cwd: Option<PathBuf>,
+        workspace: WorkspaceOptions,
+    ) -> Result<Self, Fault> {
         let records = eden_kernel::history::read(&history)?;
         let cwd = match cwd {
             Some(cwd) => cwd,
@@ -628,12 +639,13 @@ impl Session {
                     .ok_or_else(|| invalid("missing recorded cwd"))?,
             ),
         };
-        Self::open_with(
+        Self::open_with_workspace(
             composition,
             SessionOptions {
                 cwd,
                 history: Some(history),
             },
+            workspace,
         )
         .await
     }

@@ -64,14 +64,11 @@ def wait_for(endpoint: dict, predicate, seconds: float = 10.0) -> dict:
 
 
 def tui_keyboard_probe(binary: pathlib.Path, endpoint_file: pathlib.Path, endpoint: dict) -> bool:
-    """Drive the installed Ratatui adapter through a real Unix PTY, including option ten."""
+    """Exercise the installed official editor, picker option ten and terminal restoration."""
     if os.name == "nt":
+        print("SKIP: presentation POSIX PTY; native Windows terminal evidence required")
         return False
-    import fcntl
-    import pty
-    import select
-    import struct
-    import termios
+    from tui_pty import Terminal
 
     run = call(endpoint, "/prompt", {"request_id": "tui-keyboard", "text": "terminal review"})[
         "run_id"
@@ -82,126 +79,47 @@ def tui_keyboard_probe(binary: pathlib.Path, endpoint_file: pathlib.Path, endpoi
             view["id"] == "review" and view["active"] for view in frame["presentation"]["views"]
         ),
     )
-    master, slave = pty.openpty()
-    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 110, 0, 0))
-    client = subprocess.Popen(
-        [binary, "live-tui", "--endpoint", endpoint_file],
-        cwd=endpoint_file.parent,
-        stdin=slave,
-        stdout=slave,
-        stderr=subprocess.PIPE,
-        env={**os.environ, "TERM": "xterm-256color"},
-    )
-    os.close(slave)
+    terminal = Terminal(binary, endpoint_file)
     try:
-        frame = bytearray()
-        deadline = time.monotonic() + 8
-        while time.monotonic() < deadline and b"Reason" not in frame:
-            ready, _, _ = select.select([master], [], [], 0.2)
-            if ready:
-                frame.extend(os.read(master, 65536))
-        assert b"External tool review" in frame and b"fn old()" in frame and b"Reason" in frame
-        os.write(master, b"\t")
-        time.sleep(0.15)
-        os.write(master, b"terminal confirmed")
-        time.sleep(0.15)
-        os.write(master, b"\t")
-        time.sleep(0.15)
+        terminal.wait("Connected")
+        terminal.command("/live")
+        terminal.wait("Plugin views")
+        terminal.send(b"\r")
+        terminal.wait("Reason")
+        terminal.send(b"terminal confirmed\t")
         assert call(endpoint, "/snapshot")["presentation"]["activity"] == []
-        os.write(master, b"." * 9)
-        os.write(master, b" ")
-        deadline = time.monotonic() + 8
-        while time.monotonic() < deadline:
-            ready, _, _ = select.select([master], [], [], 0.1)
-            if ready:
-                frame.extend(os.read(master, 65536))
-            if call(endpoint, "/snapshot")["presentation"]["activity"]:
-                break
-        else:
-            raise AssertionError(("PTY did not toggle the multi-choice field", client.poll()))
-        os.write(master, b"\r")
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            ready, _, _ = select.select([master], [], [], 0.1)
-            if ready:
-                frame.extend(os.read(master, 65536))
-            if call(endpoint, "/snapshot")["state"]["active_run"] is None:
-                break
-        else:
-            raise AssertionError(
-                ("PTY Enter did not settle the run", client.poll(), bytes(frame[-500:]))
-            )
-        terminal = call(endpoint, "/terminal", {"run_id": run})
-        assert terminal["outcome"] == {
+        terminal.send(b" ")
+        terminal.send(b"\x1b[B" * 9)
+        terminal.send(b"\r\t")
+        terminal.send(b"\x13")
+        wait_for(endpoint, lambda frame: frame["state"]["active_run"] is None)
+        outcome = call(endpoint, "/terminal", {"run_id": run})
+        assert outcome["outcome"] == {
             "status": "completed",
             "value": {"reason": "terminal confirmed", "checks": ["release"]},
-        }, terminal
-        os.write(master, b"\x1b")
-        deadline = time.monotonic() + 5
-        while client.poll() is None and time.monotonic() < deadline:
-            ready, _, _ = select.select([master], [], [], 0.1)
-            if ready:
-                try:
-                    os.read(master, 65536)
-                except OSError:
-                    break
-        assert client.wait(timeout=1) == 0
-        assert run > 0
+        }, outcome
         return True
     finally:
-        if client.poll() is None:
-            client.kill()
-            client.wait()
-        os.close(master)
+        terminal.close()
 
 
 def read_tui_probe(binary: pathlib.Path, endpoint_file: pathlib.Path) -> bool:
-    """Open the saved result through the same terminal renderer without its plugin."""
+    """Open the saved result through the official terminal without its author plugin."""
     if os.name == "nt":
+        print("SKIP: saved-history POSIX PTY; native Windows terminal evidence required")
         return False
-    import fcntl
-    import pty
-    import select
-    import struct
-    import termios
+    from tui_pty import Terminal
 
-    master, slave = pty.openpty()
-    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 110, 0, 0))
-    client = subprocess.Popen(
-        [binary, "live-tui", "--endpoint", endpoint_file],
-        cwd=endpoint_file.parent,
-        stdin=slave,
-        stdout=slave,
-        stderr=subprocess.PIPE,
-        env={**os.environ, "TERM": "xterm-256color"},
-    )
-    os.close(slave)
+    terminal = Terminal(binary, endpoint_file)
     try:
-        output = bytearray()
-        deadline = time.monotonic() + 8
-        while time.monotonic() < deadline:
-            ready, _, _ = select.select([master], [], [], 0.2)
-            if ready:
-                output.extend(os.read(master, 65536))
-            if b"read-only" in output and b"fn old()" in output and b"src/main.rs" in output:
-                break
-        else:
-            raise AssertionError(("saved TUI content missing", bytes(output[-800:])))
-        os.write(master, b"")
-        while client.poll() is None and time.monotonic() < deadline:
-            ready, _, _ = select.select([master], [], [], 0.1)
-            if ready:
-                try:
-                    os.read(master, 65536)
-                except OSError:
-                    break
-        assert client.wait(timeout=1) == 0
+        terminal.wait("Read only")
+        terminal.wait("src/main.rs")
+        terminal.send(b"\x1bOR")  # F3: inspect full retained tool details.
+        terminal.read()
+        assert b"fn old()" in terminal.output, terminal.display
         return True
     finally:
-        if client.poll() is None:
-            client.kill()
-            client.wait()
-        os.close(master)
+        terminal.close()
 
 
 def main() -> None:
@@ -273,7 +191,8 @@ def main() -> None:
             command, cwd=scratch, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
         try:
-            for _ in range(100):
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
                 if endpoint_file.is_file():
                     break
                 if host.poll() is not None:

@@ -309,21 +309,7 @@ async fn run(
             Ok(output(entries.join("\n"), None, false))
         }
         "read" => files::read(cwd, &request.arguments).await,
-        "write" => {
-            let path = file_path(cwd, &request.arguments)?;
-            let content = string(&request.arguments, "content")?;
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .map_err(file_error)?;
-            }
-            tokio::fs::write(path, content).await.map_err(file_error)?;
-            Ok(output(
-                format!("Wrote {} bytes", content.len()),
-                None,
-                false,
-            ))
-        }
+        "write" => files::write(cwd, &request.arguments, &artifact_dir).await,
         "edit" => edit::edit(cwd, &request.arguments).await,
         "bash" | "powershell" => {
             shell::run(

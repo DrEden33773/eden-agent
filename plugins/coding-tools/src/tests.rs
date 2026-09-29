@@ -1031,3 +1031,72 @@ mod user_shell {
         instance.stop().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn write_diff_records_actual_before_and_creation_only_after_success() {
+    let project = Project::new();
+    let created = project
+        .run("write", json!({ "path": "new.txt", "content": "first\n" }))
+        .await;
+    assert_eq!(created.details["created"], true);
+    assert_eq!(created.details["diff"]["before"], "");
+    assert_eq!(created.details["diff"]["after"], "first\n");
+    let overwritten = project
+        .run("write", json!({ "path": "new.txt", "content": "second\n" }))
+        .await;
+    assert_eq!(overwritten.details["created"], false);
+    assert_eq!(overwritten.details["diff"]["before"], "first\n");
+    assert_eq!(overwritten.details["diff"]["after"], "second\n");
+    std::fs::create_dir(project.0.join("directory")).unwrap();
+    let failed = project
+        .run("write", json!({ "path": "directory", "content": "wrong" }))
+        .await;
+    assert!(failed.error.is_some());
+    assert!(failed.details.get("diff").is_none());
+}
+
+#[tokio::test]
+async fn large_write_diff_is_bounded_and_complete_sides_are_recoverable() {
+    let project = Project::new();
+    let before = "旧".repeat(OUTPUT_LIMIT);
+    let after = "新".repeat(OUTPUT_LIMIT);
+    std::fs::write(project.0.join("long.txt"), &before).unwrap();
+    let result = project
+        .run("write", json!({ "path": "long.txt", "content": after }))
+        .await;
+    assert!(result.error.is_none());
+    assert!(result.truncated);
+    assert_eq!(result.details["diff"]["complete"], false);
+    assert!(serde_json::to_vec(&result.details).unwrap().len() < OUTPUT_LIMIT * 3);
+    let originals: Vec<_> = result
+        .artifacts
+        .iter()
+        .map(|artifact| {
+            (
+                artifact.name.as_str(),
+                std::fs::read_to_string(&artifact.path).unwrap(),
+            )
+        })
+        .collect();
+    assert!(originals.contains(&("before", before)));
+    assert!(originals.contains(&("after", after)));
+}
+
+#[tokio::test]
+async fn write_over_binary_retains_bytes_without_fabricating_text_before() {
+    let project = Project::new();
+    let bytes = [0xff, 0x00, 0x80];
+    std::fs::write(project.0.join("binary.dat"), bytes).unwrap();
+    let result = project
+        .run("write", json!({ "path": "binary.dat", "content": "text" }))
+        .await;
+    assert!(result.error.is_none());
+    assert!(result.details["diff"]["before"].is_null());
+    let before = result
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.name == "before")
+        .unwrap();
+    assert_eq!(std::fs::read(&before.path).unwrap(), bytes);
+    assert_eq!(before.media_type, "application/octet-stream");
+}

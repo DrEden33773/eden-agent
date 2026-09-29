@@ -64,41 +64,108 @@ fn result_body(result: &ToolResult) -> String {
 fn failed(result: &ToolResult) -> bool {
     result.error.is_some() || result.exit_code.is_some_and(|code| code != 0)
 }
+fn tool_title(name: &str, args: &Value) -> String {
+    let kind = name.rsplit('.').next().unwrap_or(name);
+    let path = args["path"].as_str().unwrap_or(".");
+    match kind {
+        "bash" | "shell" | "powershell" => format!(
+            "{name} {}",
+            args["command"].as_str().unwrap_or("command unavailable")
+        ),
+        "read" => format!(
+            "{name} {path} · line {}{}",
+            args["offset"].as_u64().unwrap_or(1),
+            args["limit"]
+                .as_u64()
+                .map_or_else(String::new, |n| format!(" · {n} lines"))
+        ),
+        "grep" | "find" => format!(
+            "{name} {} · {path}",
+            args["pattern"].as_str().unwrap_or("pattern unavailable")
+        ),
+        _ => args["path"]
+            .as_str()
+            .map_or_else(|| name.to_owned(), |path| format!("{name} {path}")),
+    }
+}
+fn tool_preview(result: &ToolResult) -> String {
+    if let Some(error) = &result.error {
+        return format!("{}: {}", error.code, error.message);
+    }
+    let first = result
+        .text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("```"));
+    let mut text = first
+        .unwrap_or(if result.exit_code.is_some() {
+            "No output"
+        } else {
+            "Completed"
+        })
+        .to_owned();
+    if let Some(code) = result.exit_code {
+        text.push_str(&format!(" · exit {code}"));
+    }
+    if result.truncated {
+        text.push_str(" · truncated; full output available");
+    }
+    text
+}
 fn apply_diff(message: &mut Message, details: &Value) {
     let direct = details.get("diff").unwrap_or(details);
-    let diffs: Vec<_> = if direct["before"].is_string() && direct["after"].is_string() {
-        vec![direct]
+    let edits: Vec<_> = if direct["before"].is_string() && direct["after"].is_string() {
+        vec![(direct, 0)]
     } else {
         details["edits"]
             .as_array()
             .into_iter()
             .flatten()
-            .map(|edit| &edit["diff"])
-            .filter(|diff| diff["before"].is_string() && diff["after"].is_string())
+            .filter_map(|edit| {
+                let diff = &edit["diff"];
+                (diff["before"].is_string() && diff["after"].is_string()).then_some((
+                    diff,
+                    edit["start_line"].as_u64().unwrap_or(1).saturating_sub(1) as usize,
+                ))
+            })
             .collect()
     };
-    if diffs.is_empty() {
-        return;
+    let mut offset = 0isize;
+    for (diff, old_start) in &edits {
+        let before = diff["before"].as_str().unwrap_or("");
+        let after = diff["after"].as_str().unwrap_or("");
+        message.diffs.push(crate::model::DiffFragment {
+            before: before.into(),
+            after: after.into(),
+            old_start: *old_start,
+            new_start: old_start.saturating_add_signed(offset),
+        });
+        offset += after.bytes().filter(|b| *b == b'\n').count() as isize
+            - before.bytes().filter(|b| *b == b'\n').count() as isize;
     }
-    if diffs.len() == 1 {
-        message.before = diffs[0]["before"].as_str().map(str::to_owned);
-        message.after = diffs[0]["after"].as_str().map(str::to_owned);
-    } else {
-        // Keep each disjoint edit visible without pretending omitted file ranges are adjacent.
-        for (index, diff) in diffs.iter().enumerate() {
-            message
-                .body
-                .push_str(&format!("\n\nChange {}\n```diff\n", index + 1));
-            for line in diff["before"].as_str().unwrap_or("").lines() {
+    if message.diffs.len() == 1 {
+        // Keep legacy renderer fields alongside the additive fragment metadata.
+        message.before = Some(message.diffs[0].before.clone());
+        message.after = Some(message.diffs[0].after.clone());
+    }
+    if message.diffs.len() > 1 {
+        // Basic mode and older renderer plugins consume body, not fragment metadata.
+        for (index, diff) in message.diffs.iter().enumerate() {
+            message.body.push_str(&format!(
+                "\n\nChange {} · source line {}\n```diff\n",
+                index + 1,
+                diff.old_start + 1
+            ));
+            for line in diff.before.lines() {
                 message.body.push_str(&format!("-{line}\n"));
             }
-            for line in diff["after"].as_str().unwrap_or("").lines() {
+            for line in diff.after.lines() {
                 message.body.push_str(&format!("+{line}\n"));
             }
             message.body.push_str("```\n");
         }
     }
-    if diffs.iter().any(|diff| diff["complete"] == false) {
+    if edits.iter().any(|(diff, _)| diff["complete"] == false) {
         message
             .body
             .push_str("\nDiff preview only; before/after artifacts retain the complete contents.");
@@ -123,6 +190,7 @@ fn terminal_notice(record: &Record, terminal: &Terminal) -> Option<Message> {
 pub fn history(records: &[Record]) -> Vec<Message> {
     let mut messages: Vec<Message> = Vec::new();
     let mut calls = BTreeMap::new();
+    let mut groups: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
     let mut stats: BTreeMap<u64, RunStats> = BTreeMap::new();
     let mut delivered = BTreeSet::new();
     for record in records {
@@ -170,7 +238,7 @@ pub fn history(records: &[Record]) -> Vec<Message> {
                     .entry(record.run_id)
                     .or_default()
                     .record_start(&name, path);
-                let title = path.map_or_else(|| name.clone(), |path| format!("{name} {path}"));
+                let title = tool_title(&name, &args);
                 let mut message = Message::new(
                     record.sequence,
                     Role::Tool,
@@ -178,6 +246,10 @@ pub fn history(records: &[Record]) -> Vec<Message> {
                     format!("Input\n{arguments}\n\nOutput\nWaiting for result"),
                 );
                 message.pending = true;
+                groups
+                    .entry(record.run_id)
+                    .or_default()
+                    .push(messages.len());
                 calls.insert((record.run_id, call_id), messages.len());
                 messages.push(message);
             }
@@ -195,6 +267,7 @@ pub fn history(records: &[Record]) -> Vec<Message> {
                     });
                 message.pending = false;
                 message.failed = failed(&result);
+                message.preview = Some(tool_preview(&result));
                 stats
                     .entry(record.run_id)
                     .or_default()
@@ -324,7 +397,29 @@ pub fn history(records: &[Record]) -> Vec<Message> {
                         } else if let Some(summary) =
                             stats.get(&record.run_id).and_then(|stats| stats.finish(0))
                         {
-                            messages.push(Message::run_summary(record.sequence, summary));
+                            let mut group = Message::run_summary(record.sequence, summary);
+                            group.title = "Tools in this run".into();
+                            group.children = groups
+                                .get(&record.run_id)
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|index| messages.get(*index))
+                                .map(|message| crate::model::ToolSummary {
+                                    title: message.title.clone(),
+                                    detail: message
+                                        .preview
+                                        .clone()
+                                        .unwrap_or_else(|| "Result unavailable".into()),
+                                    state: if message.pending {
+                                        crate::model::ToolState::Pending
+                                    } else if message.failed {
+                                        crate::model::ToolState::Failed
+                                    } else {
+                                        crate::model::ToolState::Success
+                                    },
+                                })
+                                .collect();
+                            messages.push(group);
                         } else if let Outcome::Completed(value) = &terminal.outcome
                             && !value.is_null()
                             && !records.iter().any(|prior| {
@@ -716,6 +811,128 @@ pub(crate) fn reading(document: &eden_protocol::delivery::ReadingDocument) -> Ve
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn real_tool_arguments_results_and_unknown_usage_reach_the_consumer() {
+        let mut result = output("```text\nuseful stdout\n```\n");
+        result.exit_code = Some(7);
+        result.artifacts.push(Artifact {
+            name: "stderr".into(),
+            path: "/internal/stderr.bin".into(),
+            bytes: 0,
+            media_type: "text/plain".into(),
+        });
+        let records = vec![
+            record(
+                1,
+                "item",
+                json!(Item::ToolCall {
+                    call_id: "shell".into(),
+                    name: "bash".into(),
+                    arguments: r#"{"command":"printf hello"}"#.into()
+                }),
+            ),
+            record(
+                2,
+                "item",
+                json!(Item::ToolResult {
+                    call_id: "shell".into(),
+                    result
+                }),
+            ),
+        ];
+        let messages = history(&records);
+        assert_eq!(messages[0].title, "bash printf hello");
+        assert_eq!(
+            messages[0].preview.as_deref(),
+            Some("useful stdout · exit 7")
+        );
+        assert!(messages[0].failed);
+        assert!(messages[0].body.contains("/internal/stderr.bin"));
+        assert_eq!(
+            usage(&[record(
+                3,
+                "model_reply",
+                json!({
+                    "usage": { "normalized": { "input_tokens": 1234, "output_tokens": null } },
+                })
+            )]),
+            "in 1234 uncached · out ? · cache ?/? tokens"
+        );
+    }
+    #[test]
+    fn edit_source_line_and_cache_counters_reach_rendered_output() {
+        let mut message = Message::new(1, Role::Tool, "edit source.rs", "Applied edit");
+        apply_diff(
+            &mut message,
+            &json!({
+                "edits": [{
+                    "start_line": 100,
+                    "diff": { "before": "before\n", "after": "after\n" },
+                }],
+            }),
+        );
+        let text = crate::text::message_rows(&message, 100, &crate::model::Preferences::default())
+            .into_iter()
+            .map(|r| r.text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("100 before"), "{text}");
+        assert_eq!(
+            usage(&[record(
+                1,
+                "model_reply",
+                json!({
+                    "usage": {
+                        "normalized": {
+                            "input_tokens": 20,
+                            "cache_read_tokens": 80,
+                            "cache_write_tokens": null,
+                            "output_tokens": 10,
+                        },
+                    },
+                })
+            )]),
+            "in 20 uncached · out 10 · cache 80/? tokens"
+        );
+    }
+    #[test]
+    fn batch_diff_retains_original_positions_and_offsets_later_new_lines() {
+        let mut message = Message::new(1, Role::Tool, "edit source.rs", "Applied edits");
+        apply_diff(
+            &mut message,
+            &json!({
+                "edits": [
+                    { "start_line": 10, "diff": { "before": "a\n", "after": "a\nextra\n" } },
+                    { "start_line": 100, "diff": { "before": "before\n", "after": "after\n" } }
+                ],
+            }),
+        );
+        message.expanded = true;
+        let text =
+            crate::text::inspector_rows(&message, 100, &crate::model::Preferences::default())
+                .into_iter()
+                .map(|r| r.text)
+                .collect::<Vec<_>>()
+                .join("\n");
+        assert!(text.contains("100 before"), "{text}");
+        assert!(text.contains("101 after"), "{text}");
+        let preferences = crate::model::Preferences {
+            basic: true,
+            ..Default::default()
+        };
+        let basic = crate::text::message_rows(&message, 100, &preferences)
+            .into_iter()
+            .map(|r| r.text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            basic.contains("source line 100")
+                && basic.contains("-before")
+                && basic.contains("+after"),
+            "{basic}"
+        );
+        assert!(message.body.contains("-before\n+after"));
+    }
     fn event(sequence: u64, kind: &str, payload: Value) -> Event {
         Event {
             sequence,
@@ -1026,5 +1243,43 @@ mod reading_fallback_tests {
         let projected = super::reading(&reading);
         assert!(projected[0].body.contains("VISIBLE_SIBLING"));
         assert!(projected[0].body.contains("UNKNOWN_SOURCE"));
+    }
+}
+
+/// Latest reported request usage, retaining unknown counters independently.
+pub(crate) fn usage(records: &[Record]) -> String {
+    let Some(value) = records.iter().rev().find_map(|record| {
+        record
+            .payload
+            .get("usage")
+            .filter(|value| value.is_object() && !value.as_object().is_some_and(|v| v.is_empty()))
+    }) else {
+        return "usage unknown".into();
+    };
+    let counters = value.get("normalized").unwrap_or(value);
+    let count = |name: &str, fallback: &str| {
+        counters[name]
+            .as_u64()
+            .or_else(|| counters[fallback].as_u64())
+            .map_or_else(|| "?".into(), |n| n.to_string())
+    };
+    if value.get("normalized").is_some() {
+        let mut text = format!(
+            "in {} uncached · out {} · cache {}/{} tokens",
+            count("input_tokens", "prompt_tokens"),
+            count("output_tokens", "completion_tokens"),
+            count("cache_read_tokens", "cache_read_tokens"),
+            count("cache_write_tokens", "cache_write_tokens")
+        );
+        if let Some(reasoning) = counters["reasoning_tokens"].as_u64() {
+            text.push_str(&format!(" · reasoning {reasoning}"));
+        }
+        text
+    } else {
+        format!(
+            "in {} · out {} tokens",
+            count("input_tokens", "prompt_tokens"),
+            count("output_tokens", "completion_tokens")
+        )
     }
 }

@@ -611,6 +611,7 @@ async fn headless_actions_are_unsupported_and_auth_stays_private_beside_public_v
         })
         .service(m::AUTH, |_: m::AuthRequest, _| async {
             Ok::<_, Fault>(m::AuthReply {
+                methods: vec![],
                 operation_id: Some("private-operation".into()),
                 provider: "fixture".into(),
                 status: "awaiting_authorization".into(),

@@ -22,3 +22,6 @@ mod transcript_images;
 mod view;
 
 pub use terminal::{Options, run};
+
+mod grok_diff;
+mod grok_render;

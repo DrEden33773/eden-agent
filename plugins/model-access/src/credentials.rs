@@ -558,6 +558,23 @@ impl Credentials {
         cx: Option<&CallContext>,
     ) -> Result<AuthReply, Fault> {
         match request {
+            AuthRequest::Methods { provider } => {
+                let config = self
+                    .config
+                    .oauth
+                    .get(&provider)
+                    .cloned()
+                    .unwrap_or_default();
+                Ok(AuthReply {
+                    methods: oauth::methods(&provider, &config),
+                    operation_id: None,
+                    provider,
+                    status: "available_methods".into(),
+                    challenge: None,
+                    interaction: None,
+                    source: None,
+                })
+            }
             AuthRequest::Login { provider, method } => {
                 let revision =
                     self.store(|s| Ok(*s.revisions.get(&provider).unwrap_or(&0)), false)?;
@@ -570,6 +587,7 @@ impl Credentials {
                 let flow = oauth::Flow::start(&provider, method.as_deref(), &config).await?;
                 let id = format!("oauth-{}", NEXT.fetch_add(1, Ordering::Relaxed));
                 let reply = AuthReply {
+                    methods: vec![],
                     operation_id: Some(id.clone()),
                     provider,
                     status: "awaiting_authorization".into(),
@@ -617,6 +635,7 @@ impl Credentials {
                     .await?
                     .ok_or_else(|| fault("provider has no managed OAuth credential"))?;
                 Ok(AuthReply {
+                    methods: vec![],
                     operation_id: None,
                     provider,
                     status: "completed".into(),
@@ -635,6 +654,7 @@ impl Credentials {
             AuthRequest::Start { provider } => {
                 let id = format!("key-{}", NEXT.fetch_add(1, Ordering::Relaxed));
                 let reply = AuthReply {
+                    methods: vec![],
                     operation_id: Some(id.clone()),
                     provider,
                     status: "awaiting_input".into(),
@@ -775,6 +795,7 @@ impl Credentials {
                     )
                     .await?;
                 Ok(AuthReply {
+                    methods: vec![],
                     operation_id: None,
                     provider,
                     status: if resolved.api_key.is_some()

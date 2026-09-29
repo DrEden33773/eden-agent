@@ -503,26 +503,13 @@ impl App {
                 ],
                 false,
             ),
-            ("auth", _) => self.management_form(
-                &format!("Authentication · {id}"),
-                "/auth/start",
-                json!({ "request": { "action": "login", "provider": id, "method": null } }),
-                vec![
-                    choice(
-                        "/request/action",
-                        "Method",
-                        "login",
-                        &["login", "start", "refresh", "logout"],
-                    ),
-                    choice(
-                        "/request/method",
-                        "Browser / device (login only)",
-                        "browser",
-                        &["browser", "device"],
-                    ),
-                ],
-                false,
-            ),
+            ("auth", _) => {
+                self.auth_method_form(id, &["API key", "Log out"]);
+                self.dispatch(
+                    "/auth/methods",
+                    json!({ "provider": id, "management": self.management.generation }),
+                );
+            }
             ("settings" | "plugins", _) => {
                 self.management.form = None;
                 self.dispatch("/configuration/open", json!({ "instance": id }));
@@ -611,6 +598,15 @@ impl App {
             text: serde_json::to_string_pretty(&value).unwrap_or_default(),
         });
     }
+    fn auth_method_form(&mut self, provider: &str, methods: &[&str]) {
+        self.management_form(
+            &format!("Authentication · {provider}"),
+            "/auth/start",
+            json!({ "request": { "action": "API key", "provider": provider, "method": null } }),
+            vec![choice("/request/action", "Method", "API key", methods)],
+            false,
+        );
+    }
     pub(crate) fn submit_management(&mut self) {
         let Some(operation) = self.management.form.clone() else {
             return;
@@ -636,15 +632,22 @@ impl App {
             self.notice = "Confirm the selected action before applying".into();
             return;
         }
-        if body["save_default"] == true {
-            body =
-                json!({ "request": { "action": "set_default", "selection": body["selection"] } });
+        if operation.route == "/auth/start" {
+            let (action, method) = match body["request"]["action"].as_str().unwrap_or("") {
+                "API key" => ("start", None),
+                "Browser login" => ("login", Some("browser")),
+                "Device login" => ("login", Some("device")),
+                "Refresh OAuth" => ("refresh", None),
+                "Log out" => ("logout", None),
+                _ => {
+                    self.notice = "Select an available authentication method".into();
+                    return;
+                }
+            };
+            body["request"]["action"] = json!(action);
+            body["request"]["method"] = json!(method);
         }
-        let route = if operation.route == "/models/select" && body.get("request").is_some() {
-            "/models/catalog"
-        } else {
-            &operation.route
-        };
+        let route = &operation.route;
         if route == "/manage/sessions" {
             self.management.page = "sessions".into();
             self.management.form = None;
@@ -790,6 +793,24 @@ impl App {
                     "/manage/sessions/poll",
                     json!({ "scan_id": value["scan_id"], "management": self.management.generation }),
                 );
+            }
+            return;
+        }
+        if route == "/auth/methods" {
+            if current
+                && self
+                    .management
+                    .form
+                    .as_ref()
+                    .is_some_and(|form| form.body["request"]["provider"] == body["provider"])
+            {
+                let methods: Vec<_> = value["methods"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect();
+                self.auth_method_form(body["provider"].as_str().unwrap_or(""), &methods);
             }
             return;
         }
@@ -1070,6 +1091,16 @@ mod tests {
     use crate::app::tests::app;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+    #[tokio::test]
+    async fn api_key_provider_offers_named_key_entry_by_default() {
+        let mut app = crate::app::tests::app();
+        app.management.data = json!({ "providers": ["fixture"] });
+        app.choose_management("auth", "fixture");
+        let Some(Dialog::Form { fields, .. }) = &app.dialog else {
+            panic!("authentication form missing")
+        };
+        assert_eq!(fields[0].value, "API key");
+    }
     #[tokio::test]
     async fn closed_management_does_not_reopen_for_late_completion() {
         let mut app = app();

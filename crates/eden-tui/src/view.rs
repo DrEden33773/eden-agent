@@ -33,7 +33,7 @@ pub struct Palette {
 }
 impl Palette {
     pub fn new(light: bool, mono: bool) -> Self {
-        use eden_ui_sdk::mocha as m;
+        // GrokNight foreground hierarchy; theme extensions still own semantic overrides.
         let color = |dark: u32, light_rgb: u32| {
             if mono {
                 Color::Reset
@@ -46,22 +46,22 @@ impl Palette {
             bg: Color::Reset,
             panel: Color::Reset,
             selected: Color::Reset,
-            fg: color(m::TEXT, 0x25232b),
-            muted: color(m::SUBTEXT, 0x686473),
-            accent: color(m::MAUVE, 0x673699),
-            success: color(m::GREEN, 0x167846),
-            error: color(m::RED, 0xb42c40),
-            border: color(m::BORDER, 0x8a8595),
-            heading: color(m::LAVENDER, 0x4f4b99),
-            key: color(m::TEAL, 0x086b69),
-            code: color(m::GREEN, 0x276d38),
-            link: color(m::LAVENDER, 0x2a5ba7),
-            quote: color(m::PINK, 0x884d76),
-            number: color(m::PEACH, 0x915514),
-            type_color: color(m::YELLOW, 0x8b6811),
-            function: color(m::BLUE, 0x2a5ba7),
-            dim: color(m::OVERLAY, 0x787280),
-            warning: color(m::YELLOW, 0x8b6811),
+            fg: color(0xe1e1e1, 0x25232b),
+            muted: color(0xc8c8c8, 0x686473),
+            accent: color(0xbb9af7, 0x673699),
+            success: color(0x9ece6a, 0x167846),
+            error: color(0xf7768e, 0xb42c40),
+            border: color(0x505058, 0x8a8595),
+            heading: color(0x7aa2f7, 0x4f4b99),
+            key: color(0x73daca, 0x086b69),
+            code: color(0x9ece6a, 0x276d38),
+            link: color(0x7aa2f7, 0x2a5ba7),
+            quote: color(0xbb9af7, 0x884d76),
+            number: color(0xff9e64, 0x915514),
+            type_color: color(0xe0af68, 0x8b6811),
+            function: color(0x7aa2f7, 0x2a5ba7),
+            dim: color(0x787878, 0x787280),
+            warning: color(0xe0af68, 0x8b6811),
         }
     }
     pub fn style(self) -> Style {
@@ -104,7 +104,12 @@ fn hit(g: &mut Geometry, area: Rect, action: HitAction) {
 }
 fn line(buf: &mut Buffer, area: Rect, spans: Vec<Span<'_>>) {
     if area.width > 0 && area.height > 0 {
-        buf.set_line(area.x, area.y, &Line::from(spans), area.width);
+        buf.set_line(
+            area.x,
+            area.y,
+            &crate::grok_render::fit_line_to_width(Line::from(spans), usize::from(area.width)),
+            area.width,
+        );
     }
 }
 fn inset(r: Rect, x: u16, y: u16) -> Rect {
@@ -369,7 +374,10 @@ pub fn render(
                 Span::styled(format!("{spinner} "), Style::default().fg(p.accent)),
                 Span::styled(format!("{}…", app.phase.label()), Style::default().fg(p.fg)),
                 Span::styled(
-                    format!("  {}s{}", app.run_started.elapsed().as_secs(), ""),
+                    format!(
+                        "  {}s · Ctrl+C interrupt",
+                        app.run_started.elapsed().as_secs()
+                    ),
                     Style::default().fg(p.muted),
                 ),
             ],
@@ -500,7 +508,8 @@ pub fn render(
                 Span::styled(app.model.clone(), Style::default().fg(p.function)),
                 Span::styled(
                     format!(
-                        "  ·  {} fixed references · usage unavailable",
+                        "  ·  {} · {} refs",
+                        crate::projection::usage(&app.snapshot.history),
                         app.references.len()
                     ),
                     dim,
@@ -1161,7 +1170,7 @@ fn draw_settings(
         if app.preferences.light {
             " /style · Light foreground "
         } else {
-            " /style · Catppuccin Mocha "
+            " /style · GrokNight "
         },
         Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
     );

@@ -3,3 +3,7 @@ Copyright 2026 eden-agent contributors
 
 Licensed under the Apache License, Version 2.0.
 Third-party components retain their own licenses and attribution notices.
+
+Portions of the terminal Diff renderer are adapted from Grok Build
+Copyright 2023–2026 xAI, licensed under Apache-2.0.
+Source: https://github.com/xai-org/grok-build/tree/2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8

@@ -152,6 +152,10 @@ pub struct App {
 }
 pub fn project_messages(snapshot: &Snapshot) -> Vec<Message> {
     let mut messages = crate::projection::history(&snapshot.history);
+    project_observations(snapshot, &mut messages);
+    messages
+}
+fn project_observations(snapshot: &Snapshot, messages: &mut Vec<Message>) {
     if let Some(reading) = &snapshot.reading {
         messages.extend(crate::projection::reading(reading));
     }
@@ -172,7 +176,28 @@ pub fn project_messages(snapshot: &Snapshot) -> Vec<Message> {
         &snapshot.events,
         &snapshot.state.shell_runs,
     ));
-    messages
+}
+pub(crate) struct Projection {
+    head: Option<u64>,
+    history: Vec<Message>,
+}
+impl Projection {
+    pub(crate) fn new() -> Self {
+        Self {
+            head: None,
+            history: Vec::new(),
+        }
+    }
+    pub(crate) fn update(&mut self, snapshot: &Snapshot) -> Vec<Message> {
+        let head = snapshot.history.last().map_or(0, |r| r.sequence);
+        if self.head != Some(head) {
+            self.history = crate::projection::history(&snapshot.history);
+            self.head = Some(head);
+        }
+        let mut messages = self.history.clone();
+        project_observations(snapshot, &mut messages);
+        messages
+    }
 }
 impl App {
     pub fn new(
@@ -313,6 +338,7 @@ impl App {
         if !app.read_only {
             app.dispatch("/resources", Value::Null);
             app.dispatch("/commands", Value::Null);
+            app.dispatch("/models/current", Value::Null);
         }
         Ok(app)
     }
@@ -371,7 +397,7 @@ impl App {
         {
             let target = &record.payload["selection"];
             self.model = format!(
-                "{}/{} · {}",
+                "{}/{} · session · {}",
                 target["provider"].as_str().unwrap_or("?"),
                 target["model"].as_str().unwrap_or("?"),
                 target["thinking"].as_str().unwrap_or("default effort")
@@ -596,6 +622,7 @@ impl App {
             | self.poll_context_images()
             | self.transcript_images.poll()
             | self.poll_references();
+        let mut latest_messages = None;
         for _ in 0..64 {
             let Ok(update) = self.rx.try_recv() else {
                 break;
@@ -688,7 +715,7 @@ impl App {
                     }
                     self.snapshot = *snapshot;
                     self.connection = "Connected".into();
-                    self.apply_messages(messages);
+                    latest_messages = Some(messages);
                 }
                 Update::Clipboard(request, result) => {
                     if self.clipboard_request().as_ref() != Some(&request) {
@@ -742,6 +769,55 @@ impl App {
                     body,
                     result,
                 } => {
+                    if route == "/terminal" && body["cancel_wait"] == true {
+                        self.notice = match result.and_then(|value| {
+                            serde_json::from_value::<eden_protocol::Terminal>(value).map_err(|e| {
+                                eden_protocol::Fault::new("InvalidInput", "tui", e.to_string())
+                            })
+                        }) {
+                            Ok(terminal) if terminal.cleanup_errors.is_empty() => format!(
+                                "{} · cleanup complete",
+                                match terminal.outcome {
+                                    eden_protocol::Outcome::Cancelled => "Cancelled",
+                                    eden_protocol::Outcome::Completed(_) =>
+                                        "Completed before cancellation",
+                                    eden_protocol::Outcome::Failed(_) => "Run failed",
+                                }
+                            ),
+                            Ok(terminal) => format!(
+                                "Run settled · cleanup errors: {:?}",
+                                terminal.cleanup_errors
+                            ),
+                            Err(error) => format!("Cancellation outcome unknown: {error}"),
+                        };
+                        continue;
+                    }
+                    if route == "/models/current" && !body["management"].is_u64() {
+                        if let Ok(value) = result {
+                            if self
+                                .snapshot
+                                .history
+                                .iter()
+                                .rev()
+                                .find(|r| r.kind == "model_selection")
+                                .is_some_and(|r| r.payload["selection"] != value["selection"])
+                            {
+                                continue;
+                            }
+                            let target = &value["effective_target"];
+                            if let (Some(provider), Some(model)) =
+                                (target["provider"].as_str(), target["model"].as_str())
+                            {
+                                self.model = format!(
+                                    "{provider}/{model} · {}",
+                                    value["selection_source"]
+                                        .as_str()
+                                        .unwrap_or("source unknown")
+                                );
+                            }
+                        }
+                        continue;
+                    }
                     if body["management"].is_u64() {
                         self.management_reply(&route, &body, result);
                         continue;
@@ -975,6 +1051,10 @@ impl App {
                                     .collect();
                             }
                             self.notice = if route == "/cancel" {
+                                self.dispatch(
+                                    "/terminal",
+                                    json!({ "run_id": body["run_id"], "cancel_wait": true }),
+                                );
                                 "Cancellation accepted · waiting for cleanup".into()
                             } else {
                                 format!("{route}: {}", text::clipped(&value.to_string(), 180))
@@ -1009,6 +1089,9 @@ impl App {
                     }
                 }
             }
+        }
+        if let Some(messages) = latest_messages {
+            self.apply_messages(messages);
         }
         if self.form_refresh.is_some() {
             self.rebind_applied_form();
@@ -2151,7 +2234,32 @@ impl App {
 }
 
 impl App {
+    fn key_context(&self) -> &'static str {
+        if self.dialog.is_some() {
+            "modal"
+        } else {
+            match self.focus {
+                Focus::Editor => "composer",
+                Focus::Transcript => "transcript",
+                Focus::Inspector => "inspector",
+            }
+        }
+    }
     pub fn key(&mut self, key: KeyEvent) {
+        if key.kind == KeyEventKind::Press
+            && key.code == KeyCode::Char('c')
+            && key.modifiers == KeyModifiers::CONTROL
+            && !self
+                .preferences
+                .bindings
+                .contains_key(&format!("{}.ctrl+c", self.key_context()))
+            && let Some(run) = self.snapshot.state.active_run
+        {
+            self.dispatch("/cancel", json!({ "run_id": run }));
+            self.phase = Phase::Cancelling;
+            self.notice = "Cancellation requested · waiting for cleanup".into();
+            return;
+        }
         if self.reference_picker.open {
             if key.kind != KeyEventKind::Release {
                 self.reference_key(key);
@@ -2212,15 +2320,7 @@ impl App {
         }
 
         if key.kind != KeyEventKind::Release {
-            let context = if self.dialog.is_some() {
-                "modal"
-            } else {
-                match self.focus {
-                    Focus::Editor => "composer",
-                    Focus::Transcript => "transcript",
-                    Focus::Inspector => "inspector",
-                }
-            };
+            let context = self.key_context();
             let name = match key.code {
                 KeyCode::Char(c) => c.to_ascii_lowercase().to_string(),
                 KeyCode::Enter => "enter".into(),
@@ -2607,6 +2707,25 @@ pub(crate) mod tests {
         assert!(!app.quit);
     }
     #[tokio::test]
+    async fn history_refresh_preserves_the_session_model_source() {
+        let mut app = app();
+        app.snapshot.history = serde_json::from_value(json!([{
+            "schema_version": 2,
+            "session_id": 7,
+            "sequence": 1,
+            "run_id": 1,
+            "kind": "model_selection",
+            "payload": {
+                "selection": { "provider": "fixture", "model": "chosen", "thinking": "off" },
+            },
+        }]))
+        .unwrap();
+        app.model = "fixture/chosen · session".into();
+        app.project();
+        assert!(app.model.contains("session"), "{}", app.model);
+        assert!(app.model.contains("fixture/chosen"));
+    }
+    #[tokio::test]
     async fn modal_consumes_global_keys_and_escape_before_cancel() {
         let mut app = app();
         app.snapshot.state.active_run = Some(4);
@@ -2618,14 +2737,14 @@ pub(crate) mod tests {
         assert_ne!(app.phase, Phase::Cancelling);
     }
     #[tokio::test]
-    async fn control_c_clears_without_cancelling_or_copying() {
+    async fn control_c_cancels_active_run_and_preserves_draft() {
         let mut app = app();
         app.snapshot.state.active_run = Some(4);
         app.editor.restore("draft", 5).unwrap();
         app.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(app.editor.text().is_empty());
+        assert_eq!(app.editor.text(), "draft");
         assert!(app.copied.is_none());
-        assert_ne!(app.phase, Phase::Cancelling);
+        assert_eq!(app.phase, Phase::Cancelling);
     }
     #[tokio::test]
     async fn reply_preserves_new_edits_and_unrelated_cancel_keeps_pending() {

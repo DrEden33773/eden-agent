@@ -85,3 +85,9 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## Grok Build terminal components
+
+`crates/eden-tui/src/grok_diff.rs` derives from `xai-grok-pager-diff/src/lib.rs` at Grok Build `2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8`, copyright 2023–2026 xAI, Apache-2.0. Eden adapts visibility and rendering to its own tool results and UI extension contracts; it does not include the ACP or Grok service adapter. The Apache-2.0 license is included in this repository's LICENSE. The selected upstream crate contains no separate NOTICE file.
+
+`grok_render.rs` preserves the grapheme-safe line fitting implementation from `xai-grok-pager-render/src/render/line_utils.rs` at the same revision. The default dark foreground hierarchy adapts GrokNight; background remains terminal-controlled. GrokNight is xAI original and uses Tokyo Night accents attributed upstream to Folke Lemaitre and contributors (`tokyonight.nvim`, Apache-2.0), with original palette lineage from enkia's Tokyo Night VS Code theme (MIT). No upstream logos or TextMate theme assets are included.

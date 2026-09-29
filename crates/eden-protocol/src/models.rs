@@ -116,6 +116,9 @@ pub enum CatalogRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[allow(missing_docs)]
 pub struct CatalogReply {
+    /// Resolution provenance: explicit selection, global default, configured fallback, or unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_source: Option<String>,
     /// Includes dynamic identities whose models are not available in an offline snapshot.
     #[serde(default)]
     pub providers: Vec<String>,
@@ -157,6 +160,10 @@ pub struct CredentialReply {
 #[serde(tag = "action", rename_all = "snake_case")]
 #[allow(missing_docs)]
 pub enum AuthRequest {
+    /// Discover methods implemented for this provider without starting authentication.
+    Methods {
+        provider: String,
+    },
     /// Start a provider login; method is browser or device (provider default when absent).
     Login {
         provider: String,
@@ -196,6 +203,9 @@ pub enum AuthRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[allow(missing_docs)]
 pub struct AuthReply {
+    /// Supported login methods; populated only by a Methods query.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub methods: Vec<String>,
     pub operation_id: Option<String>,
     pub provider: String,
     pub status: String,

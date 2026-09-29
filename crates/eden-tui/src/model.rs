@@ -23,6 +23,13 @@ pub struct ToolSummary {
     pub state: ToolState,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DiffFragment {
+    pub before: String,
+    pub after: String,
+    pub old_start: usize,
+    pub new_start: usize,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Message {
     #[serde(skip)]
     pub images: Vec<std::sync::Arc<eden_protocol::coding::Block>>,
@@ -40,6 +47,8 @@ pub struct Message {
     pub failed: bool,
     #[serde(default)]
     pub pending: bool,
+    #[serde(default)]
+    pub diffs: Vec<DiffFragment>,
     pub before: Option<String>,
     pub after: Option<String>,
     pub revision: u64,
@@ -63,6 +72,7 @@ impl Message {
             expanded: false,
             failed: false,
             pending: false,
+            diffs: Vec::new(),
             before: None,
             after: None,
             revision: 0,

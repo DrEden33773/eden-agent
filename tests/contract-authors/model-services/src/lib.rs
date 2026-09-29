@@ -116,6 +116,7 @@ fn create(config: Value) -> Result<Package, Fault> {
                     return Err(fault("author selection does not exist"));
                 }
                 Ok(CatalogReply {
+                    selection_source: None,
                     providers: vec![target.provider.clone()],
                     models: vec![CatalogEntry {
                         name: "Independent route".into(),

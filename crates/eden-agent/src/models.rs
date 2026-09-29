@@ -5,6 +5,18 @@ use eden_protocol::models as m;
 use serde_json::Value;
 use serde_json::json;
 
+fn public_catalog_terminal(private: &Terminal) -> Terminal {
+    let mut public = private.clone();
+    if let Outcome::Completed(value) = &mut public.outcome {
+        *value = json!({
+            "status": value["status"],
+            "source": value["source"],
+            "target": value["target"],
+        });
+    }
+    public
+}
+
 fn public_auth_terminal(private: &Terminal) -> Terminal {
     let mut public = private.clone();
     public.partial_result = None;
@@ -69,6 +81,7 @@ impl Session {
         let workspace = Workspace::discover(Path::new(self.cwd()), &self.0.workspace_options)?;
         if workspace.settings["offline_startup"] == true {
             return Ok(m::CatalogReply {
+                selection_source: None,
                 providers: vec![],
                 models: vec![],
                 target: None,
@@ -88,8 +101,30 @@ impl Session {
     pub async fn model_selection(&self) -> Result<Option<m::ModelSelection>, Fault> {
         saved_selection(&self.history().await?)
     }
+    /// Resolve the same branch intent and global default used for the next model request.
+    pub async fn effective_model(&self) -> Result<m::CatalogReply, Fault> {
+        let reply: m::CatalogReply = self
+            .service(
+                0,
+                m::MODEL_CATALOG,
+                &m::CatalogRequest::Resolve {
+                    selection: self.model_selection().await?,
+                },
+            )
+            .await?;
+        Ok(reply)
+    }
     /// Commit a selection while idle. Completion means the history writer acknowledged it.
-    pub fn select_model(&self, mut selection: m::ModelSelection) -> Result<u64, Fault> {
+    pub fn select_model(&self, selection: m::ModelSelection) -> Result<u64, Fault> {
+        self.select_model_with_default(selection, false)
+    }
+    /// Apply current-session intent first, optionally saving the new-session default.
+    /// A default-write failure explicitly reports that the current selection was committed.
+    pub fn select_model_with_default(
+        &self,
+        mut selection: m::ModelSelection,
+        save_default: bool,
+    ) -> Result<u64, Fault> {
         self.start(true, move |session, run_id, _| async move {
             management::as_terminal(
                 async {
@@ -133,7 +168,34 @@ impl Session {
                             json!({ "selection": selection, "target": target }),
                         )
                         .await?;
-                    Ok(json!(target))
+                    if save_default {
+                        session
+                            .service::<_, m::CatalogReply>(
+                                run_id,
+                                m::MODEL_CATALOG,
+                                &m::CatalogRequest::SetDefault { selection },
+                            )
+                            .await
+                            .map_err(|error| {
+                                Fault::new(
+                                    &error.code,
+                                    &error.source,
+                                    format!(
+                                        "Current model applied; global default was not saved: {}",
+                                        error.message
+                                    ),
+                                )
+                            })?;
+                    }
+                    Ok(if save_default {
+                        json!({
+                            "target": target,
+                            "current_selection_applied": true,
+                            "global_default_saved": true,
+                        })
+                    } else {
+                        json!(target)
+                    })
                 }
                 .await,
             )
@@ -141,22 +203,31 @@ impl Session {
     }
     /// Catalog mutations are managed runs, so cancellation and settled completion share the SDK contract.
     pub fn catalog(&self, request: m::CatalogRequest) -> Result<u64, Fault> {
-        self.start(true, move |session, run_id, cancel| async move {
-            session
-                .0
-                .kernel
-                .invoke(
-                    Request {
-                        execution: None,
-                        session_id: session.id(),
-                        run_id,
-                        contract: m::MODEL_CATALOG.into(),
-                        payload: json!(request),
-                    },
-                    cancel,
-                )
-                .await
-        })
+        self.start_with_public_result(
+            true,
+            public_catalog_terminal,
+            move |session, run_id, cancel| async move {
+                session
+                    .0
+                    .kernel
+                    .invoke(
+                        Request {
+                            execution: None,
+                            session_id: session.id(),
+                            run_id,
+                            contract: m::MODEL_CATALOG.into(),
+                            payload: json!(request),
+                        },
+                        cancel,
+                    )
+                    .await
+            },
+        )
+    }
+    /// Read authentication methods without starting a run or persisting credential UI metadata.
+    pub async fn authentication_methods(&self, provider: String) -> Result<m::AuthReply, Fault> {
+        self.service(0, m::AUTH, &m::AuthRequest::Methods { provider })
+            .await
     }
     /// Authentication input and wait/inspect results are private; events and history contain only status metadata.
     pub fn authenticate(&self, request: m::AuthRequest) -> Result<u64, Fault> {
@@ -375,6 +446,28 @@ mod tests {
         assert_eq!(session.wait(run).await.unwrap(), private);
         assert_eq!(session.events().last().unwrap().payload, json!(private));
         session.shutdown().await.unwrap();
+    }
+    #[test]
+    fn catalog_public_completion_preserves_status_without_repeating_the_directory() {
+        let private = Terminal {
+            outcome: Outcome::Completed(json!({
+                "models": [{ "large": "directory" }],
+                "providers": ["fixture"],
+                "status": "saved",
+                "source": { "kind": "configured" },
+                "target": { "model": "chosen" },
+            })),
+            partial_result: None,
+            cleanup_errors: vec![],
+        };
+        let public = public_catalog_terminal(&private);
+        let Outcome::Completed(value) = public.outcome else {
+            panic!("completion lost")
+        };
+        assert!(value.get("models").is_none());
+        assert_eq!(value["target"]["model"], "chosen");
+        assert_eq!(value["status"], "saved");
+        assert!(json!(private)["outcome"]["value"]["models"].is_array());
     }
     #[test]
     fn authentication_public_result_omits_interaction_and_unknown_private_fields() {

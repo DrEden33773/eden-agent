@@ -4,7 +4,7 @@ mod rich_text;
 use rich_text::{RichLine, code_lines, markdown};
 #[path = "tool_text.rs"]
 mod tool_text;
-use similar::{ChangeTag, TextDiff};
+use similar::ChangeTag;
 use tool_text::{tool_output, tool_title};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -106,18 +106,19 @@ fn diff_rows(
     width: usize,
     split: bool,
     language: &str,
+    offsets: (usize, usize),
 ) -> Vec<RichLine> {
-    let diff = TextDiff::from_lines(before, after);
+    let hunks = crate::grok_diff::diff_hunks_from_strings(before, after, 0);
     let old = code_lines(before, language);
     let new = code_lines(after, language);
-    let changes: Vec<_> = diff.iter_all_changes().collect();
+    let changes: Vec<_> = hunks.iter().flatten().collect();
     let added = changes
         .iter()
-        .filter(|c| c.tag() == ChangeTag::Insert)
+        .filter(|c| c.tag == ChangeTag::Insert)
         .count();
     let removed = changes
         .iter()
-        .filter(|c| c.tag() == ChangeTag::Delete)
+        .filter(|c| c.tag == ChangeTag::Delete)
         .count();
     let mut stats = RichLine::default();
     stats.push(&format!("+{added}"), &[TextRole::DiffAdded]);
@@ -131,7 +132,7 @@ fn diff_rows(
         stats.push(&"━".repeat(bars - green), &[TextRole::DiffRemoved]);
     }
     let mut out = vec![stats];
-    let cell = |line: Option<usize>, tag: ChangeTag, source: &[RichLine]| {
+    let cell = |line: Option<usize>, tag: ChangeTag, source: &[RichLine], offset: usize| {
         let mut cell = RichLine::default();
         if let Some(index) = line {
             let role = match tag {
@@ -147,7 +148,7 @@ fn diff_rows(
                         ChangeTag::Delete => "−",
                         ChangeTag::Equal => " ",
                     },
-                    index + 1
+                    index + offset + 1
                 ),
                 &[role],
             );
@@ -197,13 +198,17 @@ fn diff_rows(
                 right.clear();
             };
         for change in changes {
-            match change.tag() {
-                ChangeTag::Delete => left.push(cell(change.old_index(), ChangeTag::Delete, &old)),
-                ChangeTag::Insert => right.push(cell(change.new_index(), ChangeTag::Insert, &new)),
+            match change.tag {
+                ChangeTag::Delete => {
+                    left.push(cell(Some(change.lo), ChangeTag::Delete, &old, offsets.0))
+                }
+                ChangeTag::Insert => {
+                    right.push(cell(Some(change.ln), ChangeTag::Insert, &new, offsets.1))
+                }
                 ChangeTag::Equal => {
                     flush(&mut out, &mut left, &mut right);
-                    left.push(cell(change.old_index(), ChangeTag::Equal, &old));
-                    right.push(cell(change.new_index(), ChangeTag::Equal, &new));
+                    left.push(cell(Some(change.lo), ChangeTag::Equal, &old, offsets.0));
+                    right.push(cell(Some(change.ln), ChangeTag::Equal, &new, offsets.1));
                     flush(&mut out, &mut left, &mut right);
                 }
             }
@@ -211,9 +216,9 @@ fn diff_rows(
         flush(&mut out, &mut left, &mut right);
     } else {
         for change in changes {
-            out.push(match change.tag() {
-                ChangeTag::Delete => cell(change.old_index(), ChangeTag::Delete, &old),
-                tag => cell(change.new_index(), tag, &new),
+            out.push(match change.tag {
+                ChangeTag::Delete => cell(Some(change.lo), ChangeTag::Delete, &old, offsets.0),
+                tag => cell(Some(change.ln), tag, &new, offsets.1),
             });
         }
     }
@@ -221,7 +226,7 @@ fn diff_rows(
 }
 #[cfg(test)]
 pub fn diff_lines(before: &str, after: &str, width: usize, split: bool) -> Vec<String> {
-    diff_rows(before, after, width, split, "text")
+    diff_rows(before, after, width, split, "text", (0, 0))
         .into_iter()
         .map(|line| line.text)
         .collect()
@@ -243,9 +248,45 @@ pub fn inspector_rows(m: &Message, width: usize, p: &Preferences) -> Vec<Row> {
     INSPECTOR_LAYOUTS.with(|count| count.set(count.get() + 1));
     render_message(m, width, p, true)
 }
+fn message_diff_rows(message: &Message, width: usize, split: bool) -> Vec<RichLine> {
+    if message.diffs.is_empty() {
+        return match (&message.before, &message.after) {
+            (Some(before), Some(after)) => diff_rows(
+                before,
+                after,
+                width,
+                split,
+                message_language(message),
+                (0, 0),
+            ),
+            _ => Vec::new(),
+        };
+    }
+    let mut rows = Vec::new();
+    for (index, diff) in message.diffs.iter().enumerate() {
+        if message.diffs.len() > 1 {
+            rows.push(RichLine::plain(format!(
+                "Change {} · source line {}",
+                index + 1,
+                diff.old_start + 1
+            )));
+        }
+        rows.extend(diff_rows(
+            &diff.before,
+            &diff.after,
+            width,
+            split,
+            message_language(message),
+            (diff.old_start, diff.new_start),
+        ));
+    }
+    rows
+}
 fn render_message(m: &Message, width: usize, p: &Preferences, full: bool) -> Vec<Row> {
     let expanded = m.expanded || full;
-    if let Some(summary) = &m.summary {
+    if let Some(summary) = &m.summary
+        && m.children.is_empty()
+    {
         let (text, numbers) = summary.formatted();
         if text.is_empty() {
             return vec![];
@@ -398,7 +439,7 @@ fn render_message(m: &Message, width: usize, p: &Preferences, full: bool) -> Vec
         }
         _ if p.basic => lines.extend(m.body.lines().map(|s| RichLine::plain(clean(s)))),
         Role::Tool if !expanded => {
-            if !p.compact || m.before.is_some() || m.failed || m.pending {
+            if !p.compact || m.before.is_some() || !m.diffs.is_empty() || m.failed || m.pending {
                 let summary = if m.pending {
                     "Running…".to_owned()
                 } else if let Some(preview) = &m.preview {
@@ -419,16 +460,10 @@ fn render_message(m: &Message, width: usize, p: &Preferences, full: bool) -> Vec
                     lines.push(summary);
                 }
             }
-            if let (Some(before), Some(after)) = (&m.before, &m.after) {
-                for mut line in diff_rows(
-                    before,
-                    after,
-                    width.saturating_sub(2),
-                    p.diff_split,
-                    message_language(m),
-                )
-                .into_iter()
-                .take(if p.compact { 4 } else { 9 })
+            if m.before.is_some() || !m.diffs.is_empty() {
+                for mut line in message_diff_rows(m, width.saturating_sub(2), p.diff_split)
+                    .into_iter()
+                    .take(if p.compact { 4 } else { 9 })
                 {
                     line.inset = 2;
                     lines.push(line);
@@ -454,14 +489,8 @@ fn render_message(m: &Message, width: usize, p: &Preferences, full: bool) -> Vec
             }
         }
         _ => {
-            if let (Some(before), Some(after)) = (&m.before, &m.after) {
-                lines.extend(diff_rows(
-                    before,
-                    after,
-                    width.saturating_sub(2),
-                    p.diff_split,
-                    message_language(m),
-                ));
+            if m.before.is_some() || !m.diffs.is_empty() {
+                lines.extend(message_diff_rows(m, width.saturating_sub(2), p.diff_split));
             } else if m.role == Role::Tool {
                 let mut content = tool_output(&m.title, &m.body, width.saturating_sub(2));
                 if !full && content.len() > 14 {
@@ -794,7 +823,7 @@ mod tests {
     #[test]
     fn diff_fallback_measures_expanded_tabs_before_selecting_split() {
         let content = format!("{}TAIL_MARKER\n", "\t".repeat(20));
-        let rows = diff_rows("old\n", &content, 120, true, "rust");
+        let rows = diff_rows("old\n", &content, 120, true, "rust", (0, 0));
         assert!(
             rows.iter()
                 .map(|r| r.text.as_str())
@@ -825,6 +854,7 @@ mod tests {
             140,
             true,
             "rust",
+            (0, 0),
         );
         let changed = rows
             .iter()

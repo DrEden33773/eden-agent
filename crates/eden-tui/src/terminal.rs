@@ -169,21 +169,20 @@ async fn run_attached(
     let updates = tx.clone();
     let ui_lease = lease.clone();
     let frontend = "tui".to_owned();
+    let mut current = snapshot.clone();
     let _follower = Follower(tokio::spawn(async move {
-        let mut presentation = 0;
-        let mut events = 0;
+        let mut projection = crate::app::Projection::new();
         loop {
             match client
-                .poll_snapshot(lease.load(Ordering::Relaxed), presentation, events)
+                .poll_incremental(lease.load(Ordering::Relaxed), current.clone())
                 .await
             {
                 Ok(snapshot) => {
-                    presentation = snapshot.presentation.sequence;
-                    events = snapshot.events.last().map_or(events, |e| e.sequence);
+                    current = snapshot.clone();
                     if updates
                         .send(Update::Snapshot(
                             Box::new(snapshot.clone()),
-                            crate::app::project_messages(&snapshot),
+                            projection.update(&snapshot),
                         ))
                         .is_err()
                     {
@@ -204,8 +203,9 @@ async fn run_attached(
                         && let Ok(attachment) = client.attach(&frontend).await
                     {
                         lease.store(attachment, Ordering::Relaxed);
-                        presentation = 0;
-                        events = 0;
+                        if let Ok(snapshot) = client.snapshot().await {
+                            current = snapshot;
+                        }
                         continue;
                     }
                     if updates
@@ -335,7 +335,16 @@ fn drive(
             dirty = true;
             continue;
         }
-        if event::poll(Duration::from_millis(16))? {
+        // Drain a burst before drawing: pasted/queued keystrokes must not pay one full
+        // streamed-text layout per byte. Keep a bound so model updates still make progress.
+        for index in 0..64 {
+            if !event::poll(if index == 0 {
+                Duration::from_millis(16)
+            } else {
+                Duration::ZERO
+            })? {
+                break;
+            }
             match event::read()? {
                 Event::Key(key) => {
                     app.key(key);

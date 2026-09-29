@@ -876,6 +876,7 @@ impl Catalog {
     }
     async fn refresh_reply(&self, status: &str) -> CatalogReply {
         CatalogReply {
+            selection_source: None,
             providers: vec![],
             models: vec![],
             target: None,
@@ -1088,6 +1089,24 @@ impl Catalog {
                 status: if excluded { "excluded" } else { "configured" }.into(),
             });
         }
+        let selection_source = match &request {
+            CatalogRequest::Resolve { selection: Some(_) } => Some("session".to_owned()),
+            CatalogRequest::Resolve { selection: None } => Some(
+                if inner.disk.default.as_ref().is_some_and(|default| {
+                    models.iter().any(|e| {
+                        e.status == "configured"
+                            && e.target.provider == default.provider
+                            && e.target.model == default.model
+                    })
+                }) {
+                    "global default"
+                } else {
+                    "configured fallback"
+                }
+                .to_owned(),
+            ),
+            _ => None,
+        };
         let selection = match &request {
             CatalogRequest::Resolve { selection } => selection
                 .clone()
@@ -1201,6 +1220,7 @@ impl Catalog {
         providers.sort();
         providers.dedup();
         Ok(CatalogReply {
+            selection_source,
             providers,
             models,
             target,

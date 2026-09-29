@@ -45,7 +45,7 @@ struct Shared {
     web_root: Option<PathBuf>,
     submissions: Mutex<(HashMap<String, Submission>, VecDeque<String>)>,
     stop: watch::Sender<bool>,
-    history: tokio::sync::Mutex<Option<(u64, Vec<eden_protocol::coding::Record>)>>,
+    history: tokio::sync::Mutex<Option<(u64, Arc<Vec<eden_protocol::coding::Record>>)>>,
 }
 fn fault(code: &str, message: impl Into<String>) -> Fault {
     Fault::new(code, "live", message)
@@ -504,10 +504,36 @@ async fn dispatch(
             // first, but its live event remains available to the next cursor read.
             let events = session.events();
             let history = snapshot_history(shared, &events).await?;
+            let incremental = query_parameter(path, "incremental") == Some("1");
+            let after = query_parameter(path, "events_after")
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0);
+            let reset = !incremental
+                || events
+                    .first()
+                    .is_some_and(|e| e.sequence > after.saturating_add(1));
+            let head = history.last().map_or(0, |record| record.sequence);
+            let unchanged = !reset
+                && query_parameter(path, "history_head").and_then(|v| v.parse::<u64>().ok())
+                    == Some(head);
+            let first = events.first().map(|event| event.sequence);
+            let events = events
+                .into_iter()
+                .filter(|event| reset || event.sequence > after)
+                .collect::<Vec<_>>();
+            let wire_history = if unchanged {
+                serde_json::Value::Array(Vec::new())
+            } else {
+                serde_json::to_value(&history)
+                    .map_err(|error| fault("InvalidInput", error.to_string()))?
+            };
             Ok(json!({
                 "presentation": session.presentation_snapshot(),
                 "state": session.state(),
-                "history": history,
+                "history": wire_history,
+                "history_unchanged": unchanged,
+                "events_reset": reset,
+                "events_first": first,
                 "events": events,
             }))
         }
@@ -569,17 +595,27 @@ async fn dispatch(
             | "/configuration/wait",
         ) => management_read(shared, route, &body).await,
         ("POST", "/models/list") => Ok(json!(session.models().await?)),
-        ("POST", "/models/current") => Ok(json!({
-            "selection": session.model_selection().await?,
-            "last_committed_target": session
-                .history()
-                .await?
-                .iter()
-                .rev()
-                .find(|r| r.kind == "model_selection")
-                .map(|r| &r.payload["target"]),
-        })),
+        ("POST", "/models/current") => {
+            let effective = session.effective_model().await?;
+            Ok(json!({
+                "selection": session.model_selection().await?,
+                "effective_target": effective.target,
+                "selection_source": effective.selection_source,
+                "last_committed_target": session
+                    .history()
+                    .await?
+                    .iter()
+                    .rev()
+                    .find(|r| r.kind == "model_selection")
+                    .map(|r| &r.payload["target"]),
+            }))
+        }
         ("POST", "/router/list") => Ok(json!(session.managed_models().await?)),
+        ("POST", "/auth/methods") => Ok(json!(
+            session
+                .authentication_methods(field(&body, "provider")?)
+                .await?
+        )),
         ("POST", "/auth/status") => Ok(json!(
             session
                 .auth_status(&field::<String>(&body, "operation_id")?)
@@ -933,9 +969,12 @@ async fn perform_submission(shared: &Shared, route: &str, body: &Value) -> Resul
                     })?,
             }))
         }
-        "/models/select" => {
-            Ok(json!({ "run_id": session.select_model(field(body, "selection")?)? }))
-        }
+        "/models/select" => Ok(json!({
+            "run_id": session.select_model_with_default(
+                field(body, "selection")?,
+                body["save_default"] == true
+            )?,
+        })),
         "/models/catalog" => Ok(json!({ "run_id": session.catalog(field(body, "request")?)? })),
         "/router/manage" => {
             Ok(json!({ "run_id": session.manage_models(field(body, "request")?)? }))
@@ -1051,7 +1090,7 @@ async fn wait_events(session: &Session, after: u64) {
 async fn snapshot_history(
     shared: &Shared,
     events: &[eden_protocol::Event],
-) -> Result<Vec<eden_protocol::coding::Record>, Fault> {
+) -> Result<Arc<Vec<eden_protocol::coding::Record>>, Fault> {
     let mut cache = shared.history.lock().await;
     let current = events.last().map_or(0, |event| event.sequence);
     let refresh = cache.as_ref().is_none_or(|(previous, _)| {
@@ -1071,7 +1110,7 @@ async fn snapshot_history(
     });
     if refresh {
         let history = eden_protocol::history::active_path(&shared.session.history().await?)?;
-        *cache = Some((current, history));
+        *cache = Some((current, Arc::new(history)));
     }
     if let Some((sequence, history)) = cache.as_mut() {
         *sequence = current;

@@ -57,7 +57,7 @@ pub struct Snapshot {
     pub diagnostic: Option<String>,
     pub presentation: presentation::Snapshot,
     pub state: State,
-    pub history: Vec<Record>,
+    pub history: std::sync::Arc<Vec<Record>>,
     pub events: Vec<Event>,
 }
 /// A missing request is not proof of rejection: the bounded host receipt cache may have expired.
@@ -148,12 +148,38 @@ impl HostClient {
         ))
         .await
     }
+    /// Consume an incremental wire update, rebuilding from the authoritative host window after lag.
+    pub async fn poll_incremental(
+        &self,
+        attachment: u64,
+        previous: Snapshot,
+    ) -> Result<Snapshot, Fault> {
+        let presentation = previous.presentation.sequence;
+        let events = previous.events.last().map_or(0, |e| e.sequence);
+        let head = previous.history.last().map_or(0, |r| r.sequence);
+        let route = format!(
+            "/tui/snapshot?attachment={attachment}&after={presentation}&events_after={events}&\
+             history_head={head}&incremental=1"
+        );
+        self.read_snapshot_with_previous(&route, Some(previous))
+            .await
+    }
     async fn read_snapshot(&self, route: &str) -> Result<Snapshot, Fault> {
+        self.read_snapshot_with_previous(route, None).await
+    }
+    async fn read_snapshot_with_previous(
+        &self,
+        route: &str,
+        previous: Option<Snapshot>,
+    ) -> Result<Snapshot, Fault> {
         let mut raw = call(&self.endpoint, "GET", route, None).await?;
+        let unchanged = raw["history_unchanged"] == true;
+        let reset = raw["events_reset"] != false;
+        let first = raw["events_first"].as_u64();
         raw["presentation"] =
             serde_json::to_value(decode_presentation(raw["presentation"].take())?)
                 .map_err(|e| fault("InvalidInput", e.to_string()))?;
-        let snapshot: Snapshot = decode(raw)?;
+        let mut snapshot: Snapshot = decode(raw)?;
         if self.session_id.is_some_and(|id| {
             id != snapshot.presentation.session_id || id != snapshot.state.session_id
         }) {
@@ -161,6 +187,20 @@ impl HostClient {
                 "SessionMismatch",
                 "endpoint now serves another session",
             ));
+        }
+        if let Some(previous) = previous {
+            if unchanged {
+                snapshot.history = previous.history;
+            }
+            if !reset {
+                let mut events = previous.events;
+                events.extend(snapshot.events);
+                // Retain only the host's bounded event window; durable records remain authoritative.
+                if let Some(first) = first {
+                    events.retain(|event| event.sequence >= first);
+                }
+                snapshot.events = events;
+            }
         }
         Ok(snapshot)
     }
@@ -644,6 +684,96 @@ mod transport_tests {
     use super::*;
     use tokio::net::TcpListener;
 
+    #[tokio::test]
+    async fn incremental_reads_merge_events_and_rebuild_history_after_lag() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let path = std::env::temp_dir().join(format!("eden-incremental-{}.json", address.port()));
+        tokio::fs::write(
+            &path,
+            serde_json::to_vec(&Endpoint {
+                address: address.to_string(),
+                token: "fixture".into(),
+                session_id: 1,
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let mut initial = json!({
+            "presentation": {
+                "version": presentation::VERSION,
+                "session_id": 1,
+                "sequence": 0,
+                "views": [],
+                "activity": [],
+                "pending_interactions": [],
+            },
+            "state": { "session_id": 1, "closed": false, "active_run": 7 },
+            "history": [],
+            "events": [{
+                "sequence": 1,
+                "session_id": 1,
+                "run_id": 7,
+                "kind": "started",
+                "payload": null,
+            }],
+        });
+        let mut delta = initial.clone();
+        delta["history_unchanged"] = json!(true);
+        delta["events_reset"] = json!(false);
+        delta["events_first"] = json!(1);
+        delta["events"][0]["sequence"] = json!(2);
+        let mut reset = initial.clone();
+        reset["events_reset"] = json!(true);
+        reset["events"][0]["sequence"] = json!(99);
+        reset["history"] = json!([{
+            "schema_version": 2,
+            "session_id": 1,
+            "sequence": 10,
+            "run_id": 7,
+            "kind": "notice",
+            "payload": "rebuilt",
+        }]);
+        initial["events_reset"] = json!(true);
+        let server = tokio::spawn(async move {
+            for (index, response) in [initial, delta, reset].into_iter().enumerate() {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let count = socket.read(&mut request).await.unwrap();
+                if index > 0 {
+                    assert!(String::from_utf8_lossy(&request[..count]).contains("incremental=1"));
+                }
+                let body = json!({ "ok": true, "result": response }).to_string();
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: \
+                             close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let client = HostClient::for_session(&path, 1);
+        let initial = client.snapshot().await.unwrap();
+        let history = initial.history.clone();
+        let delta = client.poll_incremental(1, initial).await.unwrap();
+        assert!(std::sync::Arc::ptr_eq(&history, &delta.history));
+        assert_eq!(
+            delta.events.iter().map(|e| e.sequence).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        let reset = client.poll_incremental(1, delta).await.unwrap();
+        assert_eq!(reset.events.len(), 1);
+        assert_eq!(reset.events[0].sequence, 99);
+        assert_eq!(reset.history[0].payload, "rebuilt");
+        server.await.unwrap();
+        tokio::fs::remove_file(path).await.unwrap();
+    }
     async fn silent_host() -> (
         PathBuf,
         tokio::task::JoinHandle<Vec<u8>>,

@@ -286,6 +286,20 @@ impl Settings {
         Ok(settings)
     }
 }
+pub(crate) fn methods(provider: &str, config: &Config) -> Vec<String> {
+    let mut methods = vec!["API key".into()];
+    if Settings::new(provider, config).is_ok() {
+        if !matches!(provider, "xai" | "kimi-coding" | "github-copilot") {
+            methods.push("Browser login".into());
+        }
+        if !matches!(provider, "anthropic" | "openrouter") {
+            methods.push("Device login".into());
+        }
+        methods.push("Refresh OAuth".into());
+    }
+    methods.push("Log out".into());
+    methods
+}
 impl Flow {
     pub async fn start(
         provider: &str,

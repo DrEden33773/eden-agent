@@ -300,37 +300,6 @@ pub extern "C" fn eden_terminal_frontend_v1() -> *const eden_ui_sdk::TerminalFro
     &FRONTEND
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    extern "C" fn receive(ctx: *mut c_void, bytes: *const u8, len: usize) {
-        // SAFETY: the test passes a live Vec and the SDK borrows valid callback bytes.
-        unsafe {
-            let output = &mut *ctx.cast::<Vec<u8>>();
-            output.extend_from_slice(std::slice::from_raw_parts(bytes, len));
-        }
-    }
-
-    #[test]
-    fn author_accepts_input_and_returns_owned_snapshot_to_host() {
-        let mut output = Vec::<u8>::new();
-        // SAFETY: use this library's table and live handle serially; destroy before return.
-        unsafe {
-            let api = &*eden_ui_v1();
-            let handle = (api.create)(0);
-            assert!(!handle.is_null());
-            assert_eq!(
-                (api.event)(handle, 1, 0, 0, b"external author".as_ptr(), 15),
-                0
-            );
-            (api.snapshot)(handle, receive, (&mut output as *mut Vec<u8>).cast());
-            assert_eq!(output, b"external author");
-            (api.destroy)(handle);
-        }
-    }
-}
-
 unsafe extern "C" fn overlay_render(
     _: *mut c_void,
     bytes: *const u8,
@@ -409,4 +378,35 @@ static OVERLAY: eden_ui_sdk::OverlayApi = eden_ui_sdk::OverlayApi {
 #[unsafe(no_mangle)]
 pub extern "C" fn eden_overlay_v1() -> *const eden_ui_sdk::OverlayApi {
     &OVERLAY
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    extern "C" fn receive(ctx: *mut c_void, bytes: *const u8, len: usize) {
+        // SAFETY: the test passes a live Vec and the SDK borrows valid callback bytes.
+        unsafe {
+            let output = &mut *ctx.cast::<Vec<u8>>();
+            output.extend_from_slice(std::slice::from_raw_parts(bytes, len));
+        }
+    }
+
+    #[test]
+    fn author_accepts_input_and_returns_owned_snapshot_to_host() {
+        let mut output = Vec::<u8>::new();
+        // SAFETY: use this library's table and live handle serially; destroy before return.
+        unsafe {
+            let api = &*eden_ui_v1();
+            let handle = (api.create)(0);
+            assert!(!handle.is_null());
+            assert_eq!(
+                (api.event)(handle, 1, 0, 0, b"external author".as_ptr(), 15),
+                0
+            );
+            (api.snapshot)(handle, receive, (&mut output as *mut Vec<u8>).cast());
+            assert_eq!(output, b"external author");
+            (api.destroy)(handle);
+        }
+    }
 }

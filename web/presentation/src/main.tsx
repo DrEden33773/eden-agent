@@ -64,7 +64,12 @@ type Snapshot = {
   activity: { attachment: number; frontend: string; target: ActivityTarget }[];
 };
 type State = { active_run: number | null; closed: boolean; read_only?: boolean };
-type Frame = { presentation: Snapshot; state: State };
+type Frame = {
+  presentation: Snapshot;
+  state: State;
+  reading?: { format: string; entries: unknown[]; diagnostic?: string | null } | null;
+  diagnostic?: string | null;
+};
 type Fault = { code: string; message: string };
 const token = new URLSearchParams(location.search).get("token") ?? "";
 let requestCounter = 0;
@@ -605,6 +610,16 @@ function App() {
           </section>
         )}
         <section className="views" aria-label="Live presentation">
+          {frame?.diagnostic && <p role="status">{frame.diagnostic}</p>}
+          {frame?.reading && (
+            <section aria-label="Reading document">
+              <h2>Reading document</h2>
+              {frame.reading.diagnostic && <p role="status">{frame.reading.diagnostic}</p>}
+              <pre>
+                {frame.reading.entries.map((entry) => JSON.stringify(entry, null, 2)).join("\n")}
+              </pre>
+            </section>
+          )}
           {frame?.presentation.views.map((view) => (
             <article
               key={`${view.owner}/${view.id}`}

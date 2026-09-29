@@ -97,6 +97,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("s4-store-test-{}", std::process::id()));
         let store = DraftStore::new(&dir, "terminal-a").unwrap();
         store.save(SavedDraft {
+            positions: Default::default(),
             sessions: std::collections::BTreeMap::from([(
                 "other-session".into(),
                 Draft {

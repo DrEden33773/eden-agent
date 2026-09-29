@@ -547,6 +547,97 @@ pub fn artifacts(records: &[Record], message_id: u64) -> Vec<Artifact> {
         .unwrap_or_default()
 }
 
+/// Reading entries preserve their own display vocabulary without manufacturing history records.
+pub(crate) fn reading(document: &eden_protocol::delivery::ReadingDocument) -> Vec<Message> {
+    let mut messages = vec![];
+    for (index, entry) in document.entries.iter().enumerate() {
+        let content = entry.get("content").unwrap_or(entry);
+        let id = index as u64 + 1;
+        let (role, title, body) = match content["type"]
+            .as_str()
+            .filter(|_| document.format == "eden-reading-v1")
+        {
+            Some("message") => {
+                let content_blocks: Vec<Block> =
+                    serde_json::from_value(content["content"].clone()).unwrap_or_default();
+                let mut message = Message::new(
+                    id,
+                    if content["role"] == "user" {
+                        Role::User
+                    } else {
+                        Role::Assistant
+                    },
+                    content["role"].as_str().unwrap_or("Message"),
+                    blocks(&content_blocks),
+                );
+                message.images = content_blocks
+                    .into_iter()
+                    .filter(|b| matches!(b, Block::Image { .. }))
+                    .map(std::sync::Arc::new)
+                    .collect();
+                messages.push(message);
+                continue;
+            }
+            Some("thinking") => (
+                Role::Thinking,
+                "Thinking".into(),
+                content["text"].as_str().unwrap_or("").into(),
+            ),
+            Some("tool_call") => (
+                Role::Tool,
+                content["name"].as_str().unwrap_or("Tool").into(),
+                serde_json::to_string_pretty(&content["arguments"]).unwrap_or_default(),
+            ),
+            Some("tool_result") => (
+                Role::Tool,
+                format!("Tool result {}", content["call_id"].as_str().unwrap_or("")),
+                serde_json::to_string_pretty(content).unwrap_or_default(),
+            ),
+            Some("presentation") => {
+                let snapshot = serde_json::json!({
+                    "version": 1,
+                    "session_id": 0,
+                    "sequence": 0,
+                    "views": [content["view"]],
+                    "activity": [],
+                    "pending_interactions": [],
+                });
+                if let Ok(snapshot) = eden_tui_client::decode_presentation(snapshot) {
+                    let mut lines = vec![];
+                    for view in snapshot.views {
+                        crate::forms::content(&view.view.nodes, &mut lines);
+                    }
+                    (Role::Notice, "Saved plugin view".into(), lines.join("\n"))
+                } else {
+                    (
+                        Role::Notice,
+                        "Saved plugin view".into(),
+                        content["view"]["fallback"]
+                            .as_str()
+                            .unwrap_or("Unsupported saved view")
+                            .into(),
+                    )
+                }
+            }
+            _ => (
+                Role::Notice,
+                "Reading source".into(),
+                serde_json::to_string_pretty(content).unwrap_or_default(),
+            ),
+        };
+        messages.push(Message::new(id, role, title, body));
+    }
+    if let Some(error) = &document.diagnostic {
+        messages.push(Message::new(
+            u64::MAX - 1,
+            Role::Notice,
+            "Reading diagnostic",
+            error,
+        ));
+    }
+    messages
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

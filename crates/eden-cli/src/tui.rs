@@ -103,54 +103,56 @@ pub(crate) fn start_host(
     let log_path = endpoint.with_extension("log");
     let log = std::fs::File::create(&log_path)?;
     let mut command = Command::new(std::env::current_exe()?);
-    for (flag, path) in [
-        ("--composition", cli.composition.as_ref()),
-        ("--cwd", cli.cwd.as_ref()),
-        ("--global-dir", cli.global_dir.as_ref()),
-        ("--session", cli.session.as_ref()),
-    ] {
-        if let Some(path) = path {
-            command.arg(flag).arg(path);
+    if read.is_none() {
+        for (flag, path) in [
+            ("--composition", cli.composition.as_ref()),
+            ("--cwd", cli.cwd.as_ref()),
+            ("--global-dir", cli.global_dir.as_ref()),
+            ("--session", cli.session.as_ref()),
+        ] {
+            if let Some(path) = path {
+                command.arg(flag).arg(path);
+            }
         }
-    }
-    for path in &cli.env_file {
-        command.arg("--env-file").arg(path);
-    }
-    for (on, flag) in [
-        (cli.trust_project, "--trust-project"),
-        (cli.no_trust_project, "--no-trust-project"),
-        (cli.offline_startup, "--offline-startup"),
-        (cli.no_update_check, "--no-update-check"),
-        (cli.no_session, "--no-session"),
-        (cli.read_only, "--read-only"),
-        (cli.no_context, "--no-context"),
-        (cli.no_skills, "--no-skills"),
-        (cli.no_templates, "--no-templates"),
-    ] {
-        if on {
-            command.arg(flag);
+        for path in &cli.env_file {
+            command.arg("--env-file").arg(path);
         }
-    }
-    for (flag, values) in [
-        ("--tools", &cli.tools),
-        ("--exclude-tools", &cli.exclude_tools),
-    ] {
-        if !values.is_empty() {
-            command.arg(format!("{flag}={}", values.join(",")));
+        for (on, flag) in [
+            (cli.trust_project, "--trust-project"),
+            (cli.no_trust_project, "--no-trust-project"),
+            (cli.offline_startup, "--offline-startup"),
+            (cli.no_update_check, "--no-update-check"),
+            (cli.no_session, "--no-session"),
+            (cli.read_only, "--read-only"),
+            (cli.no_context, "--no-context"),
+            (cli.no_skills, "--no-skills"),
+            (cli.no_templates, "--no-templates"),
+        ] {
+            if on {
+                command.arg(flag);
+            }
         }
-    }
-    for (flag, values) in [
-        ("--skill-path", &cli.skill_path),
-        ("--template-path", &cli.template_path),
-    ] {
-        for path in values {
-            command.arg(flag).arg(path);
+        for (flag, values) in [
+            ("--tools", &cli.tools),
+            ("--exclude-tools", &cli.exclude_tools),
+        ] {
+            if !values.is_empty() {
+                command.arg(format!("{flag}={}", values.join(",")));
+            }
         }
-    }
-    if let Some(model) = &cli.model {
-        command.arg("--model").arg(model);
-        if let Some(thinking) = &cli.thinking {
-            command.arg("--thinking").arg(thinking);
+        for (flag, values) in [
+            ("--skill-path", &cli.skill_path),
+            ("--template-path", &cli.template_path),
+        ] {
+            for path in values {
+                command.arg(flag).arg(path);
+            }
+        }
+        if let Some(model) = &cli.model {
+            command.arg("--model").arg(model);
+            if let Some(thinking) = &cli.thinking {
+                command.arg("--thinking").arg(thinking);
+            }
         }
     }
     if let Some(path) = read {
@@ -205,4 +207,90 @@ pub fn monochrome(cli: &Cli) -> bool {
     cli.color == "never"
         || (cli.color != "always"
             && std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty()))
+}
+
+/// A local registry records only explicit hosts; history selection still verifies the live identity.
+pub(crate) struct Registration(PathBuf);
+impl Registration {
+    pub(crate) fn new(
+        session: &eden_agent::Session,
+        endpoint: &Path,
+    ) -> Result<Option<Self>, Box<dyn std::error::Error>> {
+        let Some(history) = session.history_path() else {
+            return Ok(None);
+        };
+        let directory = state_dir().join("live");
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join(format!("{}.json", session.id()));
+        let value = serde_json::json!({
+            "history": std::fs::canonicalize(history)?,
+            "endpoint": std::fs::canonicalize(endpoint)?,
+            "session_id": session.id(),
+        });
+        std::fs::write(&path, serde_json::to_vec(&value)?)?;
+        Ok(Some(Self(path)))
+    }
+}
+impl Drop for Registration {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+/// Reuse a verified live owner only after the user explicitly selects that history.
+pub(crate) async fn selected_live_endpoint(history: &Path) -> Option<PathBuf> {
+    let history = history.to_owned();
+    let directory = state_dir().join("live");
+    let (endpoint, id) = tokio::task::spawn_blocking(move || registered_host(&history, &directory))
+        .await
+        .ok()??;
+    let frame = eden_tui_client::call(&endpoint, "GET", "/snapshot", None)
+        .await
+        .ok()?;
+    let state: eden_tui_client::State = serde_json::from_value(frame["state"].clone()).ok()?;
+    (state.session_id == id && !state.closed).then_some(endpoint)
+}
+fn registered_host(history: &Path, directory: &Path) -> Option<(PathBuf, u64)> {
+    let history = std::fs::canonicalize(history).ok()?;
+    for entry in std::fs::read_dir(directory).ok()?.flatten() {
+        let Ok(bytes) = std::fs::read(entry.path()) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        if value["history"].as_str() != history.to_str() {
+            continue;
+        }
+        return Some((
+            PathBuf::from(value["endpoint"].as_str()?),
+            value["session_id"].as_u64()?,
+        ));
+    }
+    None
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+    #[test]
+    fn live_owner_lookup_does_not_require_a_quiescent_history_tail() {
+        let root = std::env::temp_dir().join(format!("eden-owner-{}", std::process::id()));
+        let registry = root.join("live");
+        std::fs::create_dir_all(&registry).unwrap();
+        let history = root.join("history.jsonl");
+        std::fs::write(&history, b"{pending append").unwrap();
+        let endpoint = root.join("endpoint.json");
+        std::fs::write(
+            registry.join("7.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "history": std::fs::canonicalize(&history).unwrap(),
+                "endpoint": endpoint,
+                "session_id": 7,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(registered_host(&history, &registry), Some((endpoint, 7)));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

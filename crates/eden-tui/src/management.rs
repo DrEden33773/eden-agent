@@ -18,6 +18,9 @@ pub(crate) struct Management {
     pub run_route: String,
     pub auth: Option<Value>,
     pub last_error: Option<Fault>,
+    pub scan: Option<String>,
+    pub sort_by_name: bool,
+    pub copy_source: Option<Value>,
 }
 #[derive(Clone)]
 pub(crate) struct Operation {
@@ -42,7 +45,61 @@ fn boolean(key: &str, label: &str) -> Field {
     field
 }
 impl App {
+    pub(crate) fn release_management_preview(&mut self) {
+        if let Some(id) = self
+            .management
+            .data
+            .get("preview_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        {
+            let route = if self.management.data["plan"].is_object() {
+                "/manage/copy/discard"
+            } else {
+                "/delivery/discard"
+            };
+            self.dispatch(
+                route,
+                json!({
+                    "request_id": self.id(),
+                    "preview_id": id,
+                    "management": self.management.generation,
+                    "preview_cleanup": true,
+                }),
+            );
+            self.management.data = Value::Null;
+        }
+    }
+    pub(crate) fn cancel_management_scan(&mut self) {
+        if let Some(id) = self.management.scan.take() {
+            self.dispatch(
+                "/manage/sessions/cancel",
+                json!({
+                    "scan_id": id,
+                    "management": self.management.generation,
+                    "scan_cleanup": true,
+                }),
+            );
+        }
+    }
+    fn start_management_scan(&mut self, directory: Value) {
+        self.management.data = json!([]);
+        let attachment = self
+            .lease
+            .as_ref()
+            .map_or(0, |lease| lease.load(std::sync::atomic::Ordering::Relaxed));
+        self.dispatch(
+            "/manage/sessions/start",
+            json!({
+                "directory": directory,
+                "attachment": attachment,
+                "management": self.management.generation,
+            }),
+        );
+    }
     pub(crate) fn open_management(&mut self, page: &str) {
+        self.cancel_management_scan();
+        self.release_management_preview();
         self.management.generation += 1;
         self.management.page = page.into();
         self.management.form = None;
@@ -54,7 +111,10 @@ impl App {
             "router" => "/router/list",
             "settings" | "plugins" => "/configuration/inspect",
             "resources" => "/resources",
-            "sessions" => "/manage/sessions",
+            "sessions" => {
+                self.start_management_scan(Value::Null);
+                return;
+            }
             "tree" => {
                 self.management.data = json!(self.snapshot.history);
                 self.management.items = self
@@ -130,6 +190,7 @@ impl App {
                 ("metadata", "Rename / tag the current session"),
                 ("tree", "Current session tree"),
                 ("directory", "Browse another directory"),
+                ("sort", "Sort by name / recent modification"),
             ],
             "tree" => &[("metadata", "Rename / tag the current session")],
             _ => &[],
@@ -181,6 +242,7 @@ impl App {
         fields: Vec<Field>,
         private: bool,
     ) {
+        self.cancel_management_scan();
         self.management.generation += 1;
         self.form_target = None;
         self.management.form = Some(Operation {
@@ -215,6 +277,15 @@ impl App {
             self.management.page = "auth-challenge".into();
             self.management.items.clear();
             self.open("manage:auth-challenge");
+            if self.management.run.is_none()
+                && let Some(auth) = &self.management.auth
+                && auth["interaction"].is_object()
+            {
+                self.management_request(
+                    "/auth/start",
+                    json!({ "request": { "action": "wait", "operation_id": auth["operation_id"] } }),
+                );
+            }
             return;
         }
         if id == "action:wait" {
@@ -238,6 +309,42 @@ impl App {
             return;
         }
         match (page, id) {
+            ("sessions", "action:sort") => {
+                self.management.sort_by_name = !self.management.sort_by_name;
+                self.refresh_session_choices();
+                self.open("manage:sessions");
+            }
+            ("selected-session", "fork") => {
+                self.management.copy_source = Some(self.management.data.clone());
+                self.management.page = "fork-tree".into();
+                self.management.items.clear();
+                self.open("manage:fork-tree");
+                self.dispatch(
+                    "/manage/tree",
+                    json!({
+                        "path": self.management.data["path"],
+                        "management": self.management.generation,
+                    }),
+                );
+            }
+            ("fork-tree", _) => {
+                if let Some(target) = id.parse::<u64>().ok()
+                    && let Some(source) = &self.management.copy_source
+                {
+                    self.management_form(
+                        "Fork selected source ancestry",
+                        "/manage/copy/preview",
+                        json!({
+                            "source": source["path"],
+                            "destination": "",
+                            "kind": "fork",
+                            "target": target,
+                        }),
+                        vec![text("/destination", "New history path", "")],
+                        false,
+                    );
+                }
+            }
             ("sessions", "action:directory") => self.management_form(
                 "Saved session directory",
                 "/manage/sessions",
@@ -275,7 +382,7 @@ impl App {
                 ],
                 false,
             ),
-            ("selected-session", "fork" | "clone" | "recover" | "upgrade") => self.management_form(
+            ("selected-session", "clone" | "recover" | "upgrade") => self.management_form(
                 "Preview session copy",
                 "/manage/copy/preview",
                 json!({
@@ -466,6 +573,35 @@ impl App {
             _ => {}
         }
     }
+    fn refresh_session_choices(&mut self) {
+        let Some(entries) = self.management.data.as_array_mut() else {
+            return;
+        };
+        let by_name = self.management.sort_by_name;
+        entries.sort_by(|a, b| {
+            if by_name {
+                a["name"].as_str().cmp(&b["name"].as_str())
+            } else {
+                b["modified"].as_u64().cmp(&a["modified"].as_u64())
+            }
+            .then_with(|| a["path"].as_str().cmp(&b["path"].as_str()))
+        });
+        self.management.items = entries
+            .iter()
+            .map(|e| {
+                (
+                    e["path"].as_str().unwrap_or("").into(),
+                    format!(
+                        "{} · {} · {} · {}",
+                        e["name"].as_str().unwrap_or(""),
+                        e["tags"],
+                        e["path"].as_str().unwrap_or(""),
+                        e["diagnostic"].as_str().unwrap_or("")
+                    ),
+                )
+            })
+            .collect();
+    }
     fn management_detail(&mut self, title: &str, value: Value) {
         self.management.form = None;
         self.form_target = None;
@@ -513,9 +649,7 @@ impl App {
             self.management.page = "sessions".into();
             self.management.form = None;
             self.open("manage:sessions");
-            body["management"] = json!(self.management.generation);
-            body["query"] = json!(true);
-            self.dispatch(route, body);
+            self.start_management_scan(body["directory"].take());
             return;
         }
         if operation.private {
@@ -559,6 +693,9 @@ impl App {
         body: &Value,
         result: Result<Value, Fault>,
     ) {
+        if body["preview_cleanup"] == true || body["scan_cleanup"] == true {
+            return;
+        }
         let belongs = self
             .pending
             .as_ref()
@@ -585,6 +722,72 @@ impl App {
                 return;
             }
         };
+        if route == "/manage/sessions/start" {
+            if !current {
+                self.dispatch(
+                    "/manage/sessions/cancel",
+                    json!({
+                        "scan_id": value["scan_id"],
+                        "management": self.management.generation,
+                        "scan_cleanup": true,
+                    }),
+                );
+            } else if let Some(id) = value["scan_id"].as_str() {
+                self.management.scan = Some(id.into());
+                self.dispatch(
+                    "/manage/sessions/poll",
+                    json!({ "scan_id": id, "management": self.management.generation }),
+                );
+            }
+            return;
+        }
+        if route == "/manage/sessions/poll" {
+            if !current || self.management.scan.as_deref() != value["scan_id"].as_str() {
+                return;
+            }
+            let selected = if let Some(Dialog::Palette {
+                kind,
+                query,
+                selected,
+            }) = &self.dialog
+            {
+                self.choices(kind, query)
+                    .get(*selected)
+                    .map(|(id, _)| id.clone())
+            } else {
+                None
+            };
+            if let Some(entries) = value["entries"].as_array()
+                && let Some(data) = self.management.data.as_array_mut()
+            {
+                data.extend(entries.iter().cloned());
+            }
+            self.refresh_session_choices();
+            if let Some(id) = selected
+                && let Some(Dialog::Palette { kind, query, .. }) = &self.dialog
+            {
+                let index = self
+                    .choices(kind, query)
+                    .iter()
+                    .position(|(key, _)| key == &id);
+                if let Some(index) = index
+                    && let Some(Dialog::Palette { selected, .. }) = &mut self.dialog
+                {
+                    *selected = index;
+                }
+            }
+            if value["done"] == true {
+                self.management.scan = None;
+                self.notice = "Directory loaded".into();
+            } else {
+                self.notice = "Reading directory…".into();
+                self.dispatch(
+                    "/manage/sessions/poll",
+                    json!({ "scan_id": value["scan_id"], "management": self.management.generation }),
+                );
+            }
+            return;
+        }
         if route == "/configuration/apply"
             && let Some(operation) = value["operation"].as_u64()
         {
@@ -625,7 +828,55 @@ impl App {
             };
             self.notice = "Operation completed".into();
         }
+        if matches!(
+            body["operation"].as_str(),
+            Some("/auth/start" | "/auth/input")
+        ) || route == "/auth/status"
+        {
+            self.management.auth = if is_pending_auth(&value) {
+                Some(value.clone())
+            } else {
+                None
+            };
+        }
         if !current {
+            if matches!(route, "/delivery/preview" | "/manage/copy/preview")
+                && value["preview_id"].is_string()
+            {
+                let cleanup = if route == "/delivery/preview" {
+                    "/delivery/discard"
+                } else {
+                    "/manage/copy/discard"
+                };
+                self.dispatch(
+                    cleanup,
+                    json!({
+                        "request_id": self.id(),
+                        "preview_id": value["preview_id"],
+                        "management": self.management.generation,
+                        "preview_cleanup": true,
+                    }),
+                );
+            }
+            return;
+        }
+        if matches!(
+            route,
+            "/delivery/save"
+                | "/delivery/discard"
+                | "/manage/copy/apply"
+                | "/manage/copy/discard"
+                | "/manage/rename"
+                | "/manage/delete"
+                | "/trust/save"
+        ) {
+            if matches!(
+                route,
+                "/delivery/discard" | "/manage/copy/apply" | "/manage/copy/discard"
+            ) {
+                self.management.data = Value::Null;
+            }
+            self.management_detail("Operation result", value);
             return;
         }
         if route == "/manage/open"
@@ -645,9 +896,7 @@ impl App {
         }
         if body["operation"] == "/auth/start" || body["operation"] == "/auth/input" {
             if let Some(operation) = value["operation_id"].as_str()
-                && (value["status"] == "awaiting_input"
-                    || value["challenge"] == "api_key"
-                    || value["interaction"].is_object())
+                && is_pending_auth(&value)
             {
                 let api_key = !value["interaction"].is_object();
                 self.management.auth = Some(value.clone());
@@ -689,6 +938,23 @@ impl App {
             return;
         }
         self.management.items = match self.management.page.as_str() {
+            "fork-tree" => value
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|r| r["kind"] != "branch_selected")
+                .map(|r| {
+                    (
+                        r["sequence"].to_string(),
+                        format!(
+                            "{} · {} · {}",
+                            r["sequence"],
+                            r["branch"].as_str().unwrap_or(""),
+                            r["kind"].as_str().unwrap_or("")
+                        ),
+                    )
+                })
+                .collect(),
             "models" => value["models"]
                 .as_array()
                 .into_iter()
@@ -723,9 +989,10 @@ impl App {
                             "{} · {} · {}",
                             m["id"].as_str().unwrap_or(""),
                             m["state"].as_str().unwrap_or("unknown"),
-                            m["progress"]
-                                .as_f64()
-                                .map_or_else(|| "progress unknown".into(), |p| format!("{p}%"))
+                            m["progress"].as_f64().map_or_else(
+                                || "progress unknown".into(),
+                                |p| format!("reported progress {p}")
+                            )
                         ),
                     )
                 })
@@ -776,6 +1043,13 @@ impl App {
         self.management.data = value;
         self.notice = "Loaded".into();
     }
+}
+fn is_pending_auth(value: &Value) -> bool {
+    value["operation_id"].is_string()
+        && matches!(
+            value["status"].as_str(),
+            Some("awaiting_input" | "awaiting_authorization" | "pending")
+        )
 }
 fn model_id(model: &Value) -> String {
     format!(
@@ -859,6 +1133,129 @@ mod acceptance_tests {
         app.submit_management();
         assert_eq!(app.pending.as_ref().unwrap().1["preview_id"], "fixed-1");
         assert!(app.pending.as_ref().unwrap().1.get("artifact").is_none());
+    }
+
+    #[tokio::test]
+    async fn save_receipt_keeps_export_preview_for_share_and_releases_abandoned_preview() {
+        let mut app = app();
+        app.open_management("delivery");
+        let preview = json!({ "preview_id": "frozen", "artifact": { "content": "fixed" } });
+        app.management_reply(
+            "/delivery/preview",
+            &json!({ "management": app.management.generation }),
+            Ok(preview.clone()),
+        );
+        app.management_reply(
+            "/delivery/save",
+            &json!({ "management": app.management.generation }),
+            Ok(json!({ "saved": "output.jsonl" })),
+        );
+        assert_eq!(app.management.data, preview);
+        app.dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.choose_management("export-preview", "action:publish");
+        assert_eq!(
+            app.management.form.as_ref().unwrap().body["preview_id"],
+            "frozen"
+        );
+        app.open_management("models");
+        assert!(app.management.data.is_null());
+    }
+
+    #[tokio::test]
+    async fn fork_uses_selected_source_tree_node_without_navigating_source() {
+        let mut app = app();
+        app.management.page = "selected-session".into();
+        app.management.data = json!({ "path": "source.jsonl", "session_id": 99 });
+        app.choose_management("selected-session", "fork");
+        assert_eq!(app.management.page, "fork-tree");
+        app.management_reply(
+            "/manage/tree",
+            &json!({ "management": app.management.generation }),
+            Ok(json!([{ "sequence": 7, "kind": "message", "branch": "other" }])),
+        );
+        app.choose_management("fork-tree", "7");
+        let operation = app.management.form.as_ref().unwrap();
+        assert_eq!(operation.body["target"], 7);
+        assert_eq!(operation.body["source"], "source.jsonl");
+        assert_eq!(operation.route, "/manage/copy/preview");
+    }
+
+    #[tokio::test]
+    async fn incremental_directory_preserves_selected_identity_and_ignores_closed_scan() {
+        let mut app = app();
+        app.open_management("sessions");
+        let generation = app.management.generation;
+        app.management_reply(
+            "/manage/sessions/start",
+            &json!({ "management": generation }),
+            Ok(json!({ "scan_id": "scan" })),
+        );
+        app.management_reply(
+            "/manage/sessions/poll",
+            &json!({ "management": generation }),
+            Ok(json!({
+                "scan_id": "scan",
+                "done": false,
+                "entries": [{ "path": "z", "name": "last", "modified": 1, "tags": [] }],
+            })),
+        );
+        if let Some(Dialog::Palette { selected, .. }) = &mut app.dialog {
+            *selected = 4;
+        }
+        app.management_reply(
+            "/manage/sessions/poll",
+            &json!({ "management": generation }),
+            Ok(json!({
+                "scan_id": "scan",
+                "done": false,
+                "entries": [{ "path": "a", "name": "new", "modified": 2, "tags": [] }],
+            })),
+        );
+        if let Some(Dialog::Palette {
+            kind,
+            query,
+            selected,
+        }) = &app.dialog
+        {
+            assert_eq!(app.choices(kind, query)[*selected].0, "z");
+        } else {
+            panic!("missing directory")
+        }
+        app.dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let before = app.management.data.clone();
+        app.management_reply(
+            "/manage/sessions/poll",
+            &json!({ "management": generation }),
+            Ok(json!({ "scan_id": "scan", "done": true, "entries": [{ "path": "late" }] })),
+        );
+        assert_eq!(app.management.data, before);
+        assert!(app.management.scan.is_none());
+    }
+
+    #[tokio::test]
+    async fn closing_auth_during_start_retains_the_challenge_without_reopening() {
+        let mut app = app();
+        app.open_management("auth");
+        let generation = app.management.generation;
+        app.dialog_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.management_reply(
+            "/terminal",
+            &json!({ "management": generation, "operation": "/auth/start", "run_id": 7 }),
+            Ok(json!(eden_protocol::Terminal {
+                outcome: eden_protocol::Outcome::Completed(json!({
+                    "operation_id": "login-original",
+                    "status": "awaiting_authorization",
+                    "interaction": { "url": "https://example.invalid/authorize" },
+                })),
+                cleanup_errors: vec![],
+                partial_result: None
+            })),
+        );
+        assert!(app.dialog.is_none());
+        assert_eq!(
+            app.management.auth.as_ref().unwrap()["operation_id"],
+            "login-original"
+        );
     }
 
     #[tokio::test]

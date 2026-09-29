@@ -84,7 +84,15 @@ pub struct Draft {
     pub attachments: Vec<Attachment>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ViewPosition {
+    pub anchor: Anchor,
+    pub follow: bool,
+    pub selected_record: Option<u64>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SavedDraft {
+    #[serde(default)]
+    pub positions: BTreeMap<String, ViewPosition>,
     #[serde(default)]
     pub sessions: BTreeMap<String, Draft>,
     pub version: u32,
@@ -229,7 +237,7 @@ impl Default for Preferences {
         }
     }
 }
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Anchor {
     pub record: u64,
     pub line: usize,

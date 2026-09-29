@@ -17,7 +17,7 @@ use tokio::{
 
 #[path = "live_management.rs"]
 mod management;
-use management::{Management, management_read, management_submit};
+use management::{Management, detach_scans, management_read, management_submit};
 
 const MAX_FRAME: usize = 1024 * 1024;
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -182,6 +182,7 @@ async fn serve_session(
         session.shutdown().await?;
         return Err(Box::new(error));
     }
+    let _registration = crate::tui::Registration::new(session, endpoint_path)?;
     let _ = session.refresh_models_in_background().await;
     let (stop, mut stopped) = watch::channel(false);
     let shared = Arc::new(Shared {
@@ -429,7 +430,9 @@ async fn dispatch(
             Ok(json!({ "attachment": session.attach_presentation(&frontend)? }))
         }
         ("POST", "/detach") => {
-            session.detach_presentation(field(&body, "attachment")?)?;
+            let attachment = field(&body, "attachment")?;
+            detach_scans(shared, attachment);
+            session.detach_presentation(attachment)?;
             Ok(json!({ "detached": true }))
         }
         ("POST", "/activity") => {
@@ -543,7 +546,13 @@ async fn dispatch(
         ) => submit_once(shared, route, body).await,
         (
             "POST",
-            "/manage/sessions" | "/manage/tree" | "/trust/inspect" | "/configuration/wait",
+            "/manage/sessions"
+            | "/manage/sessions/start"
+            | "/manage/sessions/poll"
+            | "/manage/sessions/cancel"
+            | "/manage/tree"
+            | "/trust/inspect"
+            | "/configuration/wait",
         ) => management_read(shared, route, &body).await,
         ("POST", "/models/list") => Ok(json!(session.models().await?)),
         ("POST", "/models/current") => Ok(json!({
@@ -637,7 +646,13 @@ async fn dispatch(
         _ => Err(fault("Unsupported", "unknown live host operation")),
     }
 }
+#[path = "reading.rs"]
+mod reading;
+use reading::read_document;
+
 struct StaticShared {
+    reading: Option<eden_protocol::delivery::ReadingDocument>,
+    diagnostic: Option<String>,
     history: Vec<eden_protocol::coding::Record>,
     snapshot: eden_protocol::presentation::Snapshot,
     token: String,
@@ -650,17 +665,18 @@ pub async fn run_read_host(
     endpoint_path: &Path,
     web_root: Option<&Path>,
 ) -> Result<i32, Box<dyn std::error::Error>> {
-    let records = eden_kernel::history::read(history)?;
+    let document = read_document(history)?;
+    let records = &document.history;
     let session_id = records
         .first()
         .map(|record| record.session_id)
-        .ok_or("empty history")?;
+        .unwrap_or(u64::from_str_radix(&token()?[..16], 16)?);
     let snapshot = eden_protocol::presentation::Snapshot {
         version: eden_protocol::presentation::VERSION,
         session_id,
         sequence: 0,
         views: eden_protocol::presentation::static_views(
-            &records,
+            records,
             &eden_protocol::delivery::Selection {
                 attachments: true,
                 full_outputs: true,
@@ -680,7 +696,9 @@ pub async fn run_read_host(
     write_endpoint(endpoint_path, &endpoint)?;
     let (stop, mut stopped) = watch::channel(false);
     let shared = Arc::new(StaticShared {
-        history: eden_protocol::history::active_path(&records)?,
+        reading: document.reading,
+        diagnostic: document.diagnostic,
+        history: document.history,
         snapshot,
         token: endpoint.token,
         web_root: web_root.map(Path::to_owned),
@@ -731,6 +749,8 @@ async fn dispatch_static(shared: &StaticShared, method: &str, path: &str) -> Res
                     "read_only": true,
                 },
                 "history": shared.history,
+                "reading": shared.reading,
+                "diagnostic": shared.diagnostic,
                 "events": [],
             }))
         }

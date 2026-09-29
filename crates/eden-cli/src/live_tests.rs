@@ -182,6 +182,8 @@ async fn typed_transport_preserves_receipts_detach_and_real_events() {
 async fn static_snapshot_keeps_committed_records_and_is_read_only() {
     let (stop, _) = watch::channel(false);
     let shared = StaticShared {
+        reading: None,
+        diagnostic: None,
         history: vec![],
         snapshot: eden_protocol::presentation::Snapshot {
             version: 1,
@@ -385,4 +387,26 @@ async fn public_auth_route_refuses_secret_bodies_before_receipt_storage() {
             .contains("DO_NOT_PERSIST")
     );
     session.shutdown().await.unwrap();
+}
+
+#[test]
+fn reading_jsonl_is_read_only_and_retains_valid_prefix_and_unknown_content() {
+    let root = std::env::temp_dir().join(format!("eden-reading-{}.jsonl", std::process::id()));
+    std::fs::write(
+        &root,
+        concat!(
+            "{\"format\":\"eden-reading-v1\",\"restorable\":false}\n",
+            "{\"sequence\":3,\"run_id\":1,\"content\":{\"type\":\"message\",\"role\":\"assistant\"\
+             ,\"content\":[{\"type\":\"text\",\"text\":\"READING_MARKER\"}]}}\n",
+            "{\"content\":{\"type\":\"future\",\"visible\":\"FUTURE_MARKER\"}}\n",
+            "{broken"
+        ),
+    )
+    .unwrap();
+    let document = read_document(&root).unwrap();
+    assert!(document.history.is_empty());
+    assert_eq!(document.reading.as_ref().unwrap().entries.len(), 2);
+    assert!(document.reading.as_ref().unwrap().diagnostic.is_some());
+    assert!(eden_kernel::history::read(&root).is_err());
+    std::fs::remove_file(root).unwrap();
 }

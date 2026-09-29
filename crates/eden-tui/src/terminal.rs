@@ -244,6 +244,9 @@ async fn run_attached(
             prior(info)
         }));
         let result = drive(&mut app, options, &preferences);
+        app.cancel_management_scan();
+        app.release_management_preview();
+        app.saved = false;
         app.persist();
         result
     })

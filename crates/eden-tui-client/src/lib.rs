@@ -51,6 +51,10 @@ pub struct State {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[allow(missing_docs)]
 pub struct Snapshot {
+    #[serde(default)]
+    pub reading: Option<eden_protocol::delivery::ReadingDocument>,
+    #[serde(default)]
+    pub diagnostic: Option<String>,
     pub presentation: presentation::Snapshot,
     pub state: State,
     pub history: Vec<Record>,

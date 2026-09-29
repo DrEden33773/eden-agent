@@ -19,17 +19,17 @@ pub struct SavedSession {
 fn fault(error: impl std::fmt::Display) -> Fault {
     Fault::new("SessionDirectory", "session-directory", error.to_string())
 }
-fn describe(path: PathBuf) -> SavedSession {
+fn describe_records(
+    path: PathBuf,
+    records: Vec<Record>,
+    diagnostic: Option<String>,
+) -> SavedSession {
     let modified = path
         .metadata()
         .ok()
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs());
-    let (records, diagnostic) = match eden_kernel::history::inspect(&path) {
-        Ok(scan) => (scan.records, scan.diagnostic),
-        Err(error) => (vec![], Some(error.to_string())),
-    };
     let metadata = records.iter().rev().find(|r| r.kind == "session_metadata");
     SavedSession {
         session_id: records.first().map(|r| r.session_id),
@@ -73,32 +73,19 @@ impl Session {
 
     /// Scan only the explicitly selected directory. Bad histories stay visible; no plugin runs.
     pub async fn list_saved_sessions(directory: PathBuf) -> Result<Vec<SavedSession>, Fault> {
-        tokio::task::spawn_blocking(move || {
-            let directory = match std::fs::read_dir(directory) {
-                Ok(d) => d,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-                Err(e) => return Err(fault(e)),
-            };
-            let mut items = vec![];
-            for entry in directory {
-                let entry = entry.map_err(fault)?;
-                let path = entry.path();
-                if path.extension().is_some_and(|e| e == "jsonl")
-                    && entry.file_type().map_err(fault)?.is_file()
-                {
-                    items.push(describe(path));
-                }
-            }
-            items.sort_by(|a, b| {
-                b.modified
-                    .cmp(&a.modified)
-                    .then_with(|| a.path.cmp(&b.path))
-            });
-            Ok(items)
-        })
-        .await
-        .map_err(fault)?
+        let mut scan = Self::scan_saved_sessions(directory);
+        let mut items = vec![];
+        while let Some(entry) = scan.next().await {
+            items.push(entry?);
+        }
+        items.sort_by(|a, b| {
+            b.modified
+                .cmp(&a.modified)
+                .then_with(|| a.path.cmp(&b.path))
+        });
+        Ok(items)
     }
+
     /// Read a complete tree without loading plugins or changing its active branch.
     pub async fn saved_session_tree(path: PathBuf) -> Result<Vec<Record>, Fault> {
         tokio::task::spawn_blocking(move || eden_kernel::history::read(&path))
@@ -131,6 +118,115 @@ impl Session {
         .map_err(fault)?
     }
 }
+/// Owns an incremental directory read. Dropping or cancelling it releases the producer.
+pub struct SavedSessionScan {
+    receiver: tokio::sync::mpsc::Receiver<Result<SavedSession, Fault>>,
+    cancel: eden_plugin_sdk::Cancellation,
+    worker: Option<tokio::task::JoinHandle<()>>,
+}
+impl SavedSessionScan {
+    /// Wait for the next file; completion and cancellation both close the stream.
+    pub async fn next(&mut self) -> Option<Result<SavedSession, Fault>> {
+        self.receiver.recv().await
+    }
+    /// Cancel pending reads and discard queued rows; no later row is delivered.
+    pub fn cancel(&mut self) {
+        self.cancel.cancel();
+        self.receiver.close();
+        while self.receiver.try_recv().is_ok() {}
+    }
+    /// Cancel and observe producer completion before releasing an explicit scan operation.
+    pub async fn cancel_and_wait(&mut self) {
+        self.cancel();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.await;
+        }
+    }
+    /// Drain already produced rows without delaying the next UI frame.
+    pub fn try_next(&mut self) -> Option<Result<SavedSession, Fault>> {
+        self.receiver.try_recv().ok()
+    }
+    /// A closed empty channel cannot deliver more rows; use cancel_and_wait for cancellation cleanup.
+    pub fn finished(&self) -> bool {
+        self.receiver.is_closed() && self.receiver.is_empty()
+    }
+}
+impl Drop for SavedSessionScan {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+impl Session {
+    /// Read entries incrementally off the async/UI thread, with bounded queued metadata.
+    pub fn scan_saved_sessions(directory: PathBuf) -> SavedSessionScan {
+        let (sender, receiver) = tokio::sync::mpsc::channel(16);
+        let cancel = eden_plugin_sdk::Cancellation::default();
+        let worker_cancel = cancel.clone();
+        let worker = tokio::task::spawn_blocking(move || {
+            let result = (|| -> Result<(), Fault> {
+                let directory = match std::fs::read_dir(directory) {
+                    Ok(d) => d,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                    Err(e) => return Err(fault(e)),
+                };
+                for entry in directory {
+                    if worker_cancel.is_cancelled() {
+                        break;
+                    }
+                    let entry = entry.map_err(fault)?;
+                    let path = entry.path();
+                    if path.extension().is_none_or(|e| e != "jsonl")
+                        || !entry.file_type().map_err(fault)?.is_file()
+                    {
+                        continue;
+                    }
+                    let item = match describe_cancellable(path.clone(), &worker_cancel) {
+                        Ok(Some(entry)) => entry,
+                        Ok(None) => break,
+                        Err(error) => describe_records(path, vec![], Some(error.to_string())),
+                    };
+                    if sender.blocking_send(Ok(item)).is_err() {
+                        break;
+                    }
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                let _ = sender.blocking_send(Err(error));
+            }
+        });
+        SavedSessionScan {
+            receiver,
+            cancel,
+            worker: Some(worker),
+        }
+    }
+}
+fn describe_cancellable(
+    path: PathBuf,
+    cancel: &eden_plugin_sdk::Cancellation,
+) -> Result<Option<SavedSession>, Fault> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(&path).map_err(fault)?;
+    let mut bytes = Vec::new();
+    let mut chunk = [0; 65536];
+    loop {
+        if cancel.is_cancelled() {
+            return Ok(None);
+        }
+        let n = file.read(&mut chunk).map_err(fault)?;
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..n]);
+    }
+    let scan = eden_protocol::history::scan_records(&bytes);
+    if cancel.is_cancelled() {
+        return Ok(None);
+    }
+    Ok(Some(describe_records(path, scan.records, scan.diagnostic)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,6 +252,25 @@ mod tests {
         );
         assert!(path.exists());
         drop(lock);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod scan_tests {
+    use super::*;
+    #[tokio::test]
+    async fn incremental_reader_delivers_before_completion_and_cancellation_joins_worker() {
+        let directory = std::env::temp_dir().join(format!("eden-scan-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        for i in 0..40 {
+            std::fs::write(directory.join(format!("{i}.jsonl")), b"{bad").unwrap();
+        }
+        let mut scan = Session::scan_saved_sessions(directory.clone());
+        assert!(scan.next().await.unwrap().unwrap().diagnostic.is_some());
+        scan.cancel_and_wait().await;
+        assert!(scan.next().await.is_none());
+        assert!(scan.worker.is_none());
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

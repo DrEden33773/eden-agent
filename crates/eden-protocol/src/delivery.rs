@@ -89,6 +89,16 @@ pub struct PublishReply {
     pub notice: String,
 }
 
+/// A reading artifact is a display document, never a restorable execution ledger.
+/// Unknown entries remain raw JSON for source fallback; a damaged tail preserves its prefix.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct ReadingDocument {
+    pub format: String,
+    pub entries: Vec<serde_json::Value>,
+    pub diagnostic: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::Format;

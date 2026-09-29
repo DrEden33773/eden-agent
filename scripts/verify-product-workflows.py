@@ -170,11 +170,51 @@ def main() -> None:
             )
             assert call("/configuration/inspect")["instances"]
             assert isinstance(call("/resources"), dict)
-            assert call("/trust/inspect")["cwd"] == str(root)
+            assert Path(call("/trust/inspect")["cwd"]).samefile(root)
+            reader = mutate("/manage/open", {"path": str(saved), "read_only": True})
+            reader_endpoint = json.loads(Path(reader["endpoint"]).read_text())
+            reading_frame = live.call(reader_endpoint, "/tui/snapshot")
+            assert reading_frame["state"]["read_only"] and reading_frame["history"] == []
+            assert "WORKFLOW_USER_MARKER" in json.dumps(reading_frame["reading"])
+            try:
+                live.call(
+                    reader_endpoint,
+                    "/prompt",
+                    {"request_id": "cannot-restore", "text": "forbidden"},
+                )
+            except RuntimeError as error:
+                assert "read-only" in str(error)
+            else:
+                raise AssertionError("reading artifact accepted execution")
+            if os.name != "nt":
+                from tui_pty import Terminal
+
+                reader_tui = Terminal(binary, Path(reader["endpoint"]))
+                try:
+                    reader_tui.wait("WORKFLOW_USER_MARKER")
+                finally:
+                    reader_tui.close()
+            live.call(reader_endpoint, "/shutdown", {})
+            results["reading_jsonl_read_only_and_pty"] = True
             snapshot = call("/tui/snapshot")
             assert (
                 models.SECRET not in json.dumps(snapshot) + history.read_text() + saved.read_text()
             )
+            second = mutate("/manage/open", {"path": str(copied), "read_only": False})
+            second_endpoint = json.loads(Path(second["endpoint"]).read_text())
+            returned = live.call(
+                second_endpoint,
+                "/manage/open",
+                {"path": str(history), "read_only": False, "request_id": "return-original"},
+            )
+            assert returned["attached_existing"] and Path(returned["endpoint"]).samefile(
+                endpoint_file
+            )
+            assert (
+                live.call(second_endpoint, "/tui/snapshot")["state"]["session_id"]
+                == preview["plan"]["new_session"]
+            )
+            results["existing_live_session_return"] = True
             results["models_auth_sessions_copy_export_share_updates"] = True
             results["private_input_excluded_from_public_history"] = True
             if os.name != "nt":

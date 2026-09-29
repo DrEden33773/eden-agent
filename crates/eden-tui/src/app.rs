@@ -137,6 +137,7 @@ pub struct App {
     pub(crate) pending: Option<(String, Value, Draft)>,
     pub(crate) uncertain: Option<(String, Value, Draft)>,
     sessions: BTreeMap<String, Draft>,
+    positions: BTreeMap<String, ViewPosition>,
     resources: eden_protocol::resources::Snapshot,
     commands: Vec<eden_protocol::resources::CommandDefinition>,
     pub(crate) form_target: Option<crate::forms::Target>,
@@ -151,6 +152,17 @@ pub struct App {
 }
 pub fn project_messages(snapshot: &Snapshot) -> Vec<Message> {
     let mut messages = crate::projection::history(&snapshot.history);
+    if let Some(reading) = &snapshot.reading {
+        messages.extend(crate::projection::reading(reading));
+    }
+    if let Some(diagnostic) = &snapshot.diagnostic {
+        messages.push(Message::new(
+            u64::MAX - 1,
+            Role::Notice,
+            "History diagnostic",
+            diagnostic,
+        ));
+    }
     messages.extend(crate::projection::streaming_with_history(
         &snapshot.events,
         snapshot.state.active_run,
@@ -179,6 +191,11 @@ impl App {
             .as_ref()
             .map(|s| s.sessions.clone())
             .unwrap_or_default();
+        let positions = loaded
+            .as_ref()
+            .map(|s| s.positions.clone())
+            .unwrap_or_default();
+        let position: Option<ViewPosition> = positions.get(&session).cloned();
         let uncertain = loaded
             .as_ref()
             .filter(|s| s.session == session)
@@ -262,6 +279,7 @@ impl App {
             pending: None,
             uncertain,
             sessions,
+            positions,
             resources: Default::default(),
             commands: vec![],
             form_target: None,
@@ -281,6 +299,17 @@ impl App {
                 .transpose()?,
         };
         app.project();
+        if let Some(position) = position {
+            app.anchor = position.anchor;
+            app.follow = position.follow;
+            if let Some(index) = app
+                .messages
+                .iter()
+                .position(|message| Some(message.id) == position.selected_record)
+            {
+                app.selected = index;
+            }
+        }
         app.dispatch("/resources", Value::Null);
         app.dispatch("/commands", Value::Null);
         Ok(app)
@@ -444,9 +473,18 @@ impl App {
             return;
         }
         let draft = self.draft();
+        self.positions.insert(
+            self.session.clone(),
+            ViewPosition {
+                anchor: self.anchor,
+                follow: self.follow,
+                selected_record: self.messages.get(self.selected).map(|message| message.id),
+            },
+        );
         self.sessions.insert(self.session.clone(), draft.clone());
         if let Some(store) = &self.store {
             store.save(SavedDraft {
+                positions: self.positions.clone(),
                 version: 1,
                 session: self.session.clone(),
                 frontend: self.frontend.clone(),
@@ -1008,6 +1046,7 @@ impl App {
     }
     pub fn open(&mut self, kind: &str) {
         if !kind.starts_with("manage:") {
+            self.cancel_management_scan();
             self.management.generation += 1;
             self.management.form = None;
             self.management.page.clear();
@@ -1377,6 +1416,7 @@ impl App {
             .map(|m| m.body.clone());
     }
     pub fn scroll(&mut self, delta: isize) {
+        self.saved = false;
         if self.focus == Focus::Inspector {
             self.inspector_scroll = self.inspector_scroll.saturating_add_signed(delta);
             return;
@@ -1394,6 +1434,7 @@ impl App {
         }
     }
     pub fn bottom(&mut self) {
+        self.saved = false;
         self.follow = true;
         self.unseen = 0;
         self.focus = Focus::Editor;
@@ -1563,6 +1604,7 @@ impl App {
         }
         self.clipboard_generation += 1;
         if key.code == KeyCode::Esc {
+            self.cancel_management_scan();
             let management_back = !self.management.page.is_empty()
                 && matches!(
                     self.dialog,
@@ -3451,5 +3493,58 @@ mod reference_draft_tests {
             app.tick();
             assert_eq!(app.references.is_empty(), !edit_while_pending);
         }
+    }
+}
+
+#[cfg(test)]
+mod view_position_tests {
+    use super::*;
+    #[tokio::test]
+    async fn reopening_selected_session_restores_its_reading_anchor_with_its_draft() {
+        let mut original = tests::app();
+        let directory = std::env::temp_dir().join(original.id());
+        original.frontend = "view-position".into();
+        original.store = Some(DraftStore::new(&directory, "view-position").unwrap());
+        original.editor.restore("unsubmitted", 11).unwrap();
+        original.anchor = Anchor {
+            record: 1,
+            line: 2,
+            byte: 8,
+        };
+        original.follow = false;
+        original.saved = false;
+        original.persist();
+        let snapshot = original.snapshot.clone();
+        drop(original);
+        let executable = std::env::current_exe().unwrap();
+        let plugin = executable.parent().unwrap().parent().unwrap().join(format!(
+            "{}eden_terminal_editor{}",
+            std::env::consts::DLL_PREFIX,
+            std::env::consts::DLL_SUFFIX
+        ));
+        let (tx, rx) = mpsc::channel();
+        let mut reopened = App::new(
+            &plugin,
+            Some(&directory),
+            "view-position",
+            Path::new("missing"),
+            snapshot,
+            tx,
+            rx,
+        )
+        .unwrap();
+        assert_eq!(
+            reopened.anchor,
+            Anchor {
+                record: 1,
+                line: 2,
+                byte: 8
+            }
+        );
+        assert!(!reopened.follow);
+        reopened.restore_recovery();
+        assert_eq!(reopened.editor.text(), "unsubmitted");
+        drop(reopened);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

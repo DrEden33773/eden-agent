@@ -1007,6 +1007,7 @@ fn draw_palette(
                 "sessions" => "Saved sessions",
                 "selected-session" => "Selected session",
                 "tree" => "Session tree",
+                "fork-tree" => "Select source ancestry",
                 "auth" => "Authentication",
                 "router" => "Model router",
                 "resources" => "Resources",

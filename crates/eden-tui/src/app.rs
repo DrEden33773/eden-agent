@@ -862,16 +862,13 @@ impl App {
                                         }
                                     }
                                 }
-                                if self
-                                    .form_retry
-                                    .as_ref()
-                                    .is_some_and(|(sent_route, sent, _)| {
+                                if let Some((_, _, origin)) =
+                                    self.form_retry.as_ref().filter(|(sent_route, sent, _)| {
                                         sent_route == &route && sent == &body
                                     })
                                 {
-                                    if request["action"]
-                                        .as_str()
-                                        .is_some_and(|a| a.ends_with(":refresh"))
+                                    if origin.binding.is_some()
+                                        && request["action"] == format!("{}:refresh", origin.node)
                                     {
                                         // A reply can precede its snapshot, or arrive after the
                                         // originating form has been saved and closed.
@@ -2866,6 +2863,36 @@ mod form_reopen_tests {
             binding.generation = Some(revision);
             fields[0].value = Some(json!(format!("server-{revision}")));
         }
+    }
+
+    #[tokio::test]
+    async fn ordinary_author_refresh_action_clears_its_pending_reply() {
+        let mut app = super::tests::app();
+        let mut live = view();
+        live.view.nodes = vec![
+            serde_json::from_value(json!({
+                "kind": "form",
+                "id": "fields",
+                "action": "cache:refresh",
+                "fields": [],
+            }))
+            .unwrap(),
+        ];
+        app.snapshot.presentation.views.push(live);
+        app.open_live("custom|settings|fields");
+        app.submit_form("apply");
+        let body = app.form_retry.as_ref().unwrap().1.clone();
+        assert_eq!(body["action"], "cache:refresh");
+        app.tx
+            .send(Update::Reply {
+                route: "/action".into(),
+                body,
+                result: Ok(json!({ "saved": true })),
+            })
+            .unwrap();
+        app.tick();
+        assert!(app.form_retry.is_none());
+        assert!(app.form_refresh.is_none());
     }
 
     #[tokio::test]

@@ -88,6 +88,14 @@ pub async fn launch(
     if let Some(endpoint) = endpoint {
         return attach(endpoint, editor, frontend, monochrome(cli)).await;
     }
+    let endpoint = start_host(cli, read)?;
+    attach(&endpoint, editor, frontend, monochrome(cli)).await
+}
+/// Start a detached host for an explicitly selected saved session or reading artifact.
+pub(crate) fn start_host(
+    cli: &Cli,
+    read: Option<&Path>,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let directory = state_dir().join("hosts");
     std::fs::create_dir_all(&directory)?;
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
@@ -187,9 +195,9 @@ pub async fn launch(
             let _ = child.wait();
             return Err(format!("Host startup timed out; see {}", log_path.display()).into());
         }
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        std::thread::sleep(Duration::from_millis(25));
     }
-    attach(&endpoint, editor, frontend, monochrome(cli)).await
+    Ok(endpoint)
 }
 
 /// Explicit color selection takes precedence over the conventional environment override.

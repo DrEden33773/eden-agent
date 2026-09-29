@@ -21,7 +21,19 @@ async fn session() -> Session {
         .service(PROVIDER, |_: Value, _| async {
             Ok::<_, Fault>(Value::Null)
         })
-        .service(TOOL, |_: Value, _| async { Ok::<_, Fault>(Value::Null) });
+        .service(TOOL, |_: Value, _| async { Ok::<_, Fault>(Value::Null) })
+        .service(
+            eden_protocol::models::MODEL_CATALOG,
+            |request: Value, _| async move {
+                Ok::<_, Fault>(json!({
+                    "providers": ["fixture"],
+                    "models": [],
+                    "target": null,
+                    "source": { "kind": "fixture", "location": "local", "updated_at": null },
+                    "status": request["action"],
+                }))
+            },
+        );
     let session = Embedded::new(
         Composition {
             host_environment: None,
@@ -69,6 +81,7 @@ async fn typed_transport_preserves_receipts_detach_and_real_events() {
     .unwrap();
     let (stop, _) = watch::channel(false);
     let shared = Arc::new(Shared {
+        management: Default::default(),
         session: session.clone(),
         token: "test-token".into(),
         web_root: None,
@@ -227,6 +240,7 @@ async fn idle_poll_waits_and_expired_attachment_can_rejoin_same_session() {
     let session = session().await;
     let (stop, _) = watch::channel(false);
     let shared = Arc::new(Shared {
+        management: Default::default(),
         session: session.clone(),
         token: "unused".into(),
         web_root: None,
@@ -290,4 +304,85 @@ fn session_guard_preserves_javascript_safe_and_legacy_requests() {
             .code,
         "SessionMismatch"
     );
+}
+
+#[tokio::test]
+async fn management_catalog_preserves_receipts_and_busy_admission() {
+    let session = session().await;
+    let (stop, _) = watch::channel(false);
+    let shared = Arc::new(Shared {
+        management: Default::default(),
+        session: session.clone(),
+        token: "fixture".into(),
+        web_root: None,
+        submissions: Mutex::new((HashMap::new(), VecDeque::new())),
+        history: tokio::sync::Mutex::new(None),
+        stop,
+    });
+    let catalog = dispatch(&shared, "POST", "/models/list", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(catalog["providers"], json!(["fixture"]));
+    let request = json!({ "request_id": "refresh", "request": { "action": "refresh" } });
+    let first = dispatch(&shared, "POST", "/models/catalog", request.clone())
+        .await
+        .unwrap();
+    let run = first["run_id"].as_u64().unwrap();
+    assert_eq!(
+        session.wait(run).await.unwrap().into_result().unwrap()["status"],
+        "refresh"
+    );
+    assert_eq!(
+        dispatch(&shared, "POST", "/models/catalog", request)
+            .await
+            .unwrap(),
+        first
+    );
+    let waiting = session.submit("wait").unwrap();
+    let error = dispatch(
+        &shared,
+        "POST",
+        "/models/catalog",
+        json!({ "request_id": "busy", "request": { "action": "refresh" } }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "Unavailable");
+    session.cancel(waiting).unwrap();
+    session.wait(waiting).await.unwrap();
+    session.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn public_auth_route_refuses_secret_bodies_before_receipt_storage() {
+    let session = session().await;
+    let (stop, _) = watch::channel(false);
+    let shared = Arc::new(Shared {
+        management: Default::default(),
+        session: session.clone(),
+        token: "fixture".into(),
+        web_root: None,
+        submissions: Mutex::new((HashMap::new(), VecDeque::new())),
+        history: tokio::sync::Mutex::new(None),
+        stop,
+    });
+    let error = dispatch(
+        &shared,
+        "POST",
+        "/auth/start",
+        json!({
+            "request_id": "private",
+            "request": { "action": "input", "operation_id": "op", "api_key": "DO_NOT_PERSIST" },
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "InvalidInput");
+    assert!(shared.submissions.lock().unwrap().0.is_empty());
+    assert!(
+        !json!(session.events())
+            .to_string()
+            .contains("DO_NOT_PERSIST")
+    );
+    session.shutdown().await.unwrap();
 }

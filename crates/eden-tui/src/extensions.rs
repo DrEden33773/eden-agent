@@ -215,6 +215,95 @@ impl Frontend {
     }
 }
 
+/// The overlay retains one renderer state and serializes event/render calls on the UI thread.
+pub(crate) struct Overlay {
+    renderer: Renderer,
+    event: unsafe extern "C" fn(
+        *mut c_void,
+        *const u8,
+        usize,
+        eden_ui_sdk::ByteSink,
+        *mut c_void,
+    ) -> i32,
+}
+impl Overlay {
+    pub(crate) fn load(path: &Path) -> Result<Self, LoadError> {
+        // SAFETY: the explicitly selected trusted table begins with RendererApi; its
+        // header is checked against the full OverlayApi before the event pointer is read.
+        unsafe {
+            let code = Library::new(path)?;
+            let entry = code.get::<unsafe extern "C" fn() -> *const eden_ui_sdk::OverlayApi>(
+                b"eden_overlay_v1\0",
+            )?;
+            let api = validate_table(entry())?;
+            let event = api.as_ref().event;
+            let state =
+                NonNull::new((api.as_ref().renderer.create)()).ok_or("overlay create failed")?;
+            Ok(Self {
+                renderer: Renderer {
+                    api: api.cast(),
+                    state,
+                    _code: code,
+                },
+                event,
+            })
+        }
+    }
+    pub(crate) fn render(
+        &mut self,
+        payload: &serde_json::Value,
+        buffer: &mut Buffer,
+        area: Rect,
+        mono: bool,
+    ) -> Result<Option<(u16, u16)>, LoadError> {
+        self.renderer.render(payload, buffer, area, mono)
+    }
+    pub(crate) fn key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+    ) -> Option<crossterm::event::KeyCode> {
+        let input = serde_json::to_vec(&serde_json::json!({
+            "key": format!("{:?}", key.code),
+            "modifiers": key.modifiers.bits(),
+        }))
+        .ok()?;
+        let mut output = Vec::<u8>::new();
+        extern "C" fn receive(ctx: *mut c_void, bytes: *const u8, len: usize) {
+            if ctx.is_null() || bytes.is_null() || len > 128 {
+                return;
+            }
+            // SAFETY: the SDK borrows initialized bytes and the exclusive Vec for this call.
+            let out = unsafe { &mut *ctx.cast::<Vec<u8>>() };
+            if out.len() + len <= 128 {
+                // SAFETY: the callback lends len initialized bytes until this call returns.
+                out.extend_from_slice(unsafe { std::slice::from_raw_parts(bytes, len) });
+            }
+        }
+        // SAFETY: input and callback context remain live; this owner prevents reentry and
+        // keeps both the state and its creating library alive throughout the callback.
+        let status = unsafe {
+            (self.event)(
+                self.renderer.state.as_ptr(),
+                input.as_ptr(),
+                input.len(),
+                receive,
+                (&mut output as *mut Vec<u8>).cast(),
+            )
+        };
+        if status != 0 {
+            return None;
+        }
+        use crossterm::event::KeyCode;
+        match serde_json::from_slice::<String>(&output).ok()?.as_str() {
+            "up" => Some(KeyCode::Up),
+            "down" => Some(KeyCode::Down),
+            "accept" => Some(KeyCode::Enter),
+            "close" => Some(KeyCode::Esc),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

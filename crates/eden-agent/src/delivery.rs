@@ -259,6 +259,34 @@ impl Session {
         previews.insert(id.clone(), artifact.clone());
         Ok((id, artifact))
     }
+    /// Save the same frozen bytes shown to the user; refuse an existing destination.
+    pub async fn save_export_preview(
+        &self,
+        id: &str,
+        path: std::path::PathBuf,
+    ) -> Result<(), Fault> {
+        let artifact = self
+            .0
+            .previews
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .cloned()
+            .ok_or_else(|| Fault::new("PreviewExpired", "delivery", "prepare the export again"))?;
+        tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .map_err(|e| Fault::new("FileFailure", "delivery", e.to_string()))?;
+            file.write_all(artifact.content.as_bytes())
+                .and_then(|()| file.sync_all())
+                .map_err(|e| Fault::new("FileFailure", "delivery", e.to_string()))
+        })
+        .await
+        .map_err(|e| Fault::new("FileFailure", "delivery", e.to_string()))?
+    }
     /// Release an unused preview; publication never rereads conversation history.
     pub fn forget_preview(&self, id: &str) -> bool {
         self.0

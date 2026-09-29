@@ -15,6 +15,10 @@ use tokio::{
     sync::watch,
 };
 
+#[path = "live_management.rs"]
+mod management;
+use management::{Management, management_read, management_submit};
+
 const MAX_FRAME: usize = 1024 * 1024;
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Endpoint {
@@ -33,6 +37,7 @@ enum Submission {
     },
 }
 struct Shared {
+    management: Management,
     session: Session,
     token: String,
     web_root: Option<PathBuf>,
@@ -180,6 +185,10 @@ async fn serve_session(
     let _ = session.refresh_models_in_background().await;
     let (stop, mut stopped) = watch::channel(false);
     let shared = Arc::new(Shared {
+        management: Management {
+            launch: Some(cli.clone()),
+            ..Default::default()
+        },
         session: session.clone(),
         token: endpoint.token,
         web_root: web_root.map(Path::to_owned),
@@ -499,9 +508,76 @@ async fn dispatch(
         }
         (
             "POST",
-            "/prompt" | "/enqueue" | "/shell" | "/command" | "/queue/withdraw" | "/queue/configure"
-            | "/context/apply" | "/context/rebuild" | "/context/compact" | "/context/images",
+            "/prompt"
+            | "/enqueue"
+            | "/shell"
+            | "/command"
+            | "/queue/withdraw"
+            | "/queue/configure"
+            | "/context/apply"
+            | "/context/rebuild"
+            | "/context/compact"
+            | "/context/images"
+            | "/models/select"
+            | "/models/cycle"
+            | "/models/catalog"
+            | "/router/manage"
+            | "/auth/start"
+            | "/manage/navigate"
+            | "/manage/metadata"
+            | "/resources/reload"
+            | "/background/warmer"
+            | "/manage/open"
+            | "/manage/delete"
+            | "/manage/copy/preview"
+            | "/manage/copy/apply"
+            | "/manage/copy/discard"
+            | "/delivery/preview"
+            | "/delivery/publish"
+            | "/delivery/discard"
+            | "/updates"
+            | "/delivery/save"
+            | "/trust/save"
+            | "/configuration/apply"
+            | "/manage/rename",
         ) => submit_once(shared, route, body).await,
+        (
+            "POST",
+            "/manage/sessions" | "/manage/tree" | "/trust/inspect" | "/configuration/wait",
+        ) => management_read(shared, route, &body).await,
+        ("POST", "/models/list") => Ok(json!(session.models().await?)),
+        ("POST", "/models/current") => Ok(json!({
+            "selection": session.model_selection().await?,
+            "last_committed_target": session
+                .history()
+                .await?
+                .iter()
+                .rev()
+                .find(|r| r.kind == "model_selection")
+                .map(|r| &r.payload["target"]),
+        })),
+        ("POST", "/router/list") => Ok(json!(session.managed_models().await?)),
+        ("POST", "/auth/status") => Ok(json!(
+            session
+                .auth_status(&field::<String>(&body, "operation_id")?)
+                .await?
+        )),
+        ("POST", "/auth/input") => {
+            let operation_id = field::<String>(&body, "operation_id")?;
+            let input = field::<String>(&body, "input")?;
+            if body["api_key"] == true {
+                Ok(json!({
+                    "run_id": session.authenticate(eden_protocol::models::AuthRequest::Input {
+                            operation_id,
+                            api_key: input
+                        })?,
+                }))
+            } else {
+                Ok(json!(
+                    session.submit_auth_input(&operation_id, input).await?
+                ))
+            }
+        }
         ("POST", "/session/catalog") => Ok(json!(session.session_catalog().await?)),
         ("POST", "/session/branches") => Ok(json!(
             session
@@ -685,6 +761,14 @@ async fn submit_once(shared: &Arc<Shared>, route: &str, body: Value) -> Result<V
     if id.is_empty() || id.len() > 256 {
         return Err(fault("InvalidInput", "invalid request id"));
     }
+    if route == "/auth/start"
+        && matches!(body["request"]["action"].as_str(), Some("input" | "submit"))
+    {
+        return Err(fault(
+            "InvalidInput",
+            "private authentication input requires /auth/input",
+        ));
+    }
     let fingerprint = json!({ "route": route, "body": body });
     let (sender, receiver) = tokio::sync::oneshot::channel();
     let start = {
@@ -732,7 +816,7 @@ async fn submit_once(shared: &Arc<Shared>, route: &str, body: Value) -> Result<V
         let shared = shared.clone();
         let route = route.to_owned();
         tokio::spawn(async move {
-            let result = perform_submission(&shared.session, &route, &body).await;
+            let result = perform_submission(&shared, &route, &body).await;
             let mut guard = shared.submissions.lock().unwrap_or_else(|e| e.into_inner());
             let listeners = match guard.0.remove(&id) {
                 Some(Submission::Running { listeners, .. }) => listeners,
@@ -769,8 +853,84 @@ fn content(body: &Value) -> Result<Vec<eden_protocol::coding::Block>, Fault> {
         }])
     }
 }
-async fn perform_submission(session: &Session, route: &str, body: &Value) -> Result<Value, Fault> {
+async fn perform_submission(shared: &Shared, route: &str, body: &Value) -> Result<Value, Fault> {
+    let session = &shared.session;
     match route {
+        "/manage/open"
+        | "/manage/delete"
+        | "/manage/copy/preview"
+        | "/manage/copy/apply"
+        | "/manage/copy/discard"
+        | "/delivery/preview"
+        | "/delivery/publish"
+        | "/delivery/discard"
+        | "/updates"
+        | "/delivery/save"
+        | "/trust/save"
+        | "/configuration/apply"
+        | "/manage/rename" => management_submit(shared, route, body).await,
+        "/background/warmer" => Ok(json!(session.cache_warmer(field(body, "cancel")?).await?)),
+        "/models/cycle" => {
+            let models: Vec<_> = session
+                .models()
+                .await?
+                .models
+                .into_iter()
+                .filter(|m| m.status == "configured")
+                .collect();
+            if models.is_empty() {
+                return Err(fault("ModelUnavailable", "no configured models available"));
+            }
+            let current = session.model_selection().await?;
+            let index = current
+                .and_then(|c| {
+                    models
+                        .iter()
+                        .position(|m| m.target.provider == c.provider && m.target.model == c.model)
+                })
+                .map_or(0, |i| (i + 1) % models.len());
+            let target = &models[index].target;
+            Ok(json!({
+                "run_id": session.select_model(eden_protocol::models::ModelSelection {
+                        provider: target.provider.clone(),
+                        model: target.model.clone(),
+                        thinking: target.thinking.requested.clone()
+                    })?,
+            }))
+        }
+        "/models/select" => {
+            Ok(json!({ "run_id": session.select_model(field(body, "selection")?)? }))
+        }
+        "/models/catalog" => Ok(json!({ "run_id": session.catalog(field(body, "request")?)? })),
+        "/router/manage" => {
+            Ok(json!({ "run_id": session.manage_models(field(body, "request")?)? }))
+        }
+        "/auth/start" => {
+            let request = field::<eden_protocol::models::AuthRequest>(body, "request")?;
+            if matches!(
+                request,
+                eden_protocol::models::AuthRequest::Input { .. }
+                    | eden_protocol::models::AuthRequest::Submit { .. }
+            ) {
+                return Err(fault(
+                    "InvalidInput",
+                    "private authentication input requires /auth/input",
+                ));
+            }
+            Ok(json!({ "run_id": session.authenticate(request)? }))
+        }
+        "/manage/navigate" => Ok(json!({
+            "run_id": session.navigate(
+                field(body, "target")?,
+                field(body, "branch")?,
+                field(body, "summarize")?
+            )?,
+        })),
+        "/manage/metadata" => Ok(json!({
+            "run_id":
+                session.set_metadata(field(body, "name")?, field(body, "tags")?)?,
+        })),
+        "/resources/reload" => Ok(json!({ "run_id": session.reload_resources()? })),
         "/context/images" => Ok(json!(session.edit_images(field(body, "edit")?).await?)),
         "/context/rebuild" => Ok(json!({
             "run_id": session.rebuild_context(field(body, "rebuild")?)?,

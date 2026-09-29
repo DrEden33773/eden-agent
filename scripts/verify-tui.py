@@ -223,6 +223,29 @@ def main():
                 terminal.wait("AUTHOR RENDERER")
             finally:
                 terminal.close()
+            terminal = Terminal(
+                binary,
+                endpoint_file,
+                env={
+                    **env,
+                    "EDEN_TUI_OVERLAY": str(author),
+                    "EDEN_TUI_THEME": str(author),
+                    "EDEN_TUI_RENDERER": str(author),
+                    "EDEN_TUI_EDITOR": str(author),
+                },
+            )
+            try:
+                terminal.wait("AUTHOR RENDERER")
+                terminal.send(b"/models\r")
+                terminal.wait("AUTHOR OVERLAY")
+                terminal.send(b"\x1b[20~")
+                deadline = time.monotonic() + 5
+                while "AUTHOR OVERLAY" in terminal.display:
+                    terminal.read(0.05)
+                    assert time.monotonic() < deadline, "overlay F9 did not close the modal"
+                assert b"38;2;18;171;52" in terminal.output
+            finally:
+                terminal.close()
             terminal = Terminal(binary, endpoint_file, env={**env, "EDEN_TUI_THEME": str(author)})
             try:
                 terminal.wait("Connected")
@@ -299,6 +322,8 @@ def main():
             "independent_renderer": True,
             "independent_theme": True,
             "independent_frontend": True,
+            "independent_overlay": True,
+            "combined_overlay_renderer_theme": True,
             "external_editor_success_and_failure": True,
             "suspend_resume_modes": True,
         },

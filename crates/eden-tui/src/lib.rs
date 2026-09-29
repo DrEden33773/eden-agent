@@ -8,6 +8,7 @@ mod fields;
 mod forms;
 mod image_preview;
 mod input;
+mod management;
 mod model;
 mod plugin;
 mod projection;

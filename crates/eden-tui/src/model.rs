@@ -175,6 +175,10 @@ impl Field {
 }
 #[derive(Clone, Debug)]
 pub enum Dialog {
+    Details {
+        title: String,
+        text: String,
+    },
     Palette {
         kind: String,
         query: String,

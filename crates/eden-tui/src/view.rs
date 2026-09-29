@@ -1003,7 +1003,18 @@ fn draw_palette(
         dock_panel(
             buf,
             r,
-            match kind {
+            match kind.strip_prefix("manage:").unwrap_or(kind) {
+                "sessions" => "Saved sessions",
+                "selected-session" => "Selected session",
+                "tree" => "Session tree",
+                "auth" => "Authentication",
+                "router" => "Model router",
+                "resources" => "Resources",
+                "background" => "Notes and cache warming",
+                "trust" => "Project trust",
+                "updates" => "Updates",
+                "copy-preview" => "Copy preview",
+                "export-preview" => "Export preview",
                 "plugins" => "Plugins",
                 "models" => "Models",
                 "settings" => "Settings",
@@ -1363,17 +1374,18 @@ fn draw_completion(app: &App, buf: &mut Buffer, area: Rect, p: Palette, g: &mut 
 }
 
 fn is_config_palette(kind: &str) -> bool {
-    matches!(
-        kind,
-        "settings"
-            | "plugins"
-            | "models"
-            | "connection"
-            | "delivery"
-            | "live"
-            | "commands"
-            | "queue"
-    )
+    kind.starts_with("manage:")
+        || matches!(
+            kind,
+            "settings"
+                | "plugins"
+                | "models"
+                | "connection"
+                | "delivery"
+                | "live"
+                | "commands"
+                | "queue"
+        )
 }
 fn dock_request(app: &App) -> Option<u16> {
     match app.dialog.as_ref()? {
@@ -1441,6 +1453,80 @@ fn draw_dialog(
     buf: &mut Buffer,
     area: Rect,
     p: Palette,
+    mono: bool,
+    g: &mut Geometry,
+) -> (Rect, Option<(u16, u16)>) {
+    let result = draw_builtin_dialog(app, buf, area, p, mono, g);
+    if app.overlay.is_none() {
+        return result;
+    }
+    let Some(dialog) = &app.dialog else {
+        return result;
+    };
+    let payload = match dialog {
+        Dialog::Palette {
+            kind,
+            query,
+            selected,
+        } => {
+            serde_json::json!({
+                "kind": kind,
+                "query": query,
+                "selected": selected,
+                "items": app.choices(kind, query),
+            })
+        }
+        Dialog::Form {
+            title,
+            fields,
+            selected,
+            status,
+        } => {
+            serde_json::json!({
+                "kind": "form",
+                "title": title,
+                "selected": selected,
+                "status": status,
+                "fields": fields
+                    .iter()
+                    .map(|f| serde_json::json!({
+                        "key": f.key,
+                        "label": f.label,
+                        "value": f.display_value(),
+                        "private": f.private,
+                    }))
+                    .collect::<Vec<_>>(),
+            })
+        }
+        Dialog::Details { title, text } => {
+            serde_json::json!({
+                "kind": "details",
+                "title": title,
+                "text": text,
+                "scroll": app.dialog_scroll,
+            })
+        }
+        _ => serde_json::json!({ "kind": "help" }),
+    };
+    let mut payload = payload;
+    payload["theme"] = serde_json::json!({ "foreground": rgb(p.fg), "background": rgb(p.bg) });
+    if let Some(overlay) = &mut app.overlay {
+        match overlay.render(&payload, buf, result.0, mono) {
+            Ok(cursor) => (result.0, cursor.or(result.1)),
+            Err(error) => {
+                app.notice = format!("Overlay fallback: {error}");
+                result
+            }
+        }
+    } else {
+        result
+    }
+}
+fn draw_builtin_dialog(
+    app: &mut App,
+    buf: &mut Buffer,
+    area: Rect,
+    p: Palette,
     _mono: bool,
     g: &mut Geometry,
 ) -> (Rect, Option<(u16, u16)>) {
@@ -1478,7 +1564,7 @@ fn draw_dialog(
         center(area, width as u16, height.min(u16::MAX as usize) as u16)
     };
     let title = match &dialog {
-        Dialog::Form { title, .. } => title.as_str(),
+        Dialog::Form { title, .. } | Dialog::Details { title, .. } => title.as_str(),
         _ => "Keyboard shortcuts",
     };
     if is_form {
@@ -1511,7 +1597,14 @@ fn draw_dialog(
         }
         return (r, form.cursor);
     }
-    let lines: Vec<_> = HELP_LINES
+    let detail_lines;
+    let source = if let Dialog::Details { text, .. } = &dialog {
+        detail_lines = text.lines().collect::<Vec<_>>();
+        detail_lines.as_slice()
+    } else {
+        HELP_LINES
+    };
+    let lines: Vec<_> = source
         .iter()
         .flat_map(|s| text::wrap(s, inner.width as usize))
         .map(|(_, s)| help_line(&s, p))

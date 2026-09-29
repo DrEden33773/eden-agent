@@ -206,3 +206,18 @@ pub mod theme_token {
     /// Palette role for warning surfaces or foregrounds.
     pub const WARNING: u32 = 18;
 }
+
+/// Replaceable modal presentation and key mapping, exported as `eden_overlay_v1`.
+/// The renderer receives `{kind, title, query, selected, items, fields, theme}`;
+/// field values are masked when private. Host controls retain action validation and mouse targets.
+/// `event` receives `{key, modifiers}` (Crossterm key names; shift=1, ctrl=2, alt=4)
+/// and emits one JSON string: `pass`, `up`, `down`, `accept`, or `close`.
+/// Invalid replies fall back to the original event. No framework values cross this table.
+#[repr(C)]
+pub struct OverlayApi {
+    /// The common rendering prefix follows RendererApi ownership and callback rules.
+    pub renderer: RendererApi,
+    /// Borrow the event and copy the response through the callback before returning zero.
+    /// A negative result leaves ordinary host key handling in charge.
+    pub event: unsafe extern "C" fn(*mut c_void, *const u8, usize, ByteSink, *mut c_void) -> i32,
+}

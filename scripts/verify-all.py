@@ -23,6 +23,7 @@ from verification import (
 )
 
 SUITES = {
+    "product-workflows": ("verify-product-workflows.py", "product-workflows-verification.json"),
     "tui": ("verify-tui.py", "tui-verification.json"),
     "configuration-forms": (
         "verify-configuration-forms.py",

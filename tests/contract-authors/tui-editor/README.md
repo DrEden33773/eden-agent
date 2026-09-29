@@ -2,6 +2,8 @@
 
 This separately built dynamic library depends on the public UI SDK and host client, with no dependency on the built-in frontend or editor implementation. Its minimal append editor supports paste, backspace, draft restore, snapshots and a visible `A` marker. The same library exports a message renderer, semantic theme and frontend entry point. These fixtures demonstrate replacement boundaries; they do not claim bundled feature parity.
 
+It writes its `#[repr(C)]` tables by hand and is the ABI reference the SDK's safe traits are checked against. Its macro-authored counterpart [`ui-macro`](../ui-macro/README.md) exports the same five roles through `export_ui!` with the same observable output, and installed acceptance runs both through the same assertions.
+
 Build after installing the host: `cargo build --locked --manifest-path tests/contract-authors/tui-editor/Cargo.toml`. The output is `libauthor_tui_editor.so`, `libauthor_tui_editor.dylib`, or `author_tui_editor.dll`. Configure the installed frontend's editor library setting to this file, or select its other roles through `EDEN_TUI_RENDERER`, `EDEN_TUI_THEME` and `EDEN_TUI_FRONTEND` respectively.
 
 For editor acceptance, launch the installed frontend with this library, assert the `A` marker is rendered, paste `external author`, and submit. The resulting host message must equal `external author`. Renderer acceptance displays `AUTHOR RENDERER` through cell callbacks with the terminal default background. Theme acceptance resolves accent token 2 to RGB `12ab34`. Frontend acceptance attaches to the configured real host through its public client, obtains a snapshot, detaches, then emits `AUTHOR FRONTEND session N` and exits zero. It owns its runtime and joins its worker before returning across C.

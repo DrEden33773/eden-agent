@@ -2,6 +2,8 @@
 
 The current development release pairs host and SDK exactly as `eden-native-0.13.0`, ABI version 1, on the same target triple. Authors use Rust 1.98.1. The host and each library own their Rust dependencies and runtimes. Libraries are trusted native code running with the host's permissions.
 
+This page describes the asynchronous plugin ABI (`eden_plugin_v1`) and its composition. The terminal's native UI roles are a second, independent native extension point with its own tables and entry points in `eden-ui-sdk`; see [native UI plugins](ui-plugins.md) and [interactive terminal](terminal.md).
+
 ## Installation and selection
 
 The CLI reads an explicitly supplied composition JSON file, or `../composition.json` relative to its executable. Package paths resolve relative to that file. Entering a project directory never discovers or executes native code. A composition lists immutable package/version directories, exact host/SDK/target identity, exported roles, configuration, and one selected package for each required role. Missing or incompatible roles fail startup rather than choosing a fallback.

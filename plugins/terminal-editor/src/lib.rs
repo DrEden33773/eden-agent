@@ -1,11 +1,7 @@
-//! Typed editor and overlay renderer behind a C ABI adapter.
+//! Typed editor behind the safe role trait, exported with `export_ui!`.
 use eden_ui_sdk::{
-    ABI_VERSION, ByteSink, CELL_BOLD, CELL_CURSOR, CELL_REVERSE, COLOR_DEFAULT, Cell, CellSink,
-    EVENT_ERROR, UiApi,
-};
-use std::{
-    ffi::c_void,
-    panic::{AssertUnwindSafe, catch_unwind},
+    CELL_BOLD, CELL_CURSOR, CELL_REVERSE, COLOR_DEFAULT, author,
+    author::{CellStyle, Frame, Rejected},
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -58,10 +54,6 @@ impl Editor {
     fn selection(&self) -> std::ops::Range<usize> {
         let anchor = self.anchor.unwrap_or(self.cursor);
         anchor.min(self.cursor)..anchor.max(self.cursor)
-    }
-
-    fn selected_text(&self) -> &str {
-        &self.text[self.selection()]
     }
 
     fn previous(&self) -> usize {
@@ -200,7 +192,7 @@ impl Editor {
         cursor
     }
 
-    fn replace(&mut self, range: std::ops::Range<usize>, text: &str) -> Result<(), ()> {
+    fn replace(&mut self, range: std::ops::Range<usize>, text: &str) -> Result<(), Rejected> {
         let normalized = text
             .replace("\r\n", "\n")
             .replace('\r', "\n")
@@ -210,7 +202,7 @@ impl Editor {
             .filter(|c| *c == '\n' || !c.is_control())
             .collect();
         if self.text.len() - range.len() + clean.len() > MAX_TEXT {
-            return Err(());
+            return Err(Rejected);
         }
         if range.is_empty() && clean.is_empty() {
             return Ok(());
@@ -235,8 +227,22 @@ impl Editor {
         self.layout_rows.clear();
         Ok(())
     }
+}
 
-    fn event(&mut self, kind: u32, key: u32, mods: u32, text: &str) -> Result<(), ()> {
+impl author::Editor for Editor {
+    fn create(style: u32) -> Option<Self> {
+        (style <= 1).then(|| Self {
+            numbered: style == 1,
+            ..Self::default()
+        })
+    }
+
+    fn event(&mut self, kind: u32, key: u32, mods: u32, text: &str) -> Result<(), Rejected> {
+        // The entry point decodes the event span before this method sees it, so the size
+        // the editor is willing to hold is its own policy and stays here.
+        if text.len() > MAX_TEXT && (kind == 1 || kind == 3 || (kind == 0 && key == 10)) {
+            return Err(Rejected);
+        }
         if kind != 0 || key != 20 {
             self.yank = None;
         }
@@ -246,7 +252,7 @@ impl Editor {
                 i == self.text.len() || self.text.grapheme_indices(true).any(|(byte, _)| byte == i)
             };
             if start > end || end > self.text.len() || !boundary(start) || !boundary(end) {
-                return Err(());
+                return Err(Rejected);
             }
             return self.replace(start..end, text);
         }
@@ -257,7 +263,7 @@ impl Editor {
             let column = (key as u16).saturating_sub(self.pointer_gutter);
             let row = (key >> 16) as usize;
             let Some(stops) = self.pointer_rows.get(row) else {
-                return Err(());
+                return Err(Rejected);
             };
             let target = stops
                 .iter()
@@ -275,7 +281,7 @@ impl Editor {
             return Ok(());
         }
         if kind != 0 {
-            return Err(());
+            return Err(Rejected);
         }
         let shift = mods & 1 != 0;
         let ctrl = mods & 2 != 0;
@@ -384,11 +390,11 @@ impl Editor {
         Ok(())
     }
 
-    fn restore(&mut self, text: &str, cursor: usize) -> Result<(), ()> {
+    fn restore(&mut self, text: &str, cursor: usize) -> Result<(), Rejected> {
         let boundary =
             cursor == text.len() || text.grapheme_indices(true).any(|(i, _)| i == cursor);
         if text.len() > MAX_TEXT || !boundary || text.chars().any(|c| c.is_control() && c != '\n') {
-            return Err(());
+            return Err(Rejected);
         }
         let numbered = self.numbered;
         *self = Self {
@@ -400,15 +406,11 @@ impl Editor {
         Ok(())
     }
 
-    fn render(
-        &mut self,
-        width: u16,
-        height: u16,
-        mode: u32,
-        dark: bool,
-        sink: CellSink,
-        ctx: *mut c_void,
-    ) {
+    fn render(&mut self, frame: &mut Frame<'_>) {
+        let width = frame.width();
+        let height = frame.height();
+        let mode = frame.mode();
+        let dark = frame.dark();
         if width == 0 || height == 0 {
             if mode == 0 {
                 self.pointer_rows.clear();
@@ -431,16 +433,14 @@ impl Editor {
                 muted: 0x686473,
             }
         };
-        let mut canvas = Canvas {
+        let canvas = Canvas {
             width,
             height,
             palette,
-            sink,
-            ctx,
         };
         for y in 0..height {
             for x in 0..width {
-                canvas.emit(x, y, " ", palette.fg, 0);
+                canvas.emit(frame, x, y, " ", palette.fg, 0);
             }
         }
         if mode == 1 {
@@ -458,6 +458,7 @@ impl Editor {
             .enumerate()
             {
                 canvas.line(
+                    frame,
                     1,
                     y as u16,
                     line,
@@ -549,6 +550,7 @@ impl Editor {
                     palette.fg
                 };
                 canvas.emit(
+                    frame,
                     x + gutter,
                     (y - scroll) as u16,
                     text,
@@ -561,6 +563,7 @@ impl Editor {
             for (y, number) in row_labels {
                 if y >= scroll && y - scroll < height as usize {
                     canvas.line(
+                        frame,
                         0,
                         (y - scroll) as u16,
                         &format!("{:>3} ", number % 1000),
@@ -574,12 +577,33 @@ impl Editor {
             return;
         }
         canvas.emit(
+            frame,
             cursor.0 + gutter,
             (cursor.1 - scroll) as u16,
             "",
             palette.accent,
             CELL_CURSOR,
         );
+    }
+
+    fn snapshot(&self) -> &str {
+        &self.text
+    }
+
+    fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    fn selected_text(&self) -> &str {
+        &self.text[self.selection()]
+    }
+
+    fn transfer_state(&mut self, source: &Self) {
+        let numbered = self.numbered;
+        *self = source.clone();
+        self.numbered = numbered;
+        self.pointer_rows.clear();
+        self.layout_rows.clear();
     }
 }
 
@@ -595,218 +619,44 @@ struct Canvas {
     width: u16,
     height: u16,
     palette: Palette,
-    sink: CellSink,
-    ctx: *mut c_void,
 }
 
 impl Canvas {
-    fn emit(&mut self, x: u16, y: u16, text: &str, fg: u32, flags: u32) {
+    fn emit(&self, frame: &mut Frame<'_>, x: u16, y: u16, text: &str, fg: u32, flags: u32) {
         if x >= self.width || y >= self.height {
             return;
         }
-        (self.sink)(
-            self.ctx,
-            &Cell {
-                x,
-                y,
+        frame.set(
+            x,
+            y,
+            text,
+            CellStyle {
                 fg,
                 bg: self.palette.bg,
                 flags,
-                text: text.as_ptr(),
-                text_len: text.len(),
             },
         );
     }
 
-    fn line(&mut self, mut x: u16, y: u16, text: &str, fg: u32, flags: u32) {
+    fn line(&self, frame: &mut Frame<'_>, mut x: u16, y: u16, text: &str, fg: u32, flags: u32) {
         for g in text.graphemes(true) {
             let w = g.width().max(1).min(u16::MAX as usize) as u16;
             if x.saturating_add(w) > self.width {
                 break;
             }
-            self.emit(x, y, g, fg, flags);
+            self.emit(frame, x, y, g, fg, flags);
             x += w;
         }
     }
 }
 
-// Foreign callers must obey the SDK pointer and lifetime contract. Null and input
-// lengths are checked here; arbitrary dangling pointers cannot be validated in-process.
-unsafe fn input<'a>(ptr: *const u8, len: usize) -> Result<&'a str, ()> {
-    if len == 0 {
-        return Ok("");
-    }
-    if ptr.is_null() || len > MAX_TEXT {
-        return Err(());
-    }
-    // SAFETY: the serialized SDK call keeps its library, handle and borrowed buffers live; tests create these values locally.
-    std::str::from_utf8(unsafe { std::slice::from_raw_parts(ptr, len) }).map_err(|_| ())
-}
-
-unsafe extern "C" fn create(style: u32) -> *mut c_void {
-    catch_unwind(|| {
-        if style > 1 {
-            return std::ptr::null_mut();
-        }
-        Box::into_raw(Box::new(Editor {
-            numbered: style == 1,
-            ..Editor::default()
-        }))
-        .cast()
-    })
-    .unwrap_or(std::ptr::null_mut())
-}
-
-unsafe extern "C" fn destroy(state: *mut c_void) {
-    let _ = catch_unwind(AssertUnwindSafe(|| {
-        if !state.is_null() {
-            // SAFETY: destroy consumes the live, uniquely owned handle from create.
-            drop(unsafe { Box::from_raw(state.cast::<Editor>()) });
-        }
-    }));
-}
-
-unsafe extern "C" fn event(
-    state: *mut c_void,
-    kind: u32,
-    key: u32,
-    mods: u32,
-    data: *const u8,
-    len: usize,
-) -> u32 {
-    catch_unwind(AssertUnwindSafe(|| {
-        // SAFETY: the serialized SDK call keeps its library, handle and borrowed buffers live; tests create these values locally.
-        let Some(editor) = (unsafe { state.cast::<Editor>().as_mut() }) else {
-            return EVENT_ERROR;
-        };
-        let text = if kind == 1 || kind == 3 || (kind == 0 && key == 10) {
-            // SAFETY: the serialized SDK call keeps its library, handle and borrowed buffers live; tests create these values locally.
-            match unsafe { input(data, len) } {
-                Ok(text) => text,
-                Err(()) => return EVENT_ERROR,
-            }
-        } else {
-            ""
-        };
-        editor
-            .event(kind, key, mods, text)
-            .map_or(EVENT_ERROR, |()| 0)
-    }))
-    .unwrap_or(EVENT_ERROR)
-}
-
-unsafe extern "C" fn render(
-    state: *mut c_void,
-    width: u16,
-    height: u16,
-    mode: u32,
-    dark: u32,
-    sink: CellSink,
-    ctx: *mut c_void,
-) {
-    let _ = catch_unwind(AssertUnwindSafe(|| {
-        // SAFETY: the serialized SDK call keeps its library, handle and borrowed buffers live; tests create these values locally.
-        if let Some(editor) = unsafe { state.cast::<Editor>().as_mut() }
-            && mode <= 2
-        {
-            editor.render(width, height, mode, dark != 0, sink, ctx);
-        }
-    }));
-}
-
-unsafe extern "C" fn snapshot(state: *mut c_void, sink: ByteSink, ctx: *mut c_void) {
-    let _ = catch_unwind(AssertUnwindSafe(|| {
-        // SAFETY: the serialized SDK call keeps its library, handle and borrowed buffers live; tests create these values locally.
-        if let Some(editor) = unsafe { state.cast::<Editor>().as_ref() } {
-            sink(ctx, editor.text.as_ptr(), editor.text.len());
-        }
-    }));
-}
-
-unsafe extern "C" fn cursor(state: *mut c_void) -> usize {
-    catch_unwind(AssertUnwindSafe(|| {
-        // SAFETY: the serialized SDK call keeps its library, handle and borrowed buffers live; tests create these values locally.
-        unsafe { state.cast::<Editor>().as_ref() }.map_or(0, |editor| editor.cursor)
-    }))
-    .unwrap_or(0)
-}
-
-unsafe extern "C" fn restore(
-    state: *mut c_void,
-    data: *const u8,
-    len: usize,
-    cursor: usize,
-) -> i32 {
-    catch_unwind(AssertUnwindSafe(|| {
-        // SAFETY: the serialized SDK call keeps its library, handle and borrowed buffers live; tests create these values locally.
-        let Some(editor) = (unsafe { state.cast::<Editor>().as_mut() }) else {
-            return -1;
-        };
-        // SAFETY: the serialized SDK call keeps its library, handle and borrowed buffers live; tests create these values locally.
-        match unsafe { input(data, len) } {
-            Ok(text) => editor.restore(text, cursor).map_or(-1, |()| 0),
-            Err(()) => -1,
-        }
-    }))
-    .unwrap_or(-1)
-}
-
-unsafe extern "C" fn selected_text(state: *mut c_void, sink: ByteSink, ctx: *mut c_void) {
-    let _ = catch_unwind(AssertUnwindSafe(|| {
-        // SAFETY: the serialized SDK call keeps its library, handle and borrowed buffers live; tests create these values locally.
-        if let Some(editor) = unsafe { state.cast::<Editor>().as_ref() } {
-            let text = editor.selected_text();
-            sink(ctx, text.as_ptr(), text.len());
-        }
-    }));
-}
-
-unsafe extern "C" fn transfer_state(destination: *mut c_void, source: *mut c_void) -> i32 {
-    catch_unwind(AssertUnwindSafe(|| {
-        if destination.is_null() || source.is_null() {
-            return -1;
-        }
-        if destination == source {
-            return 0;
-        }
-        // Both handles belong to this loaded library; only plain C pointers cross the ABI.
-        // SAFETY: the serialized SDK call keeps its library, handle and borrowed buffers live; tests create these values locally.
-        let source = unsafe { &*source.cast::<Editor>() };
-        // SAFETY: the serialized SDK call keeps its library, handle and borrowed buffers live; tests create these values locally.
-        let destination = unsafe { &mut *destination.cast::<Editor>() };
-        let numbered = destination.numbered;
-        *destination = source.clone();
-        destination.numbered = numbered;
-        destination.pointer_rows.clear();
-        destination.layout_rows.clear();
-        0
-    }))
-    .unwrap_or(-1)
-}
-
-static API: UiApi = UiApi {
-    abi: ABI_VERSION,
-    table_size: std::mem::size_of::<UiApi>() as u32,
-    create,
-    destroy,
-    event,
-    render,
-    snapshot,
-    cursor,
-    restore,
-    selected_text,
-    transfer_state,
-};
-
-#[unsafe(no_mangle)]
-/// Returns a static table valid until this library is unloaded.
-pub extern "C" fn eden_ui_v1() -> *const UiApi {
-    &API
-}
+eden_ui_sdk::export_ui!(editor: Editor);
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use eden_ui_sdk::{ABI_VERSION, Cell, EVENT_ERROR, UiApi, author::Editor as _};
+    use std::ffi::c_void;
 
     fn key(editor: &mut Editor, key: u32, mods: u32) {
         editor.event(0, key, mods, "").unwrap();
@@ -970,17 +820,21 @@ mod tests {
 
     #[test]
     fn transfer_preserves_selection_history_kill_and_scroll_with_new_style() {
-        // SAFETY: the serialized SDK call keeps its library, handle and borrowed buffers live; tests create these values locally.
+        // SAFETY: the test owns both handles, calls the exported table serially and
+        // destroys them through the same table.
         unsafe {
-            let first = create(0);
-            let second = create(1);
-            let editor = &mut *first.cast::<Editor>();
-            editor.event(1, 0, 0, "a\nb\nc\nd").unwrap();
-            key(editor, 19, 0);
-            key(editor, 16, 0);
-            key(editor, 1, 1);
-            editor.scroll = 2;
-            assert_eq!(transfer_state(second, first), 0);
+            let api = &*eden_ui_v1();
+            let first = (api.create)(0);
+            let second = (api.create)(1);
+            {
+                let editor = &mut *first.cast::<Editor>();
+                editor.event(1, 0, 0, "a\nb\nc\nd").unwrap();
+                key(editor, 19, 0);
+                key(editor, 16, 0);
+                key(editor, 1, 1);
+                editor.scroll = 2;
+            }
+            assert_eq!((api.transfer_state)(second, first), 0);
             let next = &mut *second.cast::<Editor>();
             assert!(next.numbered);
             assert_eq!(next.selected_text(), "d");
@@ -990,21 +844,41 @@ mod tests {
             assert_eq!(next.text, "a\nb\nc\n");
             key(next, 13, 0);
             assert_eq!(next.text, "a\nb\nc\nd");
-            assert_eq!(editor.text, "a\nb\nc\nd");
-            destroy(first);
-            destroy(second);
+            (api.destroy)(first);
+            (api.destroy)(second);
         }
     }
 
     #[test]
-    fn invalid_abi_input_is_rejected() {
-        // SAFETY: the serialized SDK call keeps its library, handle and borrowed buffers live; tests create these values locally.
+    fn exported_table_round_trips_a_draft_and_rejects_unreadable_input() {
+        extern "C" fn collect_text(ctx: *mut c_void, bytes: *const u8, len: usize) {
+            if bytes.is_null() || len == 0 {
+                return;
+            }
+            // SAFETY: the test passes a live String and the table lends the bytes for
+            // this call only.
+            unsafe {
+                (*ctx.cast::<String>()).push_str(&String::from_utf8_lossy(
+                    std::slice::from_raw_parts(bytes, len),
+                ));
+            }
+        }
+        // SAFETY: the test drives this library's exported table serially from one thread
+        // and destroys every handle it creates.
         unsafe {
-            let state = create(0);
-            assert_eq!(event(state, 1, 0, 0, [0xff].as_ptr(), 1), EVENT_ERROR);
-            assert_eq!(restore(state, std::ptr::null(), 1, 0), -1);
-            assert_eq!(transfer_state(state, std::ptr::null_mut()), -1);
-            destroy(state);
+            let api = &*eden_ui_v1();
+            assert_eq!(api.abi, ABI_VERSION);
+            assert_eq!(api.table_size, std::mem::size_of::<UiApi>() as u32);
+            let state = (api.create)(0);
+            assert!(!state.is_null());
+            assert_eq!((api.event)(state, 1, 0, 0, b"draft".as_ptr(), 5), 0);
+            let mut text = String::new();
+            (api.snapshot)(state, collect_text, (&mut text as *mut String).cast());
+            assert_eq!(text, "draft");
+            assert_eq!((api.event)(state, 1, 0, 0, [0xff].as_ptr(), 1), EVENT_ERROR);
+            assert_eq!((api.restore)(state, std::ptr::null(), 1, 0), -1);
+            assert_eq!((api.transfer_state)(state, std::ptr::null_mut()), -1);
+            (api.destroy)(state);
         }
     }
 
@@ -1037,14 +911,18 @@ mod tests {
 
     fn draw(editor: &mut Editor, width: u16, height: u16, mode: u32) -> Vec<DrawnCell> {
         let mut output = Vec::<DrawnCell>::new();
-        editor.render(
-            width,
-            height,
-            mode,
-            true,
-            collect,
-            (&mut output as *mut Vec<DrawnCell>).cast(),
-        );
+        // SAFETY: the callback context outlives the call and the frame is not stored.
+        let mut frame = unsafe {
+            Frame::new(
+                collect,
+                (&mut output as *mut Vec<DrawnCell>).cast(),
+                width,
+                height,
+                mode,
+                true,
+            )
+        };
+        editor.render(&mut frame);
         output
     }
 

@@ -20,6 +20,7 @@ from install import ROOT, Composition, build_target, install, library, target
 
 AUTHORS = (
     "tui-editor",
+    "ui-macro",
     "configuration-forms",
     "configuration-custom",
     "notes",

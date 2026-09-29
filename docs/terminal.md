@@ -59,7 +59,9 @@ Secret edits use the private-input channel. The frontend clears material after s
 
 Native UI code runs in the terminal process. `eden-ui-sdk` defines C-compatible versioned tables; it does not pass Rust framework objects across a dynamic-library boundary. The default editor is installed in `ui/`. Explicit trusted replacements are selected with `EDEN_TUI_EDITOR`, `EDEN_TUI_RENDERER`, `EDEN_TUI_THEME` and `EDEN_TUI_FRONTEND`. `eden tui --editor PATH` also selects an editor. The renderer receives structured messages and display settings, the theme resolves semantic tokens, and a replacement frontend receives the endpoint and owns its own terminal lifecycle. Native libraries have the same authority as the frontend process.
 
-See the [SDK](../crates/eden-ui-sdk/src/lib.rs) and [independent author](../tests/contract-authors/tui-editor/README.md). `python3 scripts/verify-tui.py` checks the installed boundary; POSIX runs use a real PTY. Core/editor/renderer tests also run natively on the supported CI platforms.
+The SDK provides `export_ui!` and one safe trait per role, so an author implements a Rust type and writes no `unsafe`, no entry point and no table; the macro also derives each table's version and size from the SDK types, so a hand-computed `table_size` cannot drift. A hand-written `#[repr(C)]` table remains public and supported. The [native UI plugin guide](ui-plugins.md) documents the traits, the per-role failure values, the borrowing rules and complete examples.
+
+See the [SDK](../crates/eden-ui-sdk/src/lib.rs) and the independent authors [tui-editor](../tests/contract-authors/tui-editor/README.md) (hand-written tables) and [ui-macro](../tests/contract-authors/ui-macro/README.md) (macro-exported roles). `python3 scripts/verify-tui.py` checks the installed boundary for both; POSIX runs use a real PTY. Core/editor/renderer tests also run natively on the supported CI platforms.
 
 For targeted frontend tests, first run `cargo build -p eden-terminal-editor --locked`, then `cargo test -p eden-tui --locked`. The tests load the actual dynamic library; a Cargo test build alone does not publish it in the normal library output directory. CI builds this prerequisite explicitly.
 
@@ -131,7 +133,7 @@ Startup-only process paths, environment and composition selection remain explici
 
 ## Overlay replacement
 
-`EDEN_TUI_OVERLAY` selects an explicitly trusted native library exporting `eden_overlay_v1` from `eden-ui-sdk`. It receives the actual modal items, selection, query, masked field display values and semantic theme, and can render cells and map keys to validated host navigation. Host action targets and mouse hit regions remain authoritative. A rejected frame or event falls back to the built-in interface. The Overlay table has its own full-size header check; renderer/editor/theme/frontend replacements continue to load independently. No Rust framework value or allocator crosses these C tables.
+`EDEN_TUI_OVERLAY` selects an explicitly trusted native library exporting `eden_overlay_v1` from `eden-ui-sdk`. It receives the actual modal items, selection, query, masked field display values and semantic theme, and can render cells and map keys to validated host navigation. Host action targets and mouse hit regions remain authoritative. A rejected frame or event falls back to the built-in interface. The Overlay table has its own full-size header check, which covers the nested renderer prefix as well as the event slot; `export_ui!(overlay: Type)` writes that size, while a hand-written table must set it to the complete `OverlayApi` rather than to `RendererApi`. Renderer/editor/theme/frontend replacements continue to load independently. No Rust framework value or allocator crosses these C tables.
 
 ## Reproducing terminal measurements
 

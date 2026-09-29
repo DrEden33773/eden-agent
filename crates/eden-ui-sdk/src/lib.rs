@@ -4,7 +4,14 @@
 //! destroy all handles before unloading it. Input pointers are borrowed for a call.
 //! Callback pointers (including text) are borrowed only until the callback returns.
 //! Callbacks must not unwind, retain pointers, or reenter the plugin.
+//!
+//! A role may instead implement the safe traits in [`author`] and export them with
+//! [`export_ui!`], which keeps the tables above and the entry points out of the author's
+//! file without changing this ABI.
 use std::ffi::c_void;
+
+pub mod author;
+mod export;
 
 /// Reject tables with any other version before reading function pointers.
 pub const ABI_VERSION: u32 = 1;

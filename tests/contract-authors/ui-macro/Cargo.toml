@@ -1,0 +1,23 @@
+[package]
+name = "author-ui-macro"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98.1"
+license = "Apache-2.0"
+[workspace]
+[lib]
+crate-type = ["cdylib", "rlib"]
+[dependencies]
+eden-ui-sdk = { path = "../../../crates/eden-ui-sdk", version = "0.1.0" }
+eden-tui-client = { path = "../../../crates/eden-tui-client", version = "0.1.0" }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["rt", "net", "io-util", "time"] }
+
+# The same lints the product applies, so this library proves an independent author
+# needs neither `unsafe` nor a documented entry point of its own.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

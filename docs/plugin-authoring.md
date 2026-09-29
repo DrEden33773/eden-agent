@@ -1,6 +1,6 @@
 # Author a native plugin
 
-Use the SDK source from the same eden-agent release and Rust 1.98.1. Host and plugin must match `eden-native-0.6.0`, ABI version 1 and the target triple. There is no cross-release ABI compatibility promise.
+Use the SDK source from the same eden-agent release and Rust 1.98.1. Host and plugin must match `eden-native-0.6.0`, ABI version 1 and the target triple. There is no cross-release ABI compatibility promise. Terminal-native UI roles use a different SDK and contract: see [native UI plugins](ui-plugins.md).
 
 ## Independent build
 

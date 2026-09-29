@@ -77,7 +77,7 @@ def effect() -> list[dict[str, Any]]:
 
 
 def summary(body: dict[str, Any]) -> bool:
-    return body["tools"] == []
+    return body.get("tools", []) == []
 
 
 class Server:
@@ -131,6 +131,8 @@ class Server:
                                 "cancelled client did not finish gate scenario"
                             )
                         self.wfile.write(("data: " + json.dumps(payload) + "\n\n").encode())
+                        if "messages" in body:
+                            self.wfile.write(b"data: [DONE]\n\n")
                     else:
                         self.wfile.write(json.dumps(payload).encode())
                     self.wfile.flush()

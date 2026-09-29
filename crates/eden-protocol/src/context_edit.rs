@@ -314,7 +314,22 @@ pub enum ImageAction {
 #[allow(missing_docs)]
 pub struct ImageEdit {
     pub revision: Revision,
+    #[serde(deserialize_with = "image_choices")]
     pub choices: std::collections::BTreeMap<String, std::collections::BTreeMap<usize, ImageAction>>,
+}
+
+// Tagged requests buffer their fields before decoding; restore JSON's numeric-key handling.
+fn image_choices<'de, D>(
+    deserializer: D,
+) -> Result<
+    std::collections::BTreeMap<String, std::collections::BTreeMap<usize, ImageAction>>,
+    D::Error,
+>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <serde_json::Value as serde::Deserialize>::deserialize(deserializer)?;
+    serde_json::from_value(value).map_err(serde::de::Error::custom)
 }
 
 /// Copies renumber local tree nodes; frozen cross-session source identities remain untouched.
@@ -434,6 +449,26 @@ mod tests {
     use serde_json::json;
     fn request(items: serde_json::Value) -> ModelInput {
         serde_json::from_value(json!({ "items": items, "tools": [] })).unwrap()
+    }
+    #[test]
+    fn image_choices_round_trip_through_tagged_service_request() {
+        let value = json!({
+            "operation": "images",
+            "input": { "cwd": "/fixture", "items": [] },
+            "edit": {
+                "revision": { "session_id": 1, "sequence": 2, "head": 2, "branch": "main" },
+                "choices": { "record:2:0": { "1": "re_adapt", "3": "omit" } },
+            },
+        });
+        let wire = serde_json::to_vec(&value).unwrap();
+        let request: Request = serde_json::from_slice(&wire).unwrap();
+        assert_eq!(
+            serde_json::to_value(request).unwrap()["edit"],
+            value["edit"]
+        );
+        let mut invalid = value;
+        invalid["edit"]["choices"] = json!({ "record:2:0": { "invalid": "omit" } });
+        assert!(serde_json::from_value::<Request>(invalid).is_err());
     }
     #[test]
     fn incomplete_and_reordered_tool_groups_are_rejected() {

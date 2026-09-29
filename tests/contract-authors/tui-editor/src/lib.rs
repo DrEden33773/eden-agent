@@ -300,6 +300,86 @@ pub extern "C" fn eden_terminal_frontend_v1() -> *const eden_ui_sdk::TerminalFro
     &FRONTEND
 }
 
+unsafe extern "C" fn overlay_render(
+    _: *mut c_void,
+    bytes: *const u8,
+    len: usize,
+    width: u16,
+    height: u16,
+    sink: CellSink,
+    ctx: *mut c_void,
+) -> i32 {
+    if bytes.is_null() || len == 0 || len > 16 * 1024 * 1024 {
+        return -1;
+    }
+    // SAFETY: the caller lends JSON bytes for this synchronous call.
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(unsafe {
+        std::slice::from_raw_parts(bytes, len)
+    }) else {
+        return -1;
+    };
+    if !value["kind"].is_string() || !value["theme"].is_object() {
+        return -1;
+    }
+    if width > 0 && height > 0 {
+        let marker = b"AUTHOR OVERLAY";
+        sink(
+            ctx,
+            &Cell {
+                x: 0,
+                y: 0,
+                fg: 0x12ab34,
+                bg: COLOR_DEFAULT,
+                flags: 0,
+                text: marker.as_ptr(),
+                text_len: marker.len(),
+            },
+        );
+    }
+    0
+}
+unsafe extern "C" fn overlay_event(
+    _: *mut c_void,
+    bytes: *const u8,
+    len: usize,
+    sink: ByteSink,
+    ctx: *mut c_void,
+) -> i32 {
+    if bytes.is_null() || len == 0 || len > 4096 {
+        return -1;
+    }
+    // SAFETY: SDK event bytes are borrowed only for this call.
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(unsafe {
+        std::slice::from_raw_parts(bytes, len)
+    }) else {
+        return -1;
+    };
+    let reply: &[u8] = if value["key"] == "F(9)" {
+        b"\"close\""
+    } else {
+        b"\"pass\""
+    };
+    sink(ctx, reply.as_ptr(), reply.len());
+    0
+}
+static OVERLAY: eden_ui_sdk::OverlayApi = eden_ui_sdk::OverlayApi {
+    renderer: eden_ui_sdk::RendererApi {
+        header: eden_ui_sdk::ApiHeader {
+            abi: ABI_VERSION,
+            table_size: std::mem::size_of::<eden_ui_sdk::OverlayApi>() as u32,
+        },
+        create: renderer_create,
+        destroy: renderer_destroy,
+        render: overlay_render,
+    },
+    event: overlay_event,
+};
+/// An independently linked modal renderer whose F9 mapping closes the current dialog.
+#[unsafe(no_mangle)]
+pub extern "C" fn eden_overlay_v1() -> *const eden_ui_sdk::OverlayApi {
+    &OVERLAY
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

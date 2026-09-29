@@ -6,9 +6,18 @@ use eden_protocol::{AGENT_LOOP, CONTEXT, Composition, PROVIDER, RunInput, TOOL};
 use eden_tui_client::{HostClient, RequestStatus};
 use std::collections::BTreeMap;
 
-async fn session() -> Session {
+pub(super) async fn session() -> Session {
+    session_with_preview_barrier(None).await
+}
+async fn session_with_preview_barrier(
+    barrier: Option<(
+        Arc<tokio::sync::Notify>,
+        Arc<tokio::sync::Notify>,
+        Arc<std::sync::atomic::AtomicBool>,
+    )>,
+) -> Session {
     let cwd = std::env::current_dir().unwrap();
-    let package = Package::new("live-test")
+    let mut package = Package::new("live-test")
         .service(AGENT_LOOP, |input: RunInput, cx| async move {
             if input.prompt == "wait" {
                 cx.scope.cancellation().cancelled().await;
@@ -21,7 +30,48 @@ async fn session() -> Session {
         .service(PROVIDER, |_: Value, _| async {
             Ok::<_, Fault>(Value::Null)
         })
-        .service(TOOL, |_: Value, _| async { Ok::<_, Fault>(Value::Null) });
+        .service(TOOL, |_: Value, _| async { Ok::<_, Fault>(Value::Null) })
+        .service(
+            eden_protocol::models::MODEL_CATALOG,
+            |request: Value, _| async move {
+                Ok::<_, Fault>(json!({
+                    "providers": ["fixture"],
+                    "models": [],
+                    "target": null,
+                    "source": { "kind": "fixture", "location": "local", "updated_at": null },
+                    "status": request["action"],
+                }))
+            },
+        );
+    if let Some((started, release, cleaned)) = barrier {
+        package = package.service(
+            eden_protocol::delivery::EXPORTER,
+            move |_: eden_protocol::delivery::ExportRequest, cx| {
+                let started = started.clone();
+                let release = release.clone();
+                let cleaned = cleaned.clone();
+                async move {
+                    cx.scope
+                        .cleanup(async move {
+                            cleaned.store(true, std::sync::atomic::Ordering::SeqCst);
+                            Ok(())
+                        })
+                        .unwrap();
+                    started.notify_one();
+                    let cancel = cx.scope.cancellation();
+                    tokio::select! {
+                        _ = cancel.cancelled() => Err(fault("Cancelled", "export cancelled")),
+                        _ = release.notified() => Ok(eden_protocol::delivery::Artifact {
+                            media_type: "application/x-ndjson".into(),
+                            filename: "preview.jsonl".into(),
+                            content: "fixed".into(),
+                            warnings: vec![]
+                        }),
+                    }
+                }
+            },
+        );
+    }
     let session = Embedded::new(
         Composition {
             host_environment: None,
@@ -69,6 +119,7 @@ async fn typed_transport_preserves_receipts_detach_and_real_events() {
     .unwrap();
     let (stop, _) = watch::channel(false);
     let shared = Arc::new(Shared {
+        management: Default::default(),
         session: session.clone(),
         token: "test-token".into(),
         web_root: None,
@@ -169,6 +220,8 @@ async fn typed_transport_preserves_receipts_detach_and_real_events() {
 async fn static_snapshot_keeps_committed_records_and_is_read_only() {
     let (stop, _) = watch::channel(false);
     let shared = StaticShared {
+        reading: None,
+        diagnostic: None,
         history: vec![],
         snapshot: eden_protocol::presentation::Snapshot {
             version: 1,
@@ -227,6 +280,7 @@ async fn idle_poll_waits_and_expired_attachment_can_rejoin_same_session() {
     let session = session().await;
     let (stop, _) = watch::channel(false);
     let shared = Arc::new(Shared {
+        management: Default::default(),
         session: session.clone(),
         token: "unused".into(),
         web_root: None,
@@ -290,4 +344,303 @@ fn session_guard_preserves_javascript_safe_and_legacy_requests() {
             .code,
         "SessionMismatch"
     );
+}
+
+#[tokio::test]
+async fn management_catalog_preserves_receipts_and_busy_admission() {
+    let session = session().await;
+    let (stop, _) = watch::channel(false);
+    let shared = Arc::new(Shared {
+        management: Default::default(),
+        session: session.clone(),
+        token: "fixture".into(),
+        web_root: None,
+        submissions: Mutex::new((HashMap::new(), VecDeque::new())),
+        history: tokio::sync::Mutex::new(None),
+        stop,
+    });
+    let catalog = dispatch(&shared, "POST", "/models/list", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(catalog["providers"], json!(["fixture"]));
+    let request = json!({ "request_id": "refresh", "request": { "action": "refresh" } });
+    let first = dispatch(&shared, "POST", "/models/catalog", request.clone())
+        .await
+        .unwrap();
+    let run = first["run_id"].as_u64().unwrap();
+    assert_eq!(
+        session.wait(run).await.unwrap().into_result().unwrap()["status"],
+        "refresh"
+    );
+    assert_eq!(
+        dispatch(&shared, "POST", "/models/catalog", request)
+            .await
+            .unwrap(),
+        first
+    );
+    let waiting = session.submit("wait").unwrap();
+    let error = dispatch(
+        &shared,
+        "POST",
+        "/models/catalog",
+        json!({ "request_id": "busy", "request": { "action": "refresh" } }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "Unavailable");
+    session.cancel(waiting).unwrap();
+    session.wait(waiting).await.unwrap();
+    session.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn public_auth_route_refuses_secret_bodies_before_receipt_storage() {
+    let session = session().await;
+    let (stop, _) = watch::channel(false);
+    let shared = Arc::new(Shared {
+        management: Default::default(),
+        session: session.clone(),
+        token: "fixture".into(),
+        web_root: None,
+        submissions: Mutex::new((HashMap::new(), VecDeque::new())),
+        history: tokio::sync::Mutex::new(None),
+        stop,
+    });
+    let error = dispatch(
+        &shared,
+        "POST",
+        "/auth/start",
+        json!({
+            "request_id": "private",
+            "request": { "action": "input", "operation_id": "op", "api_key": "DO_NOT_PERSIST" },
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "InvalidInput");
+    assert!(shared.submissions.lock().unwrap().0.is_empty());
+    assert!(
+        !json!(session.events())
+            .to_string()
+            .contains("DO_NOT_PERSIST")
+    );
+    session.shutdown().await.unwrap();
+}
+
+#[test]
+fn reading_jsonl_is_read_only_and_retains_valid_prefix_and_unknown_content() {
+    let root = std::env::temp_dir().join(format!("eden-reading-{}.jsonl", std::process::id()));
+    std::fs::write(
+        &root,
+        concat!(
+            "{\"format\":\"eden-reading-v1\",\"restorable\":false}\n",
+            "{\"sequence\":3,\"run_id\":1,\"content\":{\"type\":\"message\",\"role\":\"assistant\"\
+             ,\"content\":[{\"type\":\"text\",\"text\":\"READING_MARKER\"}]}}\n",
+            "{\"content\":{\"type\":\"future\",\"visible\":\"FUTURE_MARKER\"}}\n",
+            "{broken"
+        ),
+    )
+    .unwrap();
+    let document = read_document(&root).unwrap();
+    assert!(document.history.is_empty());
+    assert_eq!(document.reading.as_ref().unwrap().entries.len(), 2);
+    assert!(document.reading.as_ref().unwrap().diagnostic.is_some());
+    assert!(eden_kernel::history::read(&root).is_err());
+    std::fs::remove_file(root).unwrap();
+}
+
+#[tokio::test]
+async fn detaching_frontend_cancels_pending_preview_and_observes_cleanup() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let cleaned = Arc::new(AtomicBool::new(false));
+    let session =
+        session_with_preview_barrier(Some((started.clone(), release.clone(), cleaned.clone())))
+            .await;
+    let (stop, _) = watch::channel(false);
+    let shared = Arc::new(Shared {
+        management: Default::default(),
+        session: session.clone(),
+        token: "fixture".into(),
+        web_root: None,
+        submissions: Mutex::new((HashMap::new(), VecDeque::new())),
+        history: tokio::sync::Mutex::new(None),
+        stop,
+    });
+    let attachment = dispatch(&shared, "POST", "/attach", json!({ "frontend": "tui" }))
+        .await
+        .unwrap()["attachment"]
+        .clone();
+    let preparing = shared.clone();
+    let owner = attachment.clone();
+    let task = tokio::spawn(async move {
+        dispatch(
+            &preparing,
+            "POST",
+            "/delivery/preview",
+            json!({ "request_id": "pending-preview", "attachment": owner, "selection": {} }),
+        )
+        .await
+    });
+    started.notified().await;
+    dispatch(
+        &shared,
+        "POST",
+        "/detach",
+        json!({ "attachment": attachment }),
+    )
+    .await
+    .unwrap();
+    let cleaned_before_ack = cleaned.load(Ordering::SeqCst);
+    release.notify_one();
+    let result = task.await.unwrap();
+    session.shutdown().await.unwrap();
+    assert!(
+        cleaned_before_ack,
+        "detach acknowledged before export cleanup"
+    );
+    assert!(result.is_err(), "detached preview retained a result");
+}
+#[test]
+fn unknown_history_version_keeps_the_source_visible() {
+    let path =
+        std::env::temp_dir().join(format!("eden-future-history-{}.jsonl", std::process::id()));
+    std::fs::write(
+        &path,
+        "{\"schema_version\":3,\"content\":\"UNIQUE_UNKNOWN_CONTENT\"}\n",
+    )
+    .unwrap();
+    let document = read_document(&path).unwrap();
+    assert!(document.reading.is_some());
+    assert!(
+        json!(document.reading)
+            .to_string()
+            .contains("UNIQUE_UNKNOWN_CONTENT")
+    );
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn detached_preview_receipt_does_not_retain_the_artifact() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    release.notify_one();
+    let session = session_with_preview_barrier(Some((
+        started,
+        release,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )))
+    .await;
+    let (stop, _) = watch::channel(false);
+    let shared = Arc::new(Shared {
+        management: Default::default(),
+        session: session.clone(),
+        token: "fixture".into(),
+        web_root: None,
+        submissions: Mutex::new((HashMap::new(), VecDeque::new())),
+        history: tokio::sync::Mutex::new(None),
+        stop,
+    });
+    let attachment = dispatch(&shared, "POST", "/attach", json!({ "frontend": "tui" }))
+        .await
+        .unwrap()["attachment"]
+        .clone();
+    dispatch(
+        &shared,
+        "POST",
+        "/delivery/preview",
+        json!({ "request_id": "finished-preview", "attachment": attachment, "selection": {} }),
+    )
+    .await
+    .unwrap();
+    dispatch(
+        &shared,
+        "POST",
+        "/detach",
+        json!({ "attachment": attachment }),
+    )
+    .await
+    .unwrap();
+    let receipt = dispatch(
+        &shared,
+        "POST",
+        "/request-status",
+        json!({ "request_id": "finished-preview" }),
+    )
+    .await
+    .unwrap();
+    session.shutdown().await.unwrap();
+    assert_eq!(receipt["result"]["Err"]["code"], "Cancelled");
+    assert!(!receipt.to_string().contains("application/x-ndjson"));
+}
+
+#[tokio::test]
+async fn lease_expiry_cleans_preview_before_reattachment_and_exit() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let cleaned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let session =
+        session_with_preview_barrier(Some((started.clone(), release.clone(), cleaned.clone())))
+            .await;
+    let (stop, _) = watch::channel(false);
+    let shared = Arc::new(Shared {
+        management: Default::default(),
+        session: session.clone(),
+        token: "fixture".into(),
+        web_root: None,
+        submissions: Mutex::new((HashMap::new(), VecDeque::new())),
+        history: tokio::sync::Mutex::new(None),
+        stop,
+    });
+    let old = dispatch(&shared, "POST", "/attach", json!({ "frontend": "tui" }))
+        .await
+        .unwrap()["attachment"]
+        .clone();
+    let preparing = shared.clone();
+    let owner = old.clone();
+    let mut task = tokio::spawn(async move {
+        dispatch(
+            &preparing,
+            "POST",
+            "/delivery/preview",
+            json!({ "request_id": "expired-preview", "attachment": owner, "selection": {} }),
+        )
+        .await
+    });
+    started.notified().await;
+    let sequence = session.presentation_snapshot().sequence;
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        session.presentation_changed(sequence),
+    )
+    .await
+    .unwrap();
+    assert!(
+        session
+            .presentation_heartbeat(old.as_u64().unwrap())
+            .is_err()
+    );
+    let automatic = tokio::time::timeout(Duration::from_secs(2), &mut task).await;
+    let automatically_cleaned = automatic.is_ok();
+    if !automatically_cleaned {
+        release.notify_one();
+        let _ = task.await;
+    }
+    let repeated = dispatch(&shared, "POST", "/detach", json!({ "attachment": old })).await;
+    let next = dispatch(&shared, "POST", "/attach", json!({ "frontend": "tui" }))
+        .await
+        .unwrap()["attachment"]
+        .clone();
+    dispatch(&shared, "POST", "/detach", json!({ "attachment": next }))
+        .await
+        .unwrap();
+    session.shutdown().await.unwrap();
+    assert!(
+        automatically_cleaned,
+        "expired attachment retained its pending preview"
+    );
+    assert!(repeated.is_ok(), "expired owner cleanup must be idempotent");
+    assert_ne!(old, next);
+    assert!(cleaned.load(std::sync::atomic::Ordering::SeqCst));
 }

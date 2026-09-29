@@ -51,6 +51,10 @@ pub struct State {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[allow(missing_docs)]
 pub struct Snapshot {
+    #[serde(default)]
+    pub reading: Option<eden_protocol::delivery::ReadingDocument>,
+    #[serde(default)]
+    pub diagnostic: Option<String>,
     pub presentation: presentation::Snapshot,
     pub state: State,
     pub history: Vec<Record>,
@@ -486,7 +490,12 @@ async fn call_with_deadlines(
     .map_err(|error| fault("OutputFailure", error.to_string()))?;
     // No background task owns this socket: dropping a cancelled wait closes the transport,
     // while execution remains owned by the host. Only terminal observation is unbounded.
-    if method == "POST" && route.split('?').next() == Some("/terminal") {
+    if method == "POST"
+        && matches!(
+            route.split('?').next(),
+            Some("/terminal" | "/configuration/wait")
+        )
+    {
         read_response(&mut stream).await
     } else {
         tokio::time::timeout(deadlines.io, read_response(&mut stream))

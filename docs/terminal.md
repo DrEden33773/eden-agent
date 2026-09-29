@@ -90,3 +90,49 @@ Complete `@session` in the composer, or use `/session`, to choose a saved source
 The preview shows a token estimate and estimated remaining capacity using the current model and resolved reserve. Unknown limits remain unknown; an over-budget or unsupported-image warning does not silently truncate, summarize or discard the selection. Press `i` to insert the owned snapshot, or Escape to cancel while preserving the composer. The shared sender validates the complete request and retains the draft when admission is rejected. `/references` reviews or removes attached snapshots; the footer shows their count. Frozen text, source identity, instruction snapshot and explicitly selected image bytes survive undo/redo, local draft recovery, uncertain submission recovery and queue withdrawal even if the source later changes or disappears.
 
 Reference detail preparation, line wrapping, full instruction comparison, budget estimation and snapshot freezing run in the background. Results are bound to the requested source and generation; cancelled or superseded results cannot replace the current picker. Resize reflows cached details in the background while input remains available.
+
+## Product management
+
+`/sessions` browses saved histories without opening writers. Results arrive incrementally; closing cancels the directory reader, and filtering or later batches preserve the selected identity. Choose name or modification-time sorting from the menu. Filter by typing; choose another directory explicitly to read outside the current project's `.eden/sessions`. Entries show damaged-history diagnostics and remain selectable for read-only inspection or source-preserving recovery. Select a history to resume without running a prompt, read it without plugins, rename/tag it, preview a fork/clone or delete it. Deletion requires confirmation of the selected identity and refuses an active writer. Fork opens the source tree so an earlier record or another branch can be selected without navigating the source. Fork/clone previews are bound to the original bytes; applying a stale preview fails. The current host and its accepted work survive a switch to another explicitly selected host. Selecting its history again verifies and reattaches that existing live owner. `/tree` navigates the current history, optionally summarizing first; shared Session admission rejects navigation while busy.
+
+`/models` distinguishes catalog visibility from configured access. Select a model to change requested thinking or save a global default; the result reports effective thinking. Cycle visits configured models. Refresh and source changes preserve a run's frozen target. Selection requires an idle session, matching `eden models select`. `/auth` starts browser/device or API-key flows, refreshes credentials, or logs out. The challenge menu offers the URL, code, expiry, browser opening, copying, private input, status and cancellation. Browser failures retain the copyable URL. Private input is cleared on submission and is never saved with a composer draft or public request receipt. After a lost private-input reply, inspect the original operation before entering material again.
+
+`/router` lists observed remote model state and supports search, download, load, unload, cancellation and reconnect. Admission is separate from completion. Unknown progress stays unknown, and cancelling a local operation does not claim that the remote action was rolled back. Reconnect observes the remote state without replaying a mutation.
+
+`/settings` selects the shared configuration form for an instance. `/plugins` also offers install/update, removal, composition resolution and instance replacement through the existing package and configuration services. Installation does not enable a package; building code requires its explicit build option. Replacement uses the reviewed configuration revision and the selected wait/cancel boundary. Schema-driven controls and the private-input channel retain the same revision, validation, preview and recovery behavior as `/config INSTANCE` and `/live`.
+
+`/resources` shows skills, templates and diagnostics and offers resource reload. `/trust` shows effective project trust and any startup override, then saves an explicit project decision. Startup trust flags retain precedence during the current host's lifetime. `/background` opens notes/cache-warmer configuration, observes warming status and auxiliary usage, cancels warming with cleanup, or enters the existing compaction/rebuild workflow. Neither optional plugin is enabled by opening a management view; cache benefits are not inferred from request counts.
+
+`/delivery` opens complete histories and reading JSONL as distinct read-only documents and prepares a filtered, fixed reading JSONL preview. Reading files cannot be resumed; selected tool-output text is decoded for reading, tool images use the same thumbnail path as conversation images, unknown or undecodable content remains visible as source, and damaged tails preserve the readable prefix with a diagnostic. The preview can be read in full, saved to a new file, discarded, or explicitly shared. Saving retains the same preview for a subsequent share. Leaving the workflow releases unused host previews, including late preparation replies. Saving and sharing consume the exact prepared bytes, even if the conversation grows. The share confirmation explains the secret-gist visibility. `/updates` separates installed-channel discovery, network checks, preparation and explicit activation; running sessions retain their bindings. `--offline-startup` suppresses automatic startup networking while keeping later explicit actions available.
+
+Management dialogs use the existing keyboard and mouse controls. Ctrl+S applies a form; Escape returns from a form or detail to its management menu, then closes the menu. Page Up/Down scroll complete operation details. Pending mutations keep their original request identity; Ctrl+R reconciles an uncertain public submission before resend. Late replies do not reopen a closed page or overwrite a different page.
+
+## CLI and terminal mapping
+
+| CLI surface | Terminal consumer |
+| --- | --- |
+| No prompt on an interactive stdin/stdout | Default Focus TUI |
+| Positional prompts, stdin, `--print`, `--json`, `--continue`, `--history`, RPC | Explicit batch/history/machine paths retain their existing behavior |
+| `--composition`, `--cwd`, `--global-dir`, repeatable `--env-file` | New/restored host startup; an explicit endpoint retains its existing host configuration |
+| `--session` / `--resume`, `--no-session`, `live`, `resume-live`, `tui --read`, `read` | Explicit new, resumed, attached or read-only session; `/sessions` manages saved histories |
+| `--model`, `--thinking`, `models`, `auth`, `router` | Startup selection; `/models`, `/auth`, `/router` for live management |
+| `--tools`, `--exclude-tools`, `--read-only` | Shared coding startup configuration and configuration forms; ordinary tool execution uses the same service decisions |
+| `--skill-path`, `--template-path`, `--no-context`, `--no-skills`, `--no-templates` | Shared resource discovery; composer completion, `/resources`, configuration and explicit reload |
+| `--trust-project`, `--no-trust-project` | Host-lifetime trust override; `/trust` inspects precedence and saves project decisions |
+| `--offline-startup`, `--no-update-check` | Shared startup maintenance; `/updates` performs later explicit actions |
+| `--attach`, `--image`, `--file` | Batch input remains explicit; TUI uses `/attach`, `@file`, clipboard and captured attachment snapshots |
+| `--color`, `NO_COLOR` | Local terminal color policy; `/style` changes display preferences |
+| `--quiet`, repeatable `--verbose` | CLI diagnostics; the detached host writes its diagnostics to its separate log |
+| `session` tree/branch/fork/clone/metadata, queue and shell | `/sessions`, `/tree`, `/queue`, `/queue-mode`, `/shell`, `!` and `!!` |
+| `resources`, `trust`, `package`, `config` | `/resources`, `/trust`, `/plugins`, `/settings` and the shared forms |
+| `export`, `share`, `update`, `read` | `/delivery`, `/updates` and explicit read-only file opening |
+
+Startup-only process paths, environment and composition selection remain explicit launch choices. Live configuration changes use the shared configuration service and its declared application boundary rather than mutating launch arguments.
+
+## Overlay replacement
+
+`EDEN_TUI_OVERLAY` selects an explicitly trusted native library exporting `eden_overlay_v1` from `eden-ui-sdk`. It receives the actual modal items, selection, query, masked field display values and semantic theme, and can render cells and map keys to validated host navigation. Host action targets and mouse hit regions remain authoritative. A rejected frame or event falls back to the built-in interface. The Overlay table has its own full-size header check; renderer/editor/theme/frontend replacements continue to load independently. No Rust framework value or allocator crosses these C tables.
+
+## Reproducing terminal measurements
+
+Build with `cargo build --release --locked -p eden-cli -p eden-terminal-editor`, then run `python3 scripts/measure-tui.py`. The POSIX probe opens isolated committed histories with 1k, 10k and 100k messages, measures host startup and the first observed 120×36 PTY frame, and samples 20 composer edits. Its JSON report includes input-to-observed-text timings, emitted bytes and Linux process peak memory. The observation loop has 2 ms resolution; freshly generated files use normal filesystem caching. Add `--records 100000 --no-color --search` to verify the long-history monochrome search path. These measurements do not include a physical display or IME, and no model or account is involved.

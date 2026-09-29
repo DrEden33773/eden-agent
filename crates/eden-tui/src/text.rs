@@ -401,6 +401,8 @@ fn render_message(m: &Message, width: usize, p: &Preferences, full: bool) -> Vec
             if !p.compact || m.before.is_some() || m.failed || m.pending {
                 let summary = if m.pending {
                     "Running…".to_owned()
+                } else if let Some(preview) = &m.preview {
+                    preview.clone()
                 } else if m.before.is_some() {
                     m.body.lines().next().unwrap_or("").to_owned()
                 } else if m.failed {

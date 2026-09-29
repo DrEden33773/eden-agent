@@ -34,6 +34,8 @@ pub struct Message {
     pub role: Role,
     pub title: String,
     pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
     pub expanded: bool,
     pub failed: bool,
     #[serde(default)]
@@ -57,6 +59,7 @@ impl Message {
             role,
             title: title.into(),
             body: body.into(),
+            preview: None,
             expanded: false,
             failed: false,
             pending: false,
@@ -84,7 +87,15 @@ pub struct Draft {
     pub attachments: Vec<Attachment>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ViewPosition {
+    pub anchor: Anchor,
+    pub follow: bool,
+    pub selected_record: Option<u64>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SavedDraft {
+    #[serde(default)]
+    pub positions: BTreeMap<String, ViewPosition>,
     #[serde(default)]
     pub sessions: BTreeMap<String, Draft>,
     pub version: u32,
@@ -175,6 +186,10 @@ impl Field {
 }
 #[derive(Clone, Debug)]
 pub enum Dialog {
+    Details {
+        title: String,
+        text: String,
+    },
     Palette {
         kind: String,
         query: String,
@@ -225,7 +240,7 @@ impl Default for Preferences {
         }
     }
 }
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Anchor {
     pub record: u64,
     pub line: usize,

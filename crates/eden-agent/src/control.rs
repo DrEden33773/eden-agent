@@ -15,6 +15,23 @@ pub struct SessionState {
     pub pending_inputs: usize,
 }
 impl Session {
+    /// Inspect or cancel the selected cache warmer through its ordinary scoped service.
+    /// Cancelling waits for the plugin's job cleanup; it does not stop foreground inference.
+    pub async fn cache_warmer(&self, cancel: bool) -> Result<serde_json::Value, Fault> {
+        self.service(
+            0,
+            "eden.cache-warmer.v1",
+            &serde_json::json!({
+                "op": if cancel {
+                        "cancel"
+                    } else {
+                        "status"
+                    },
+            }),
+        )
+        .await
+    }
+
     /// Inspect admission without contacting a provider or waiting for an active run.
     pub fn state(&self) -> SessionState {
         let state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());

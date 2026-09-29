@@ -547,6 +547,171 @@ pub fn artifacts(records: &[Record], message_id: u64) -> Vec<Artifact> {
         .unwrap_or_default()
 }
 
+/// Reading entries preserve their own display vocabulary without manufacturing history records.
+pub(crate) fn reading(document: &eden_protocol::delivery::ReadingDocument) -> Vec<Message> {
+    let mut messages = vec![];
+    for (index, entry) in document.entries.iter().enumerate() {
+        let content = if document.format == "eden-reading-v1" {
+            entry.get("content").unwrap_or(entry)
+        } else {
+            entry
+        };
+        let id = index as u64 + 1;
+        let (role, title, body): (Role, String, String) = match content["type"]
+            .as_str()
+            .filter(|_| document.format == "eden-reading-v1")
+        {
+            Some("message") => {
+                let mut visible = vec![];
+                let mut images = vec![];
+                if let Some(parts) = content["content"].as_array() {
+                    for part in parts {
+                        match serde_json::from_value::<Block>(part.clone()) {
+                            Ok(block) => {
+                                visible.push(blocks(std::slice::from_ref(&block)));
+                                if matches!(block, Block::Image { .. }) {
+                                    images.push(std::sync::Arc::new(block));
+                                }
+                            }
+                            Err(_) => {
+                                visible.push(serde_json::to_string_pretty(part).unwrap_or_default())
+                            }
+                        }
+                    }
+                } else {
+                    visible.push(
+                        serde_json::to_string_pretty(&content["content"]).unwrap_or_default(),
+                    );
+                }
+                let mut message = Message::new(
+                    id,
+                    match content["role"].as_str() {
+                        Some("user") => Role::User,
+                        Some("assistant") => Role::Assistant,
+                        _ => Role::Notice,
+                    },
+                    content["role"].as_str().unwrap_or("Message"),
+                    visible.join("\n"),
+                );
+                message.images = images;
+                messages.push(message);
+                continue;
+            }
+            Some("thinking") => (
+                Role::Thinking,
+                "Thinking".into(),
+                content["text"].as_str().unwrap_or("").into(),
+            ),
+            Some("tool_call") => (
+                Role::Tool,
+                content["name"].as_str().unwrap_or("Tool").into(),
+                serde_json::to_string_pretty(&content["arguments"]).unwrap_or_default(),
+            ),
+            Some("tool_result") => {
+                use base64::Engine;
+                let mut message = Message::new(
+                    id,
+                    Role::Tool,
+                    format!("Tool result {}", content["call_id"].as_str().unwrap_or("")),
+                    content["text"].as_str().unwrap_or(""),
+                );
+                let mut preview = content["text"]
+                    .as_str()
+                    .unwrap_or("Tool output")
+                    .lines()
+                    .next()
+                    .unwrap_or("Tool output")
+                    .to_owned();
+                if let Some(error) = content["error"].as_str() {
+                    preview.push_str(&format!("\n{}", error.lines().next().unwrap_or(error)));
+                }
+                message.preview = Some(preview);
+                message.failed = !content["error"].is_null()
+                    || content["exit_code"].as_i64().is_some_and(|code| code != 0);
+                for block in content["content"].as_array().into_iter().flatten() {
+                    if let Ok(block) = serde_json::from_value::<Block>(block.clone()) {
+                        if matches!(block, Block::Image { .. }) {
+                            message.images.push(std::sync::Arc::new(block));
+                        } else {
+                            message
+                                .body
+                                .push_str(&format!("\n{}", blocks(std::slice::from_ref(&block))));
+                        }
+                    }
+                }
+                for output in content["outputs"].as_array().into_iter().flatten() {
+                    let name = output["name"].as_str().unwrap_or("output");
+                    let media = output["media_type"]
+                        .as_str()
+                        .unwrap_or("application/octet-stream");
+                    if let Some(data) = output["data"].as_str()
+                        && let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data)
+                    {
+                        if media.starts_with("image/") {
+                            message.images.push(std::sync::Arc::new(Block::Image {
+                                media_type: media.into(),
+                                data: data.into(),
+                            }));
+                        } else if let Ok(text) = std::str::from_utf8(&bytes) {
+                            message
+                                .body
+                                .push_str(&format!("\n\nFull output: {name}\n{text}"));
+                        }
+                    }
+                }
+                // Retain the selected raw fields, including unknown or undecodable outputs.
+                message.body.push_str(&format!(
+                    "\n\nReading source\n{}",
+                    serde_json::to_string_pretty(content).unwrap_or_default()
+                ));
+                messages.push(message);
+                continue;
+            }
+            Some("presentation") => {
+                let snapshot = serde_json::json!({
+                    "version": 1,
+                    "session_id": 0,
+                    "sequence": 0,
+                    "views": [content["view"]],
+                    "activity": [],
+                    "pending_interactions": [],
+                });
+                if let Ok(snapshot) = eden_tui_client::decode_presentation(snapshot) {
+                    let mut lines = vec![];
+                    for view in snapshot.views {
+                        crate::forms::content(&view.view.nodes, &mut lines);
+                    }
+                    (Role::Notice, "Saved plugin view".into(), lines.join("\n"))
+                } else {
+                    (
+                        Role::Notice,
+                        "Saved plugin view".into(),
+                        content["view"]["fallback"]
+                            .as_str()
+                            .unwrap_or("Unsupported saved view")
+                            .into(),
+                    )
+                }
+            }
+            _ => (
+                Role::Notice,
+                "Reading source".into(),
+                serde_json::to_string_pretty(content).unwrap_or_default(),
+            ),
+        };
+        messages.push(Message::new(id, role, title, body));
+    }
+    if let Some(error) = &document.diagnostic {
+        messages.push(Message::new(
+            u64::MAX - 1,
+            Role::Notice,
+            "Reading diagnostic",
+            error,
+        ));
+    }
+    messages
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -786,5 +951,80 @@ mod tests {
             shell_streaming(&[events.clone(), events].concat(), &[7])[0].body,
             "中"
         );
+    }
+}
+
+#[cfg(test)]
+mod reading_fallback_tests {
+    #[test]
+    fn reading_tool_result_exposes_exported_full_text_images_and_failure() {
+        use base64::Engine;
+        let image = serde_json::json!({
+            "type": "image",
+            "media_type": "image/png",
+            "data": "aW1hZ2U=",
+        });
+        let document = eden_protocol::delivery::ReadingDocument {
+            format: "eden-reading-v1".into(),
+            entries: vec![serde_json::json!({
+                "content": {
+                    "type": "tool_result",
+                    "call_id": "tool",
+                    "text": "short preview",
+                    "content": [image],
+                    "error": "failure detail",
+                    "exit_code": 1,
+                    "outputs": [{
+                        "name": "stdout.txt",
+                        "media_type": "text/plain",
+                        "data":
+                            base64::engine::general_purpose::STANDARD.encode("FULL_OUTPUT_MARKER"),
+                    }],
+                },
+            })],
+            diagnostic: None,
+        };
+        let messages = super::reading(&document);
+        assert!(messages[0].body.contains("FULL_OUTPUT_MARKER"));
+        assert_eq!(messages[0].images.len(), 1);
+        assert!(messages[0].failed);
+        let collapsed =
+            crate::text::message_rows(&messages[0], 80, &crate::model::Preferences::default());
+        assert!(
+            collapsed
+                .iter()
+                .any(|row| row.text.contains("short preview"))
+        );
+    }
+    #[test]
+    fn unknown_document_format_keeps_the_entire_source_entry() {
+        let document = eden_protocol::delivery::ReadingDocument {
+            format: "history-source".into(),
+            entries: vec![serde_json::json!({ "schema_version": 3, "content": "SOURCE_MARKER" })],
+            diagnostic: None,
+        };
+        let rows = super::reading(&document);
+        assert!(rows[0].body.contains("schema_version"));
+        assert!(rows[0].body.contains("SOURCE_MARKER"));
+    }
+    #[test]
+    fn unknown_message_block_keeps_known_siblings_and_its_source() {
+        let reading = eden_protocol::delivery::ReadingDocument {
+            format: "eden-reading-v1".into(),
+            entries: vec![serde_json::json!({
+                "content": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "VISIBLE_SIBLING" },
+                        { "type": "future", "data": "UNKNOWN_SOURCE" }
+                    ],
+                },
+            })],
+            diagnostic: None,
+        };
+        let projected = super::reading(&reading);
+        assert!(projected[0].body.contains("VISIBLE_SIBLING"));
+        assert!(projected[0].body.contains("UNKNOWN_SOURCE"));
     }
 }

@@ -59,6 +59,7 @@ class Router:
         self.withhold_headers = False
         self.sse_entered = threading.Event()
         self.load_progress_sent = threading.Event()
+        self.load_progress_observed = threading.Event()
         self.errors: list[str] = []
         self.lock = threading.Lock()
         self.condition = threading.Condition(self.lock)
@@ -142,7 +143,10 @@ class Router:
                                 if (
                                     owner.polls[name] >= 3
                                     and not owner.hold
-                                    and (name != "event-load" or owner.load_progress_sent.is_set())
+                                    and (
+                                        name != "event-load"
+                                        or owner.load_progress_observed.is_set()
+                                    )
                                 ):
                                     current = owner.models[name]["status"]
                                     current["value"] = (
@@ -295,6 +299,52 @@ class Router:
         self.no_watchers()
 
 
+def run_observing_load(
+    command: list[str],
+    cwd: pathlib.Path,
+    environment: dict[str, str],
+    observed: threading.Event,
+    timeout: float,
+) -> subprocess.CompletedProcess[str]:
+    """Release remote completion only after the CLI actually publishes SSE progress."""
+    lines: list[str] = []
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as errors:
+        with subprocess.Popen(
+            command, cwd=cwd, env=environment, text=True, stdout=subprocess.PIPE, stderr=errors
+        ) as process:
+            assert process.stdout is not None
+            output = process.stdout
+
+            def consume() -> None:
+                for line in output:
+                    lines.append(line)
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        continue  # The caller still validates the complete JSON output.
+                    if (
+                        event.get("kind") == "model_management"
+                        and event["payload"].get("model") == "event-load"
+                        and event["payload"].get("status") == "loading"
+                        and event["payload"].get("progress") == 0.4
+                    ):
+                        observed.set()
+
+            reader = threading.Thread(target=consume)
+            reader.start()
+            try:
+                process.wait(timeout=timeout)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+                reader.join()
+            errors.seek(0)
+            return subprocess.CompletedProcess(
+                command, process.returncode, "".join(lines), errors.read()
+            )
+
+
 def main() -> None:
     prepare()
     destination = installed(ROOT / "artifacts/router-models-install")
@@ -349,15 +399,21 @@ def main() -> None:
                 success: bool = True,
                 error_contains: str | None = None,
                 timeout: float = 45,
+                observe_load: bool = False,
             ) -> list[dict[str, Any]]:
-                done = subprocess.run(
-                    command(args),
-                    cwd=caller,
-                    env=environment,
-                    text=True,
-                    capture_output=True,
-                    timeout=timeout,
-                )
+                if observe_load:
+                    done = run_observing_load(
+                        command(args), caller, environment, router.load_progress_observed, timeout
+                    )
+                else:
+                    done = subprocess.run(
+                        command(args),
+                        cwd=caller,
+                        env=environment,
+                        text=True,
+                        capture_output=True,
+                        timeout=timeout,
+                    )
                 assert SECRET not in done.stdout + done.stderr
                 assert "\x1b" not in done.stdout
                 assert (done.returncode == 0) == success, (args, done.stdout, done.stderr)
@@ -425,7 +481,7 @@ def main() -> None:
                 assert any(e.get("progress") == 0.25 for e in progress), events
                 assert router.models["shared"]["status"]["value"] == "loaded"
                 results[action] = {"accepted_and_progress": True, "shared_kept": True}
-            events = invoke(["--json", "router", "load", "event-load"])
+            events = invoke(["--json", "router", "load", "event-load"], observe_load=True)
             assert events[-1]["status"] == "completed", events
             assert any(
                 event.get("kind") == "model_management"

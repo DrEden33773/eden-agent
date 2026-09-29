@@ -66,6 +66,8 @@ enum PasteTarget {
     },
 }
 pub struct App {
+    pub(crate) switch_endpoint: Option<PathBuf>,
+    pub(crate) management: crate::management::Management,
     pub references: Vec<std::sync::Arc<eden_protocol::session_reference::Reference>>,
     pub reference_picker: crate::references::Picker,
     pub context: crate::context::Context,
@@ -128,16 +130,17 @@ pub struct App {
     activity_sent: Instant,
     attachment_generation: u64,
     attachment_pending: usize,
-    endpoint: PathBuf,
-    tx: mpsc::Sender<Update>,
+    pub(crate) endpoint: PathBuf,
+    pub(crate) tx: mpsc::Sender<Update>,
     rx: mpsc::Receiver<Update>,
-    runtime: tokio::runtime::Handle,
-    pending: Option<(String, Value, Draft)>,
-    uncertain: Option<(String, Value, Draft)>,
+    pub(crate) runtime: tokio::runtime::Handle,
+    pub(crate) pending: Option<(String, Value, Draft)>,
+    pub(crate) uncertain: Option<(String, Value, Draft)>,
     sessions: BTreeMap<String, Draft>,
+    positions: BTreeMap<String, ViewPosition>,
     resources: eden_protocol::resources::Snapshot,
     commands: Vec<eden_protocol::resources::CommandDefinition>,
-    form_target: Option<crate::forms::Target>,
+    pub(crate) form_target: Option<crate::forms::Target>,
     form_retry: Option<(String, Value, crate::forms::Target)>,
     form_applied: bool,
     form_refresh: Option<Vec<u64>>,
@@ -145,9 +148,21 @@ pub struct App {
     form_drafts: BTreeMap<String, (crate::forms::Target, Dialog)>,
     pub theme: Option<crate::extensions::Theme>,
     pub renderer: Option<crate::extensions::Renderer>,
+    pub overlay: Option<crate::extensions::Overlay>,
 }
 pub fn project_messages(snapshot: &Snapshot) -> Vec<Message> {
     let mut messages = crate::projection::history(&snapshot.history);
+    if let Some(reading) = &snapshot.reading {
+        messages.extend(crate::projection::reading(reading));
+    }
+    if let Some(diagnostic) = &snapshot.diagnostic {
+        messages.push(Message::new(
+            u64::MAX - 1,
+            Role::Notice,
+            "History diagnostic",
+            diagnostic,
+        ));
+    }
     messages.extend(crate::projection::streaming_with_history(
         &snapshot.events,
         snapshot.state.active_run,
@@ -176,6 +191,11 @@ impl App {
             .as_ref()
             .map(|s| s.sessions.clone())
             .unwrap_or_default();
+        let positions = loaded
+            .as_ref()
+            .map(|s| s.positions.clone())
+            .unwrap_or_default();
+        let position: Option<ViewPosition> = positions.get(&session).cloned();
         let uncertain = loaded
             .as_ref()
             .filter(|s| s.session == session)
@@ -188,6 +208,8 @@ impl App {
             PathBuf::from(&snapshot.state.cwd)
         };
         let mut app = Self {
+            switch_endpoint: None,
+            management: Default::default(),
             references: vec![],
             reference_picker: Default::default(),
             context: Default::default(),
@@ -257,6 +279,7 @@ impl App {
             pending: None,
             uncertain,
             sessions,
+            positions,
             resources: Default::default(),
             commands: vec![],
             form_target: None,
@@ -268,13 +291,29 @@ impl App {
             theme: std::env::var_os("EDEN_TUI_THEME")
                 .map(|p| crate::extensions::Theme::load(Path::new(&p)))
                 .transpose()?,
+            overlay: std::env::var_os("EDEN_TUI_OVERLAY")
+                .map(|p| crate::extensions::Overlay::load(Path::new(&p)))
+                .transpose()?,
             renderer: std::env::var_os("EDEN_TUI_RENDERER")
                 .map(|p| crate::extensions::Renderer::load(Path::new(&p)))
                 .transpose()?,
         };
         app.project();
-        app.dispatch("/resources", Value::Null);
-        app.dispatch("/commands", Value::Null);
+        if let Some(position) = position {
+            app.anchor = position.anchor;
+            app.follow = position.follow;
+            if let Some(index) = app
+                .messages
+                .iter()
+                .position(|message| Some(message.id) == position.selected_record)
+            {
+                app.selected = index;
+            }
+        }
+        if !app.read_only {
+            app.dispatch("/resources", Value::Null);
+            app.dispatch("/commands", Value::Null);
+        }
         Ok(app)
     }
     fn project(&mut self) {
@@ -422,7 +461,7 @@ impl App {
             self.checkpoint.cursor = next.cursor;
         }
 
-        if self.dialog.is_none() {
+        if self.dialog.is_none() && !self.read_only {
             self.activity = Some((
                 eden_protocol::presentation::ActivityTarget::Composer,
                 Instant::now(),
@@ -436,9 +475,18 @@ impl App {
             return;
         }
         let draft = self.draft();
+        self.positions.insert(
+            self.session.clone(),
+            ViewPosition {
+                anchor: self.anchor,
+                follow: self.follow,
+                selected_record: self.messages.get(self.selected).map(|message| message.id),
+            },
+        );
         self.sessions.insert(self.session.clone(), draft.clone());
         if let Some(store) = &self.store {
             store.save(SavedDraft {
+                positions: self.positions.clone(),
                 version: 1,
                 session: self.session.clone(),
                 frontend: self.frontend.clone(),
@@ -474,7 +522,7 @@ impl App {
                 .as_nanos()
         )
     }
-    fn request(&mut self, route: &str, mut body: Value, consume: bool) {
+    pub(crate) fn request(&mut self, route: &str, mut body: Value, consume: bool) {
         if self.pending.is_some() {
             self.notice = "A submission is pending; draft retained".into();
             return;
@@ -694,6 +742,10 @@ impl App {
                     body,
                     result,
                 } => {
+                    if body["management"].is_u64() {
+                        self.management_reply(&route, &body, result);
+                        continue;
+                    }
                     if route.starts_with("/session/")
                         || route == "/reference/preview"
                         || (route == "/context/inspect" && body["reference_budget"].is_boolean())
@@ -995,6 +1047,13 @@ impl App {
         }
     }
     pub fn open(&mut self, kind: &str) {
+        if !kind.starts_with("manage:") {
+            self.release_management_preview();
+            self.cancel_management_scan();
+            self.management.generation += 1;
+            self.management.form = None;
+            self.management.page.clear();
+        }
         self.clipboard_generation += 1;
         self.end_activity();
         self.autocomplete.dismiss();
@@ -1014,6 +1073,7 @@ impl App {
     }
     pub fn choices(&self, kind: &str, query: &str) -> Vec<(String, String)> {
         let all: Vec<(String, String)> = match kind {
+            kind if kind.starts_with("manage:") => self.management_choices(&kind[7..]),
             "search" => self
                 .messages
                 .iter()
@@ -1202,6 +1262,11 @@ impl App {
         let (name, args) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
         match name {
             "/session" => self.open_references(None, false),
+            "/sessions" => self.open_management("sessions"),
+            "/models" | "/auth" | "/router" | "/resources" | "/plugins" | "/settings" | "/tree"
+            | "/delivery" | "/updates" | "/background" | "/trust" => {
+                self.open_management(&name[1..])
+            }
             "/references" => self.open_references(None, true),
             "/context" => self.open_context(),
             "/compact" => self.open_context_management(false),
@@ -1354,6 +1419,7 @@ impl App {
             .map(|m| m.body.clone());
     }
     pub fn scroll(&mut self, delta: isize) {
+        self.saved = false;
         if self.focus == Focus::Inspector {
             self.inspector_scroll = self.inspector_scroll.saturating_add_signed(delta);
             return;
@@ -1371,6 +1437,7 @@ impl App {
         }
     }
     pub fn bottom(&mut self) {
+        self.saved = false;
         self.follow = true;
         self.unseen = 0;
         self.focus = Focus::Editor;
@@ -1531,9 +1598,28 @@ impl App {
             field.choose(index);
         }
     }
-    pub fn dialog_key(&mut self, key: KeyEvent) {
+    pub fn dialog_key(&mut self, mut key: KeyEvent) {
+        if let Some(overlay) = &mut self.overlay
+            && let Some(code) = overlay.key(key)
+        {
+            key.code = code;
+            key.modifiers = KeyModifiers::NONE;
+        }
         self.clipboard_generation += 1;
         if key.code == KeyCode::Esc {
+            if matches!(&self.dialog,Some(Dialog::Palette{kind,..}) if matches!(kind.as_str(),"manage:export-preview"|"manage:copy-preview"))
+            {
+                self.release_management_preview();
+            }
+            self.cancel_management_scan();
+            let management_back = !self.management.page.is_empty()
+                && matches!(
+                    self.dialog,
+                    Some(Dialog::Details { .. } | Dialog::Form { .. })
+                )
+                && self.form_target.is_none();
+            self.management.generation += 1;
+            self.management.form = None;
             if let Some(mut dialog) = self.dialog.take()
                 && let Dialog::Form { fields, .. } = &mut dialog
             {
@@ -1547,6 +1633,9 @@ impl App {
                         (target.clone(), dialog),
                     );
                 }
+            }
+            if management_back {
+                self.open(&format!("manage:{}", self.management.page));
             }
             return;
         }
@@ -1589,7 +1678,7 @@ impl App {
             return;
         };
         match &mut dialog {
-            Dialog::Help => {
+            Dialog::Help | Dialog::Details { .. } => {
                 if key.code == KeyCode::PageDown {
                     self.dialog_scroll += 10
                 } else if key.code == KeyCode::PageUp {
@@ -1664,6 +1753,7 @@ impl App {
     }
     fn choose(&mut self, kind: &str, id: &str) {
         match kind {
+            kind if kind.starts_with("manage:") => self.choose_management(&kind[7..], id),
             "resolve-request" => {
                 if self.uncertain_checked {
                     if id == "keep" {
@@ -1969,6 +2059,12 @@ impl App {
         }
     }
     fn submit_form(&mut self, action: &str) {
+        if self.management.form.is_some() {
+            if action == "apply" {
+                self.submit_management();
+            }
+            return;
+        }
         self.rebind_applied_form();
         if self.form_retry.is_some() {
             self.notice = "Form request pending · Ctrl+R recovers the original request".into();
@@ -3404,5 +3500,58 @@ mod reference_draft_tests {
             app.tick();
             assert_eq!(app.references.is_empty(), !edit_while_pending);
         }
+    }
+}
+
+#[cfg(test)]
+mod view_position_tests {
+    use super::*;
+    #[tokio::test]
+    async fn reopening_selected_session_restores_its_reading_anchor_with_its_draft() {
+        let mut original = tests::app();
+        let directory = std::env::temp_dir().join(original.id());
+        original.frontend = "view-position".into();
+        original.store = Some(DraftStore::new(&directory, "view-position").unwrap());
+        original.editor.restore("unsubmitted", 11).unwrap();
+        original.anchor = Anchor {
+            record: 1,
+            line: 2,
+            byte: 8,
+        };
+        original.follow = false;
+        original.saved = false;
+        original.persist();
+        let snapshot = original.snapshot.clone();
+        drop(original);
+        let executable = std::env::current_exe().unwrap();
+        let plugin = executable.parent().unwrap().parent().unwrap().join(format!(
+            "{}eden_terminal_editor{}",
+            std::env::consts::DLL_PREFIX,
+            std::env::consts::DLL_SUFFIX
+        ));
+        let (tx, rx) = mpsc::channel();
+        let mut reopened = App::new(
+            &plugin,
+            Some(&directory),
+            "view-position",
+            Path::new("missing"),
+            snapshot,
+            tx,
+            rx,
+        )
+        .unwrap();
+        assert_eq!(
+            reopened.anchor,
+            Anchor {
+                record: 1,
+                line: 2,
+                byte: 8
+            }
+        );
+        assert!(!reopened.follow);
+        reopened.restore_recovery();
+        assert_eq!(reopened.editor.text(), "unsubmitted");
+        drop(reopened);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

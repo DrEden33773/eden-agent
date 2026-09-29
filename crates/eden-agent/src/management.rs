@@ -660,7 +660,12 @@ impl Session {
         )
         .await
     }
-    /// The directory this session runs in.
+    /// Identify the durable writer owned by this Session for explicit frontend reattachment.
+    /// Memory sessions have no saved history path.
+    pub fn history_path(&self) -> Option<&Path> {
+        self.0.history_path.as_deref()
+    }
+    /// The authoritative working directory recorded for this Session.
     pub fn cwd(&self) -> &str {
         &self.0.cwd
     }

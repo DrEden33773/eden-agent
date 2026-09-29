@@ -92,7 +92,7 @@ impl Drop for Follower {
     }
 }
 /// Attach one terminal to the explicit host. Detaching leaves accepted work running.
-pub async fn run(options: Options) -> Result<i32, Box<dyn std::error::Error>> {
+pub async fn run(mut options: Options) -> Result<i32, Box<dyn std::error::Error>> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err(
             "interactive frontend requires terminal stdin and stdout; use --print or --json".into(),
@@ -111,37 +111,45 @@ pub async fn run(options: Options) -> Result<i32, Box<dyn std::error::Error>> {
                 "editor": options.editor,
                 "renderer": std::env::var_os("EDEN_TUI_RENDERER"),
                 "theme": std::env::var_os("EDEN_TUI_THEME"),
+                "overlay": std::env::var_os("EDEN_TUI_OVERLAY"),
             },
         }));
     }
-    let identity = HostClient::new(&options.endpoint)
-        .snapshot()
-        .await?
-        .presentation
-        .session_id;
-    let client = HostClient::for_session(&options.endpoint, identity);
-    let lease = Arc::new(AtomicU64::new(client.attach("tui").await?));
-    let result = run_attached(&options, client.clone(), lease.clone()).await;
-    let _ = tokio::time::timeout(
-        Duration::from_secs(1),
-        client.detach(lease.load(Ordering::Relaxed)),
-    )
-    .await;
-    match result {
-        Ok(code) => {
-            if options.endpoint.exists() {
-                println!(
-                    "Resume: eden tui --endpoint {} --frontend {} --editor {}",
-                    shell_word(&options.endpoint.to_string_lossy()),
-                    shell_word(&options.frontend),
-                    shell_word(&options.editor.to_string_lossy())
-                );
-            }
-            Ok(code)
+    let prior = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore();
+        prior(info)
+    }));
+    loop {
+        let identity = HostClient::new(&options.endpoint)
+            .snapshot()
+            .await?
+            .presentation
+            .session_id;
+        let client = HostClient::for_session(&options.endpoint, identity);
+        let lease = Arc::new(AtomicU64::new(client.attach("tui").await?));
+        let result = run_attached(&options, client.clone(), lease.clone()).await;
+        let detached = client.detach(lease.load(Ordering::Relaxed)).await;
+        if options.endpoint.exists() {
+            detached?;
         }
-        Err(error) => Err(error),
+        let (code, next) = result?;
+        if let Some(endpoint) = next {
+            options.endpoint = endpoint;
+            continue;
+        }
+        if options.endpoint.exists() {
+            println!(
+                "Resume: eden tui --endpoint {} --frontend {} --editor {}",
+                shell_word(&options.endpoint.to_string_lossy()),
+                shell_word(&options.frontend),
+                shell_word(&options.editor.to_string_lossy())
+            );
+        }
+        return Ok(code);
     }
 }
+
 fn shell_word(value: &str) -> String {
     if cfg!(windows) {
         format!("'{}'", value.replace('\'', "''"))
@@ -154,7 +162,7 @@ async fn run_attached(
     options: &Options,
     client: HostClient,
     lease: Arc<AtomicU64>,
-) -> Result<i32, Box<dyn std::error::Error>> {
+) -> Result<(i32, Option<PathBuf>), Box<dyn std::error::Error>> {
     let snapshot = client.snapshot().await?;
     let client = HostClient::for_session(&options.endpoint, snapshot.presentation.session_id);
     let (tx, rx) = mpsc::channel();
@@ -234,12 +242,10 @@ async fn run_attached(
                 app.notice = "Invalid UI settings · previous preferences retained".into();
             }
         }
-        let prior = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            restore();
-            prior(info)
-        }));
         let result = drive(&mut app, options, &preferences);
+        app.cancel_management_scan();
+        app.release_management_preview();
+        app.saved = false;
         app.persist();
         result
     })
@@ -248,7 +254,7 @@ fn drive(
     app: &mut App,
     options: &Options,
     preferences: &Path,
-) -> Result<i32, Box<dyn std::error::Error>> {
+) -> Result<(i32, Option<PathBuf>), Box<dyn std::error::Error>> {
     let mut modes = Some(Modes::enter(app.preferences.mouse)?);
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let mut geometry = view::Geometry::default();
@@ -359,7 +365,7 @@ fn drive(
     }
     kitty.clear(&mut io::stdout())?;
     drop(modes);
-    Ok(0)
+    Ok((0, app.switch_endpoint.take()))
 }
 fn external_editor(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
     let original = app.draft();

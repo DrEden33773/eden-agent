@@ -51,6 +51,10 @@ impl Session {
     pub fn presentation_heartbeat(&self, attachment: u64) -> Result<(), Fault> {
         self.0.presentation.heartbeat(attachment)
     }
+    /// Await expiry or explicit detach so adapters can dispose only frontend-owned work.
+    pub async fn wait_presentation_detach(&self, attachment: u64) {
+        self.0.presentation.wait_for_detach(attachment).await;
+    }
     /// Detach a frontend and clear its transient input activity without cancelling its run.
     pub fn detach_presentation(&self, attachment: u64) -> Result<(), Fault> {
         self.0.presentation.detach(attachment)

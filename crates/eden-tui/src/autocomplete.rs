@@ -182,6 +182,21 @@ pub fn commands() -> Vec<Candidate> {
     [
         ("help", "Keyboard shortcuts"),
         ("session", "Insert a frozen session quotation"),
+        ("sessions", "Browse saved sessions"),
+        ("tree", "Navigate the current session tree"),
+        ("models", "Select a model and thinking effort"),
+        ("auth", "Manage private provider authentication"),
+        ("router", "Manage local router models"),
+        ("settings", "Configure shared plugin instances"),
+        ("plugins", "Manage installed plugins"),
+        ("resources", "Inspect and reload skills and templates"),
+        ("delivery", "Preview, save and explicitly share JSONL"),
+        (
+            "updates",
+            "Inspect and explicitly update installed packages",
+        ),
+        ("background", "Manage notes and cache warming"),
+        ("trust", "Inspect and save project trust"),
         ("references", "Review or remove draft session references"),
         ("context", "Inspect and edit shared model input"),
         (

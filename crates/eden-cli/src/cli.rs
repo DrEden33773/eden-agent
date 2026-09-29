@@ -36,7 +36,7 @@ pub struct Parsed {
 
 /// The whole command tree. Global arguments are accepted in every position;
 /// with no family, the positional prompt is what the process runs.
-#[derive(Debug, Parser)]
+#[derive(Clone, Debug, Parser)]
 #[command(
     name = "eden",
     version,
@@ -154,7 +154,7 @@ pub struct Cli {
 }
 
 /// The command families `eden` accepts.
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum Family {
     /// Export a selected reading copy without loading the original conversation plugins
     Export {
@@ -318,7 +318,7 @@ pub enum Family {
 }
 
 /// Ordinary edits use the SDK's recursive object merge and whole-array replacement.
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct ConfigChangeArgs {
     /// Stable instance id from config inspect
     pub instance: String,
@@ -334,7 +334,7 @@ pub struct ConfigChangeArgs {
 }
 
 /// Management operations retain their own identity independently of conversation runs.
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum ConfigAction {
     /// Show redacted effective configuration, sources, revisions and application metadata
     Inspect,
@@ -367,7 +367,7 @@ pub enum ConfigAction {
 }
 
 /// Actions of the `trust` family: record, withdraw or inspect project trust.
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum TrustAction {
     /// Trust a project directory
     Allow {
@@ -390,14 +390,14 @@ pub enum TrustAction {
 }
 
 /// Actions of the `resources` family.
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum ResourcesAction {
     /// Print the resource snapshot a session would load
     List,
 }
 
 /// Actions of the `package` family.
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum PackageAction {
     /// Install a package from a local directory, archive or --source-json
     Install {
@@ -433,7 +433,7 @@ pub enum PackageAction {
 
 /// Actions of the `history` family, which read a public history file without
 /// loading a storage or business plugin.
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum HistoryAction {
     /// Print every stored record as a JSON line
     Inspect {
@@ -450,7 +450,7 @@ pub enum HistoryAction {
 }
 
 /// Arguments shared by every copy action of the session family.
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct CopyArgs {
     /// Existing history file
     pub source: PathBuf,
@@ -463,7 +463,7 @@ pub struct CopyArgs {
 
 /// Actions of the `session` family. Copy actions share [`CopyArgs`] and preview
 /// unless `--apply` is written.
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum SessionAction {
     /// Print session identity, head and branch state
     Info {
@@ -602,7 +602,7 @@ pub enum SessionAction {
 }
 
 /// Model management shares the session and catalog services used by inference.
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum ModelAction {
     /// List model identities, capabilities and availability as JSON
     List,
@@ -639,7 +639,7 @@ pub enum ModelAction {
     Cycle,
 }
 /// Secret input is read from stdin, never accepted as a command-line argument.
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum AuthAction {
     /// Sign in interactively using a provider's browser or device flow
     Login {
@@ -1014,7 +1014,7 @@ mod tests {
 }
 
 /// Remote mutations wait for completion; Ctrl-C requests remote stop before exiting.
-#[derive(Debug, Subcommand)]
+#[derive(Clone, Debug, Subcommand)]
 pub enum RouterAction {
     /// List the router's observed models and lifecycle state
     List,

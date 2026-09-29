@@ -1146,6 +1146,7 @@ pub(crate) mod tests {
                 .any(|b| matches!(b, Block::Image { .. }))
         );
         let saved = crate::model::SavedDraft {
+            positions: Default::default(),
             version: 1,
             session: app.session.clone(),
             frontend: "reference-test".into(),

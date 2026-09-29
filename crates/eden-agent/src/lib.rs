@@ -3,6 +3,8 @@ pub use eden_kernel::history;
 use eden_kernel::{Events, Kernel};
 mod attempts;
 mod control;
+mod session_directory;
+pub use session_directory::{SavedSession, SavedSessionScan};
 pub mod delivery;
 pub mod embedded;
 mod interaction;

@@ -78,7 +78,7 @@ class Browser:
             capture_output=True,
             text=True,
             check=False,
-            timeout=25,
+            timeout=60 if args and args[0] == "open" else 25,
         )
         assert result.returncode == 0, (args, result.stdout, result.stderr)
         value = json.loads(result.stdout)
@@ -100,10 +100,21 @@ class Browser:
         self.run("find", "label", label, "fill", value, "--exact")
 
     def action(self, instance: str, action: str) -> None:
-        # Native buttons still run the real React handler; no transport is replaced.
-        self.evaluate(
-            f"Array.from(document.querySelectorAll('form.configuration')).find(form => form.innerText.includes('Instance {instance} ·')).querySelectorAll('button') && Array.from(Array.from(document.querySelectorAll('form.configuration')).find(form => form.innerText.includes('Instance {instance} ·')).querySelectorAll('button')).find(button => button.textContent === {json.dumps(action)}).click()"
+        # Observe the real fetch completion; an absent pending label before React's
+        # first render is not evidence that the requested action has settled.
+        started = self.evaluate(
+            f"(() => {{ const form = Array.from(document.querySelectorAll('form.configuration')).find(form => form.innerText.includes('Instance {instance} ·')); const button = Array.from(form.querySelectorAll('button')).find(button => button.textContent === {json.dumps(action)}); if (button.disabled) return null; performance.clearResourceTimings(); const started = performance.now(); button.click(); return started; }})()"
         )
+        if started is not None and action in {
+            "validate",
+            "preview",
+            "apply",
+            "refresh",
+            "cancel_apply",
+        }:
+            self.wait(
+                f"performance.getEntriesByType('resource').some(entry => entry.startTime >= {started} && ['/action', '/private-input'].includes(new URL(entry.name).pathname))"
+            )
         self.wait('!document.body.innerText.includes("Configuration request pending…")')
 
     def fill_field(self, instance: str, path: str, value: str) -> None:
@@ -128,116 +139,69 @@ class Browser:
 
 
 class Terminal:
-    """Send keys to the installed adapter through a real PTY and retain its output."""
+    """Navigate official plugin dialogs while keeping D2 assertions on host facts."""
 
     def __init__(self, binary: pathlib.Path, endpoint_file: pathlib.Path, endpoint: dict):
-        import fcntl
-        import pty
-        import struct
-        import termios
+        from tui_pty import Terminal as PtyTerminal
 
         self.endpoint = endpoint
-        self.output = bytearray()
+        self.driver = PtyTerminal(binary, endpoint_file, width=180, height=50)
+        self.output = self.driver.output
         self.focus: tuple[str, str] | None = None
-        self.master, slave = pty.openpty()
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 180, 0, 0))
-        self.process = subprocess.Popen(
-            [binary, "live-tui", "--endpoint", endpoint_file],
-            stdin=slave,
-            stdout=slave,
-            stderr=subprocess.PIPE,
-            env={**os.environ, "TERM": "xterm-256color"},
-        )
-        os.close(slave)
-        self.drain(1.0)
+        self.instance: str | None = None
+        self.selected = 0
+        self.driver.wait("Connected")
 
     def drain(self, seconds: float = 0.35) -> None:
-        import select
-
-        deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline:
-            ready, _, _ = select.select([self.master], [], [], 0.05)
-            if ready:
-                try:
-                    self.output.extend(os.read(self.master, 65536))
-                except OSError:
-                    break
-        assert self.process.poll() is None, self.process.communicate()
+        self.driver.read(seconds)
+        assert self.driver.process.poll() is None, self.display
 
     def keys(self, value: bytes) -> None:
-        os.write(self.master, value)
-        self.drain()
+        self.driver.send(value)
 
     def field(self, instance: str, path: str) -> None:
-        choices: list[tuple[str, str] | None] = [None]
-        for view in call(self.endpoint, "/snapshot")["presentation"]["views"]:
-            if not view["active"]:
-                continue
-            for node in nodes(view["nodes"]):
-                if node["kind"] == "configuration_form":
-                    choices.extend(
-                        (node["binding"]["instance"], field["path"]) for field in node["fields"]
-                    )
-                elif node["kind"] == "form" and node["action"] not in view.get(
-                    "handled_actions", []
-                ):
-                    choices.extend((view["id"], field["id"]) for field in node["fields"])
-                elif node["kind"] == "button" and node["action"] not in view.get(
-                    "handled_actions", []
-                ):
-                    choices.append((view["id"], node["action"]))
-        old = choices.index(self.focus) if self.focus in choices else 0
-        new = choices.index((instance, path))
-        self.keys(b"\t" * ((new - old) % len(choices)))
+        view, node = form(self.endpoint, instance)
+        paths = [field["path"] for field in node["fields"]]
+        if self.instance != instance:
+            if self.instance is not None:
+                self.keys(b"\x1b")
+            self.driver.command("/live")
+            self.driver.wait("Plugin views")
+            entries = [
+                (candidate["owner"], candidate["id"], item["id"])
+                for candidate in call(self.endpoint, "/snapshot")["presentation"]["views"]
+                for item in nodes(candidate["nodes"])
+                if item["kind"] in ("configuration_form", "form", "button")
+            ]
+            index = entries.index((view["owner"], view["id"], node["id"]))
+            self.keys(b"\x1b[B" * index + b"\r")
+            self.driver.wait("Ctrl+S Apply")
+            self.instance, self.selected = instance, 0
+        new = paths.index(path)
+        self.keys(b"\t" * ((new - self.selected) % len(paths)))
+        self.selected = new
         self.focus = (instance, path)
 
     def edit(self, instance: str, path: str, value: str) -> None:
         self.field(instance, path)
-        self.keys(b"\x15" + value.encode())  # Ctrl+u clears the current typed input.
+        self.keys(b"\x15" + value.encode())
 
     @property
     def display(self) -> str:
-        # Reconstruct only the CSI cursor/erase vocabulary emitted by Ratatui, as in
-        # live_tui_pty.py. Read the accumulated stream so split UTF-8/CSI writes stay intact.
-        cells = [[" "] * 180 for _ in range(50)]
-        row = column = 0
-        for token in re.findall(
-            r"\x1b\[[0-?]*[ -/]*[@-~]|[^\x1b]+", self.output.decode("utf-8", errors="replace")
-        ):
-            if token.startswith("\x1b["):
-                arguments, command = token[2:-1], token[-1]
-                if command == "H":
-                    parts = arguments.split(";")
-                    row = int(parts[0] or "1") - 1
-                    column = int(parts[1] or "1") - 1 if len(parts) > 1 else 0
-                elif command == "J" and arguments == "2":
-                    cells = [[" "] * 180 for _ in range(50)]
-                elif command == "K" and 0 <= row < 50:
-                    cells[row][column:] = [" "] * (180 - column)
-            else:
-                for character in token:
-                    if character == "\r":
-                        column = 0
-                    elif character == "\n":
-                        row += 1
-                    elif character >= " ":
-                        if 0 <= row < 50 and 0 <= column < 180:
-                            cells[row][column] = character
-                        column += 1
-        return "\n".join("".join(row) for row in cells)
+        return self.driver.display
 
     def action(self, key: bytes) -> None:
         self.keys(key)
-        deadline = time.monotonic() + 20
-        while "Request pending" in self.display and time.monotonic() < deadline:
-            self.drain(0.1)
-        assert "Request pending" not in self.display, self.display
+        if key == b"\x04":
+            self.selected = 0
+            self.focus = None
+        self.drain()
 
     def close(self, output: pathlib.Path) -> None:
-        output.write_bytes(self.output)
-        self.keys(b"\x11")  # Ctrl+q detaches without ending the host session.
-        self.process.wait(timeout=5)
-        os.close(self.master)
+        try:
+            self.driver.close()
+        finally:
+            output.write_bytes(self.output)
 
 
 def composition() -> dict:
@@ -369,7 +333,7 @@ def exercise(
     browser.fill("Configuration instance", HELPER)
     browser.run("find", "role", "button", "click", "--name", "Open settings", "--exact")
     if terminal:
-        terminal.keys(CUSTOM.encode() + b"\x0f")
+        terminal.driver.command(f"/config {CUSTOM}")
     else:
         browser.fill("Configuration instance", CUSTOM)
         browser.run("find", "role", "button", "click", "--name", "Open settings", "--exact")
@@ -431,11 +395,10 @@ def exercise(
         terminal.action(b"\x13")
         await_value(endpoint, HELPER, "count", 7)
         terminal.field(HELPER, "/paths")
-        terminal.keys(b"\x0e" + b"three")  # append a typed string row
-        terminal.keys(b"\x1b[1;5D")  # move the selected row left
+        terminal.edit(HELPER, "/paths", '["three", "two"]')
         terminal.action(b"\x13")
         await_value(endpoint, HELPER, "paths", ["three", "two"])
-        terminal.keys(b"\x1b[3;5~")  # remove selected row
+        terminal.edit(HELPER, "/paths", '["two"]')
         terminal.action(b"\x13")
         await_value(endpoint, HELPER, "paths", ["two"])
         terminal.field(HELPER, "/count")
@@ -472,7 +435,7 @@ def exercise(
         revision = call(endpoint, "/configuration/inspect", {})["revision"]
         terminal.action(b"\x13")
         assert call(endpoint, "/configuration/inspect", {})["revision"] == revision
-        assert "CONFLICT" in terminal.display, terminal.display
+        assert "Configuration changed" in terminal.display, terminal.display
         terminal.action(b"\x04")
     # A pending web draft survives a whole chat run, then conflicts with the TUI apply.
     browser.action(HELPER, "refresh")
@@ -494,7 +457,7 @@ def exercise(
     )
     if terminal:
         terminal.drain()
-        assert "Count: 9" in terminal.display, terminal.display
+        assert re.search(r"Count\s+9", terminal.display), terminal.display
         terminal.action(b"\x16")
         terminal.action(b"\x10")
         terminal.action(b"\x13")
@@ -1064,10 +1027,7 @@ def main() -> None:
                 browser.close()
             if terminal:
                 (output / "tui.ansi").write_bytes(terminal.output)
-                if terminal.process.poll() is None:
-                    terminal.process.kill()
-                    terminal.process.wait()
-                os.close(terminal.master)
+                terminal.driver.close()
             if host.poll() is None:
                 host.kill()
             stdout, stderr = host.communicate()

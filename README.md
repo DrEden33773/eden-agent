@@ -23,6 +23,10 @@ Ordinary JSON results use two-space indentation and a trailing newline, includin
 
 Use `eden help`, `eden help models` or `eden help models select` to explore commands without loading plugins. `-h` and `--help` remain available at every command level. Building only the CLI with `cargo run --bin eden` does not assemble an installation: its default composition would be `target/composition.json`. After the build and install steps above, you can also run `cargo run --locked --bin eden -- --composition artifacts/install/composition.json models list`. Explicit composition and history paths are relative to the invoking process directory, independently of `--cwd`.
 
+## Interactive terminal
+
+Run `eden` without a prompt in a terminal, or use `eden tui`. New tasks, explicit live attachment, stopped-history restoration and read-only history are separate entries. See [terminal interaction, local drafts and UI plugins](docs/terminal.md).
+
 ## Rust embedding
 
 ```sh
@@ -49,7 +53,7 @@ python3 scripts/verify.py
 python3 scripts/verify-coding.py
 ```
 
-The native CI matrix runs these checks on Linux x86_64, Windows x86_64 and the actual macOS runner architecture. The test targets whose behavior differs per operating system — process ownership, link creation, path scope and history locking — run on all three; the remaining workspace tests run on Linux, while Clippy and the acceptance suites still compile and load every plugin on every runner. Its artifacts contain an installation archive and machine-readable coding/native verification results with the tested target and commit. These checks cover native loading and lifecycle, not interactive terminal behavior.
+The native CI matrix runs these checks on Linux x86_64, Windows x86_64 and the actual macOS runner architecture. The test targets whose behavior differs per operating system — process ownership, link creation, path scope and history locking — run on all three; the remaining workspace tests run on Linux, while Clippy and the acceptance suites still compile and load every plugin on every runner. Its artifacts contain an installation archive and machine-readable coding/native verification results with the tested target and commit. These checks cover native loading and lifecycle; the terminal suite adds POSIX PTY interaction and restoration on Linux/macOS, while Windows runs native component and editor tests.
 
 ## Contributions and license
 

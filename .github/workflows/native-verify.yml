@@ -206,7 +206,7 @@ jobs:
       # still agree.
       - name: Platform-sensitive suites
         if: ${{ !inputs.cache-only && success() && runner.os != 'Linux' && steps.node-deps.outcome == 'success' && steps.python-deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
-        run: node scripts/ci-run.mjs platform-suites cargo test --locked --no-fail-fast -p eden-process -p eden-coding-tools -p eden-search -p eden-local-history -p eden-workspace -p eden-model-access -p eden-fmt
+        run: node scripts/ci-run.mjs platform-suites cargo test --locked --no-fail-fast -p eden-process -p eden-coding-tools -p eden-search -p eden-local-history -p eden-workspace -p eden-model-access -p eden-fmt -p eden-tui -p eden-tui-client -p eden-terminal-editor -p eden-ui-sdk
       # Linux keeps the exact workspace command it always ran: it is the runner
       # that still executes what the other two no longer do, and a newly added
       # crate executes here. Cargo resolves features across the selected packages,

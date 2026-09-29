@@ -38,6 +38,7 @@ struct Shared {
     web_root: Option<PathBuf>,
     submissions: Mutex<(HashMap<String, Submission>, VecDeque<String>)>,
     stop: watch::Sender<bool>,
+    history: tokio::sync::Mutex<Option<(u64, Vec<eden_protocol::coding::Record>)>>,
 }
 fn fault(code: &str, message: impl Into<String>) -> Fault {
     Fault::new(code, "live", message)
@@ -89,10 +90,81 @@ pub async fn run_host(
                 .into(),
         );
     }
-    let composition = crate::composition(cli)?;
-    let options = crate::session_options(cli, cli.session.clone(), true)?;
+    let (composition, selected) = crate::load_composition(cli)?;
+    let mut options = crate::session_options(cli, cli.session.clone(), true)?;
+    options.cwd = std::fs::canonicalize(options.cwd)?;
+    if !cli.no_session
+        && options.history.is_none()
+        && selected.roles.contains_key(eden_protocol::coding::LOOP)
+    {
+        options.history = Some(default_history(&options.cwd)?);
+    }
     let session =
         Session::open_with_workspace(composition, options, crate::prompt_options(cli)).await?;
+    host_session(cli, session, endpoint_path, web_root).await
+}
+/// Reopen an explicitly selected stopped history without resuming its model loop or queued inputs.
+/// Saved cwd and CLI resource/trust overrides follow the same authority as ordinary prompt startup.
+pub async fn run_saved_host(
+    cli: &Cli,
+    endpoint_path: &Path,
+    web_root: Option<&Path>,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    let history = cli
+        .session
+        .clone()
+        .ok_or("resuming a live host requires --session HISTORY")?;
+    let composition = crate::composition(cli)?;
+    let session = Session::open_saved_with_workspace(
+        composition,
+        history,
+        cli.cwd.clone(),
+        crate::prompt_options(cli),
+    )
+    .await?;
+    host_session(cli, session, endpoint_path, web_root).await
+}
+fn default_history(cwd: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let root = cwd.join(".eden/sessions");
+    std::fs::create_dir_all(&root)?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    Ok(root.join(format!("{stamp}-{}.jsonl", std::process::id())))
+}
+async fn host_session(
+    cli: &Cli,
+    session: Session,
+    endpoint_path: &Path,
+    web_root: Option<&Path>,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    let result = serve_session(cli, &session, endpoint_path, web_root).await;
+    let closed = session.shutdown().await;
+    match result {
+        Ok(code) => {
+            closed?;
+            Ok(code)
+        }
+        Err(error) => Err(error),
+    }
+}
+async fn serve_session(
+    cli: &Cli,
+    session: &Session,
+    endpoint_path: &Path,
+    web_root: Option<&Path>,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    if let Some(identity) = &cli.model {
+        let (provider, model) = identity
+            .split_once('/')
+            .ok_or("--model requires PROVIDER/MODEL")?;
+        let run = session.select_model(eden_protocol::models::ModelSelection {
+            provider: provider.into(),
+            model: model.into(),
+            thinking: cli.thinking.clone(),
+        })?;
+        session.wait(run).await?.into_result()?;
+    }
     session.set_interactions(true);
     session.enable_shared_presentation();
     let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -112,6 +184,7 @@ pub async fn run_host(
         token: endpoint.token,
         web_root: web_root.map(Path::to_owned),
         submissions: Mutex::new((HashMap::new(), VecDeque::new())),
+        history: tokio::sync::Mutex::new(None),
         stop,
     });
     println!(
@@ -165,7 +238,10 @@ impl Host {
     async fn dispatch(&self, method: &str, path: &str, body: Value) -> Result<Value, Fault> {
         match self {
             Self::Live(shared) => dispatch(shared, method, path, body).await,
-            Self::Static(shared) => dispatch_static(shared, method, path).await,
+            Self::Static(shared) => {
+                check_session(&body, shared.snapshot.session_id)?;
+                dispatch_static(shared, method, path).await
+            }
         }
     }
 }
@@ -336,6 +412,7 @@ async fn dispatch(
     body: Value,
 ) -> Result<Value, Fault> {
     let session = &shared.session;
+    check_session(&body, session.id())?;
     let route = path.split('?').next().unwrap_or(path);
     match (method, route) {
         ("POST", "/attach") => {
@@ -370,124 +447,67 @@ async fn dispatch(
             }
             Ok(json!({ "presentation": session.presentation_snapshot(), "state": session.state() }))
         }
-        ("POST", "/prompt") => {
-            let id: String = field(&body, "request_id")?;
-            if id.is_empty() || id.len() > 256 {
-                return Err(fault("InvalidInput", "invalid request id"));
+        ("GET", "/tui/snapshot") => {
+            if let Some(attachment) =
+                query_parameter(path, "attachment").and_then(|v| v.parse().ok())
+            {
+                session
+                    .presentation_heartbeat(attachment)
+                    .map_err(|error| {
+                        if error.code == "InvalidInput" {
+                            fault(
+                                "AttachmentExpired",
+                                "attachment lease ended; attach again to this session",
+                            )
+                        } else {
+                            error
+                        }
+                    })?;
             }
-            let text: String = field(&body, "text")?;
-            let mut guard = shared.submissions.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(existing) = guard.0.get(&id) {
-                return match existing {
-                    Submission::Done {
-                        body: prior,
-                        result,
-                    } if *prior == body => result.clone(),
-                    _ => Err(fault(
-                        "DuplicateId",
-                        "request id reused with different submission",
-                    )),
-                };
-            }
-            let result = session.submit(text).map(|run| json!({ "run_id": run }));
-            guard.0.insert(
-                id.clone(),
-                Submission::Done {
-                    body,
-                    result: result.clone(),
-                },
-            );
-            guard.1.push_back(id);
-            while guard.1.len() > 1024 {
-                if let Some(id) = guard.1.pop_front() {
-                    guard.0.remove(&id);
+            if let (Some(after), Some(events_after)) = (
+                query_parameter(path, "after").and_then(|v| v.parse().ok()),
+                query_parameter(path, "events_after").and_then(|v| v.parse().ok()),
+            ) {
+                tokio::select! {
+                    _ = session.presentation_changed(after) => {},
+                    _ = wait_events(session, events_after) => {},
+                    _ = tokio::time::sleep(Duration::from_secs(4)) => {}
                 }
             }
-            result
+            // Read events before history: a commit that races this read can appear in history
+            // first, but its live event remains available to the next cursor read.
+            let events = session.events();
+            let history = snapshot_history(shared, &events).await?;
+            Ok(json!({
+                "presentation": session.presentation_snapshot(),
+                "state": session.state(),
+                "history": history,
+                "events": events,
+            }))
         }
-        ("POST", "/enqueue") => {
+        ("POST", "/request-status") => {
             let id: String = field(&body, "request_id")?;
-            if id.is_empty() || id.len() > 256 {
-                return Err(fault("InvalidInput", "invalid request id"));
-            }
-            let kind: String = field(&body, "kind")?;
-            if !["steering", "follow_up"].contains(&kind.as_str()) {
-                return Err(fault("InvalidInput", "choose steering or follow_up"));
-            }
-            let text: String = field(&body, "text")?;
-            let (sender, receiver) = tokio::sync::oneshot::channel();
-            let start = {
-                let mut guard = shared.submissions.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(existing) = guard.0.get_mut(&id) {
-                    match existing {
-                        Submission::Done {
-                            body: prior,
-                            result,
-                        } => {
-                            return if *prior == body {
-                                result.clone()
-                            } else {
-                                Err(fault(
-                                    "DuplicateId",
-                                    "request id reused with different submission",
-                                ))
-                            };
-                        }
-                        Submission::Running {
-                            body: prior,
-                            listeners,
-                        } => {
-                            if *prior != body {
-                                return Err(fault(
-                                    "DuplicateId",
-                                    "request id reused with different submission",
-                                ));
-                            }
-                            listeners.push(sender);
-                            false
-                        }
-                    }
-                } else {
-                    guard.0.insert(
-                        id.clone(),
-                        Submission::Running {
-                            body: body.clone(),
-                            listeners: vec![sender],
-                        },
-                    );
-                    true
-                }
-            };
-            if start {
-                let shared = shared.clone();
-                tokio::spawn(async move {
-                    let result = shared
-                        .session
-                        .enqueue(&kind, vec![eden_protocol::coding::Block::Text { text }])
-                        .await
-                        .map(|entries| json!(entries));
-                    let mut guard = shared.submissions.lock().unwrap_or_else(|e| e.into_inner());
-                    let listeners = match guard.0.remove(&id) {
-                        Some(Submission::Running { listeners, .. }) => listeners,
-                        _ => vec![],
-                    };
-                    for listener in listeners {
-                        let _ = listener.send(result.clone());
-                    }
-                    guard
-                        .0
-                        .insert(id.clone(), Submission::Done { body, result });
-                    guard.1.push_back(id);
-                    while guard.1.len() > 1024 {
-                        if let Some(old) = guard.1.pop_front() {
-                            guard.0.remove(&old);
-                        }
-                    }
-                });
-            }
-            receiver
-                .await
-                .map_err(|_| fault("Unavailable", "queue result lost"))?
+            let guard = shared.submissions.lock().unwrap_or_else(|e| e.into_inner());
+            Ok(match guard.0.get(&id) {
+                None => json!({ "status": "unknown" }),
+                Some(Submission::Running { .. }) => json!({ "status": "running" }),
+                Some(Submission::Done { result, .. }) => json!({
+                    "status": "done",
+                    "result": result,
+                }),
+            })
+        }
+        (
+            "POST",
+            "/prompt" | "/enqueue" | "/shell" | "/command" | "/queue/withdraw" | "/queue/configure",
+        ) => submit_once(shared, route, body).await,
+        ("POST", "/queue/inspect") => Ok(json!(session.queued().await?)),
+        ("POST", "/resources") => Ok(json!(session.resources().await?)),
+        ("POST", "/tools") => Ok(json!(session.tools().await?)),
+        ("POST", "/commands") => Ok(json!(session.commands().await?)),
+        ("POST", "/shell/cancel") => {
+            session.cancel_shell(field(&body, "run_id")?)?;
+            Ok(json!({ "cancel_requested": true }))
         }
         ("POST", "/configuration/inspect") => Ok(json!(session.inspect_configuration().await?)),
         ("POST", "/configuration/open") => {
@@ -524,6 +544,7 @@ async fn dispatch(
     }
 }
 struct StaticShared {
+    history: Vec<eden_protocol::coding::Record>,
     snapshot: eden_protocol::presentation::Snapshot,
     token: String,
     web_root: Option<PathBuf>,
@@ -565,6 +586,7 @@ pub async fn run_read_host(
     write_endpoint(endpoint_path, &endpoint)?;
     let (stop, mut stopped) = watch::channel(false);
     let shared = Arc::new(StaticShared {
+        history: eden_protocol::history::active_path(&records)?,
         snapshot,
         token: endpoint.token,
         web_root: web_root.map(Path::to_owned),
@@ -602,13 +624,20 @@ async fn dispatch_static(shared: &StaticShared, method: &str, path: &str) -> Res
     match (method, route) {
         ("POST", "/attach") => Ok(json!({ "attachment": 1 })),
         ("POST", "/detach") => Ok(json!({ "detached": true })),
-        ("GET", "/snapshot") => {
+        ("GET", "/snapshot" | "/tui/snapshot") => {
             if query_parameter(path, "after").is_some() {
                 tokio::time::sleep(Duration::from_secs(4)).await;
             }
             Ok(json!({
                 "presentation": shared.snapshot,
-                "state": { "active_run": null, "closed": true, "read_only": true },
+                "state": {
+                    "session_id": shared.snapshot.session_id,
+                    "active_run": null,
+                    "closed": true,
+                    "read_only": true,
+                },
+                "history": shared.history,
+                "events": [],
             }))
         }
         ("POST", "/shutdown") => {
@@ -625,53 +654,193 @@ pub async fn call(
     route: &str,
     body: Option<&Value>,
 ) -> Result<Value, Fault> {
-    let endpoint: Endpoint = serde_json::from_slice(
-        &std::fs::read(endpoint_path).map_err(|error| fault("FileFailure", error.to_string()))?,
-    )
-    .map_err(|error| fault("InvalidInput", error.to_string()))?;
-    let mut stream = TcpStream::connect(&endpoint.address)
-        .await
-        .map_err(|error| fault("Unavailable", error.to_string()))?;
-    let bytes = body
-        .map(serde_json::to_vec)
-        .transpose()
-        .map_err(|error| fault("InvalidInput", error.to_string()))?
-        .unwrap_or_default();
-    let header = format!(
-        "{method} {route} HTTP/1.1\r\nHost: {}\r\nX-Eden-Token: {}\r\nContent-Type: \
-         application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        endpoint.address,
-        endpoint.token,
-        bytes.len()
-    );
-    stream
-        .write_all(header.as_bytes())
-        .await
-        .map_err(|error| fault("OutputFailure", error.to_string()))?;
-    stream
-        .write_all(&bytes)
-        .await
-        .map_err(|error| fault("OutputFailure", error.to_string()))?;
-    let mut response = Vec::new();
-    stream
-        .read_to_end(&mut response)
-        .await
-        .map_err(|error| fault("InputFailure", error.to_string()))?;
-    let start = response
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .ok_or_else(|| fault("InvalidInput", "invalid response"))?
-        + 4;
-    let envelope: Value = serde_json::from_slice(&response[start..])
-        .map_err(|error| fault("InvalidInput", error.to_string()))?;
-    if envelope["ok"] == true {
-        Ok(envelope["result"].clone())
-    } else {
-        Err(serde_json::from_value(envelope["error"].clone())
-            .map_err(|error| fault("InvalidInput", error.to_string()))?)
-    }
+    eden_tui_client::call(endpoint_path, method, route, body).await
 }
 /// Start the terminal adapter against one explicitly selected host.
 pub async fn run_tui(endpoint_path: &Path) -> Result<i32, Box<dyn std::error::Error>> {
-    crate::live_tui::run(endpoint_path).await
+    crate::tui::attach(endpoint_path, None, "terminal", false).await
+}
+
+// Public submission bodies only. Private input continues through the dedicated Session path.
+async fn submit_once(shared: &Arc<Shared>, route: &str, body: Value) -> Result<Value, Fault> {
+    let id: String = field(&body, "request_id")?;
+    if id.is_empty() || id.len() > 256 {
+        return Err(fault("InvalidInput", "invalid request id"));
+    }
+    let fingerprint = json!({ "route": route, "body": body });
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let start = {
+        let mut guard = shared.submissions.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.0.get_mut(&id) {
+            Some(Submission::Done {
+                body: prior,
+                result,
+            }) => {
+                return if *prior == fingerprint {
+                    result.clone()
+                } else {
+                    Err(fault(
+                        "DuplicateId",
+                        "request id reused with different submission",
+                    ))
+                };
+            }
+            Some(Submission::Running {
+                body: prior,
+                listeners,
+            }) => {
+                if *prior != fingerprint {
+                    return Err(fault(
+                        "DuplicateId",
+                        "request id reused with different submission",
+                    ));
+                }
+                listeners.push(sender);
+                false
+            }
+            None => {
+                guard.0.insert(
+                    id.clone(),
+                    Submission::Running {
+                        body: fingerprint.clone(),
+                        listeners: vec![sender],
+                    },
+                );
+                true
+            }
+        }
+    };
+    if start {
+        let shared = shared.clone();
+        let route = route.to_owned();
+        tokio::spawn(async move {
+            let result = perform_submission(&shared.session, &route, &body).await;
+            let mut guard = shared.submissions.lock().unwrap_or_else(|e| e.into_inner());
+            let listeners = match guard.0.remove(&id) {
+                Some(Submission::Running { listeners, .. }) => listeners,
+                _ => vec![],
+            };
+            for listener in listeners {
+                let _ = listener.send(result.clone());
+            }
+            guard.0.insert(
+                id.clone(),
+                Submission::Done {
+                    body: fingerprint,
+                    result,
+                },
+            );
+            guard.1.push_back(id);
+            while guard.1.len() > 1024 {
+                if let Some(old) = guard.1.pop_front() {
+                    guard.0.remove(&old);
+                }
+            }
+        });
+    }
+    receiver
+        .await
+        .map_err(|_| fault("Unavailable", "submission result lost"))?
+}
+fn content(body: &Value) -> Result<Vec<eden_protocol::coding::Block>, Fault> {
+    if body.get("content").is_some() {
+        field(body, "content")
+    } else {
+        Ok(vec![eden_protocol::coding::Block::Text {
+            text: field(body, "text")?,
+        }])
+    }
+}
+async fn perform_submission(session: &Session, route: &str, body: &Value) -> Result<Value, Fault> {
+    match route {
+        "/prompt" => Ok(json!({ "run_id": session.submit_blocks(content(body)?)? })),
+        "/enqueue" => {
+            let kind: String = field(body, "kind")?;
+            if !["steering", "follow_up"].contains(&kind.as_str()) {
+                return Err(fault("InvalidInput", "choose steering or follow_up"));
+            }
+            Ok(json!(session.enqueue(&kind, content(body)?).await?))
+        }
+        "/shell" => Ok(json!({
+            "run_id": session.user_shell(
+                field(body, "command")?,
+                field(body, "shell")?,
+                field(body, "exclude_from_context")?
+            )?,
+        })),
+        "/command" => Ok(json!({
+            "run_id": session.command(field(body, "name")?, field(body, "arguments")?)?,
+        })),
+        "/queue/configure" => Ok(json!({
+            "run_id":
+                session.configure_queue(field(body, "steering")?, field(body, "follow_up")?)?,
+        })),
+        "/queue/withdraw" => Ok(json!(session.withdraw_queue(field(body, "ids")?).await?)),
+        _ => Err(fault("Unsupported", "unknown submission")),
+    }
+}
+
+#[cfg(test)]
+#[path = "live_tests.rs"]
+mod tests;
+
+// A closed/fully expired event ledger must not turn an idle long poll into a busy loop.
+async fn wait_events(session: &Session, after: u64) {
+    match session.read_events(after).await {
+        Ok(events) if !events.is_empty() => {}
+        Err(_)
+            if session
+                .events()
+                .last()
+                .is_some_and(|event| event.sequence > after) => {}
+        _ => std::future::pending::<()>().await,
+    }
+}
+async fn snapshot_history(
+    shared: &Shared,
+    events: &[eden_protocol::Event],
+) -> Result<Vec<eden_protocol::coding::Record>, Fault> {
+    let mut cache = shared.history.lock().await;
+    let current = events.last().map_or(0, |event| event.sequence);
+    let refresh = cache.as_ref().is_none_or(|(previous, _)| {
+        events
+            .first()
+            .is_some_and(|event| event.sequence > previous.saturating_add(1))
+            || events.iter().any(|event| {
+                event.sequence > *previous
+                    && !matches!(
+                        event.kind.as_str(),
+                        "model_text_delta"
+                            | "model_reasoning_delta"
+                            | "model_tool_delta"
+                            | "model_usage"
+                    )
+            })
+    });
+    if refresh {
+        let history = eden_protocol::history::active_path(&shared.session.history().await?)?;
+        *cache = Some((current, history));
+    }
+    if let Some((sequence, history)) = cache.as_mut() {
+        *sequence = current;
+        Ok(history.clone())
+    } else {
+        Err(fault("Unavailable", "history snapshot missing"))
+    }
+}
+
+fn check_session(body: &Value, expected: u64) -> Result<(), Fault> {
+    if let Some(value) = body.get("session_id") {
+        let id = value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+            .ok_or_else(|| fault("InvalidInput", "invalid session identity"))?;
+        if id != expected {
+            return Err(fault(
+                "SessionMismatch",
+                "endpoint belongs to a different session",
+            ));
+        }
+    }
+    Ok(())
 }

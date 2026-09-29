@@ -127,3 +127,120 @@ fn read_text(content: &str, arguments: &Value) -> Result<ToolResult, Fault> {
     });
     Ok(result)
 }
+
+pub(super) async fn write(
+    cwd: &Path,
+    arguments: &Value,
+    artifact_dir: &Path,
+) -> Result<ToolResult, Fault> {
+    let path = file_path(cwd, arguments)?;
+    let content = string(arguments, "content")?;
+    let (before, created) = match tokio::fs::read(&path).await {
+        Ok(bytes) => (bytes, false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (vec![], true),
+        Err(error) => return Err(file_error(error)),
+    };
+    let before_text = std::str::from_utf8(&before).ok();
+    let truncated =
+        before.len() > OUTPUT_LIMIT || content.len() > OUTPUT_LIMIT || before_text.is_none();
+    let retained = if truncated {
+        Some(retain_write_sides(artifact_dir, &before, content.as_bytes()).await?)
+    } else {
+        None
+    };
+    let changed = async {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(file_error)?;
+        }
+        tokio::fs::write(&path, content).await.map_err(file_error)
+    }
+    .await;
+    if let Err(error) = changed {
+        if let Some((directory, _)) = &retained {
+            let _ = tokio::fs::remove_dir_all(directory).await;
+        }
+        return Err(error);
+    }
+    let mut result = output(format!("Wrote {} bytes", content.len()), None, truncated);
+    result.details = json!({
+        "created": created,
+        "diff": {
+            "before": before_text.map(|text| &text[..text.floor_char_boundary(OUTPUT_LIMIT)]),
+            "after": &content[..content.floor_char_boundary(OUTPUT_LIMIT)],
+            "complete": !truncated,
+            "before_bytes": before.len(),
+            "after_bytes": content.len(),
+        },
+    });
+    if let Some((_, artifacts)) = retained {
+        result.artifacts = artifacts;
+    }
+    Ok(result)
+}
+
+async fn retain_write_sides(
+    root: &Path,
+    before: &[u8],
+    after: &[u8],
+) -> Result<(PathBuf, Vec<eden_plugin_sdk::protocol::coding::Artifact>), Fault> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::io::AsyncWriteExt;
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    tokio::fs::create_dir_all(root).await.map_err(file_error)?;
+    let root = tokio::fs::canonicalize(root).await.map_err(file_error)?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| fault("FileFailure", error.to_string()))?
+        .as_nanos();
+    let directory = root.join(format!(
+        "write-{}-{stamp}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(&directory).map_err(file_error)?;
+    let result = async {
+        let mut artifacts = vec![];
+        for (name, bytes) in [("before", before), ("after", after)] {
+            let path = directory.join(format!("{name}.bin"));
+            let mut options = tokio::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                options.mode(0o600);
+            }
+            let mut file = options.open(&path).await.map_err(file_error)?;
+            file.write_all(bytes).await.map_err(file_error)?;
+            file.flush().await.map_err(file_error)?;
+            file.sync_all().await.map_err(file_error)?;
+            artifacts.push(eden_plugin_sdk::protocol::coding::Artifact {
+                path: path.to_string_lossy().into_owned(),
+                name: name.into(),
+                bytes: bytes.len() as u64,
+                media_type: if std::str::from_utf8(bytes).is_ok() {
+                    "text/plain"
+                } else {
+                    "application/octet-stream"
+                }
+                .into(),
+            });
+        }
+        Ok(artifacts)
+    }
+    .await;
+    match result {
+        Ok(artifacts) => Ok((directory, artifacts)),
+        Err(error) => {
+            let _ = tokio::fs::remove_dir_all(directory).await;
+            Err(error)
+        }
+    }
+}

@@ -57,7 +57,33 @@ async fn run(parsed: Parsed, shell: &Shell) -> Result<i32, Box<dyn std::error::E
         Some(Family::Live { endpoint, web_root }) => {
             eden_cli::live::run_host(&parsed.cli, endpoint, web_root.as_deref()).await
         }
-        Some(Family::LiveTui { endpoint }) => eden_cli::live::run_tui(endpoint).await,
+        Some(Family::ResumeLive { endpoint, web_root }) => {
+            eden_cli::live::run_saved_host(&parsed.cli, endpoint, web_root.as_deref()).await
+        }
+        Some(Family::Tui {
+            endpoint,
+            read,
+            frontend,
+            editor,
+        }) => {
+            eden_cli::tui::launch(
+                &parsed.cli,
+                endpoint.as_deref(),
+                read.as_deref(),
+                frontend,
+                editor.as_deref(),
+            )
+            .await
+        }
+        Some(Family::LiveTui { endpoint }) => {
+            eden_cli::tui::attach(
+                endpoint,
+                None,
+                "terminal",
+                eden_cli::tui::monochrome(&parsed.cli),
+            )
+            .await
+        }
         Some(Family::Read {
             path,
             endpoint,
@@ -76,6 +102,19 @@ async fn run(parsed: Parsed, shell: &Shell) -> Result<i32, Box<dyn std::error::E
         ) => eden_cli::workspace_commands::run(&parsed.cli, shell).await,
         Some(Family::History { .. } | Family::Session { .. }) => {
             eden_cli::session_commands::run(&parsed.cli, shell).await
+        }
+        None if parsed.cli.prompt.is_empty()
+            && !parsed.cli.continue_session
+            && parsed.cli.attach.is_empty()
+            && parsed.cli.image.is_empty()
+            && parsed.cli.file.is_empty()
+            && !parsed.cli.print
+            && !parsed.cli.json
+            && parsed.cli.history.is_none()
+            && std::io::stdin().is_terminal()
+            && std::io::stdout().is_terminal() =>
+        {
+            eden_cli::tui::launch(&parsed.cli, None, None, "terminal", None).await
         }
         None => prompt(&parsed, shell).await,
     }

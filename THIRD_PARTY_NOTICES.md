@@ -57,3 +57,31 @@ SOFTWARE.
 The locked Google Cloud auth/gax/rpc/wkt crates declare Apache-2.0 but omit its full text from their archives. `third-party/google-cloud-rust-LICENSE` preserves the upstream license; the exact versions and source revisions are recorded in `scripts/license_bundle.py`. The text was checked at every recorded revision. The MIT texts omitted by `base64-simd 0.8.0`, `uuid-simd 0.8.0`, `vsimd 0.8.0` and `defmt-parser 1.0.0` are likewise preserved from their published source revisions in `third-party/`. The installation license bundle includes these texts alongside AWS SDK and other package-local licenses.
 
 The `jsonschema-regex 0.56.0` and `jsonschema-value 0.56.0` archives omit their MIT license text. Both identify revision `1e244c994dd81a1feb7801556a813c6bf2d45dad` in `.cargo_vcs_info.json`; its [upstream LICENSE](https://github.com/Stranger6667/jsonschema/blob/1e244c994dd81a1feb7801556a813c6bf2d45dad/LICENSE) is retained unmodified in `third-party/jsonschema-0.56.0-LICENSE` and included for each exact package version.
+
+## Terminal foreground palette
+
+The Mocha foreground constants are adapted from pi-catppuccin `cd09277df06621155d9c4c20e45309bce5341779`, MIT © 2026 Sherif Fanous. The pinned JSON and license are kept in `crates/eden-ui-sdk/themes/`. Application backgrounds remain terminal-default.
+
+```text
+MIT License
+
+Copyright (c) 2026 Sherif Fanous
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

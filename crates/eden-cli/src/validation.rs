@@ -31,8 +31,38 @@ pub(crate) fn validate(cli: &Cli, matches: &ArgMatches) -> Result<(), String> {
         if matches!(family, Family::Rpc) && cli.print {
             return Err("--print cannot be combined with rpc".into());
         }
+        let starts_host = matches!(
+            family,
+            Family::Live { .. }
+                | Family::ResumeLive { .. }
+                | Family::Tui {
+                    endpoint: None,
+                    read: None,
+                    ..
+                }
+        );
+        if matches!(family, Family::Tui { .. } | Family::LiveTui { .. }) && (cli.json || cli.print)
+        {
+            return Err("interactive terminal cannot be combined with --json or --print".into());
+        }
         for id in prompt_options {
-            if explicit(id) {
+            if explicit(id)
+                && !(starts_host
+                    && matches!(
+                        id,
+                        "model"
+                            | "thinking"
+                            | "no_session"
+                            | "tools"
+                            | "exclude_tools"
+                            | "skill_path"
+                            | "template_path"
+                            | "read_only"
+                            | "no_context"
+                            | "no_skills"
+                            | "no_templates"
+                    ))
+            {
                 return Err(format!(
                     "{} is only valid for a prompt run, not this command",
                     flag(id)
@@ -48,6 +78,12 @@ pub(crate) fn validate(cli: &Cli, matches: &ArgMatches) -> Result<(), String> {
                     | Family::Router { .. }
                     | Family::Rpc
                     | Family::Live { .. }
+                    | Family::ResumeLive { .. }
+                    | Family::Tui {
+                        endpoint: None,
+                        read: None,
+                        ..
+                    }
             )
         {
             return Err(

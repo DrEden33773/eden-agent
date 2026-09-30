@@ -35,6 +35,11 @@ const RESERVED: &[&str] = &[
     "eden-status",
     "usage",
     "capabilities",
+    "voice",
+    "loop",
+    "tasks",
+    "imagine",
+    "imagine-video",
     "hooks-add",
     "hooks-list",
     "hooks-remove",
@@ -92,11 +97,13 @@ impl Adapter {
         Ok(commands(&self.resource_inventory().await?))
     }
 
-    pub(crate) fn publish_resources(&self, snapshot: &Snapshot) {
+    pub(crate) fn publish_resources(&self, snapshot: &Snapshot, loading: bool) {
         let previous = self
             .resource_revision
             .fetch_max(snapshot.revision, Ordering::AcqRel);
-        if previous < snapshot.revision {
+        // A loaded history inherits the pager's bootstrap commands. Even revision zero
+        // must replace them, so a read-only view cannot offer the initiating host's skills.
+        if loading || previous < snapshot.revision {
             self.update(
                 json!({
                     "sessionUpdate": "available_commands_update",
@@ -226,12 +233,14 @@ mod tests {
     #[test]
     fn templates_keep_a_qualified_entry_when_a_pager_command_owns_the_bare_name() {
         let mut snapshot = Snapshot::default();
-        snapshot.templates.push(eden_protocol::resources::Resource {
-            name: "model".into(),
-            description: "template".into(),
-            path: "model.md".into(),
-            model_invocable: false,
-        });
+        for name in ["model", "voice"] {
+            snapshot.templates.push(eden_protocol::resources::Resource {
+                name: name.into(),
+                description: "template".into(),
+                path: "model.md".into(),
+                model_invocable: false,
+            });
+        }
         let commands = commands(&snapshot);
         assert!(
             commands
@@ -239,5 +248,11 @@ mod tests {
                 .any(|command| command["name"] == "template:model")
         );
         assert!(!commands.iter().any(|command| command["name"] == "model"));
+        assert!(
+            commands
+                .iter()
+                .any(|command| command["name"] == "template:voice")
+        );
+        assert!(!commands.iter().any(|command| command["name"] == "voice"));
     }
 }

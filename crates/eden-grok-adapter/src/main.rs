@@ -173,7 +173,7 @@ impl Adapter {
         view.snapshot = snapshot;
         drop(view);
         if let Some(resources) = resources {
-            self.publish_resources(&resources.snapshot);
+            self.publish_resources(&resources.snapshot, false);
         }
         if model_changed && let Ok(models) = self.model_state().await {
             self.send(json!({
@@ -271,6 +271,16 @@ impl Adapter {
             );
             return Ok(json!({ "stopReason": "end_turn" }));
         }
+        if matches!(
+            body.split_whitespace().next(),
+            Some("/voice" | "/loop" | "/tasks" | "/imagine" | "/imagine-video")
+        ) {
+            self.message(
+                "This capability is not provided by the bundled Eden backend. Use /capabilities \
+                 to see available features.",
+            );
+            return Ok(json!({ "stopReason": "end_turn" }));
+        }
         self.run_prompt(params, &body, blocks).await
     }
     async fn dispatch(self: &Arc<Self>, request: &Value) -> Result<Value, Fault> {
@@ -311,7 +321,7 @@ impl Adapter {
                 let snapshot = self.client.snapshot().await?;
                 let running = self.adopt_run(&snapshot).await;
                 self.project(snapshot, true).await;
-                self.publish_resources(&self.resource_inventory().await?);
+                self.publish_resources(&self.resource_inventory().await?, true);
                 if self.view.lock().await.snapshot.state.read_only {
                     self.update(
                         json!({

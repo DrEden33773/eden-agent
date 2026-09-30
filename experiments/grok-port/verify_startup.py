@@ -41,6 +41,7 @@ def main():
         fixture.terminal.wait("Eden connection failed", seconds=20)
         fixture.capture("failed")
         assert b"Grok Build" not in fixture.terminal.output
+        assert fixture.terminal.process.wait(timeout=5) != 0, "connection failure did not exit"
         fixture.terminal.close(expected_code=None, screen=False)
         for failure in ("token", "session_id"):
             endpoint = dict(fixture.endpoint)
@@ -52,9 +53,20 @@ def main():
             fixture.terminal.wait("Eden connection failed", seconds=10)
             fixture.capture(f"failed-{failure}")
             assert b"Grok Build" not in fixture.terminal.output
+            assert fixture.terminal.process.wait(timeout=5) != 0, "endpoint failure did not exit"
             fixture.terminal.close(expected_code=None, screen=False)
     (args.output / "summary.json").write_text(
-        json.dumps({"startup": True, "reattach": True, "failure_exit": True}) + "\n"
+        json.dumps(
+            {
+                "startup": True,
+                "reattach": True,
+                "failure_exit": True,
+                "failed_token_exit": True,
+                "failed_session_identity_exit": True,
+                "terminal_modes_restored": True,
+            }
+        )
+        + "\n"
     )
 
 

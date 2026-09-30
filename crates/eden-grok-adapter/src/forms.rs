@@ -360,7 +360,7 @@ async fn execute(
                 return Err(fault("Unknown resource action"));
             }
             let snapshot = owner.resource_inventory().await?;
-            owner.publish_resources(&snapshot);
+            owner.publish_resources(&snapshot, false);
             let mut description = diagnostic.unwrap_or_default();
             description.push_str(&owner.resource_description(&snapshot).await?);
             let read_only = owner.view.lock().await.snapshot.state.read_only;

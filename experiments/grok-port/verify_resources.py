@@ -66,6 +66,7 @@ def main():
                 root / "global/prompts/model.md",
                 "---\ndescription: collides with model picker\n---\nCOLLISION_TEMPLATE $1\n",
             )
+            write(root / "global/prompts/voice.md", "VOICE_TEMPLATE $1\n")
             write(root / "AGENTS.md", "CWD_INSTRUCTION_CANARY\n")
             write(root / ".eden/SYSTEM.md", "PROJECT_SYSTEM_CANARY\n")
             fixture.mutate("/resources/reload", {})
@@ -75,6 +76,7 @@ def main():
                 "native adapter did not advertise installed skills"
             )
             assert "s4template" in available and "template:model" in available
+            assert "template:voice" in available and "voice" not in available
             assert ("skill:s4local" in available) == trusted
             # Frontend does not expand text itself: assert the actual provider's final request.
             prompt(fixture, "/skill:s4global explicit-argument")
@@ -87,6 +89,8 @@ def main():
             assert "TEMPLATE_BODY quoted value :: quoted value tail" in wire(fixture)
             prompt(fixture, "/template:model explicit-collision")
             assert "COLLISION_TEMPLATE explicit-collision" in wire(fixture)
+            prompt(fixture, "/template:voice explicit-voice-collision")
+            assert "VOICE_TEMPLATE explicit-voice-collision" in wire(fixture)
             if trusted:
                 prompt(fixture, "/skill:s4local cwd-argument")
                 assert "LOCAL_SKILL_BODY" in wire(fixture)
@@ -154,6 +158,21 @@ def main():
             assert ("skill:s4global" in after) == trusted, (
                 "deleted winner should disappear or reveal the next source"
             )
+            fixture.terminal.command("/sessions")
+            fixture.click("history.jsonl")
+            fixture.click("Read-only")
+            fixture.terminal.wait("Read-only history.")
+            fixture.terminal.send(b"/skill:s4add")
+            fixture.terminal.read(0.2)
+            fixture.capture(f"readonly-completion-{trusted}")
+            assert "S4 reloaded skill" not in fixture.terminal.display, (
+                "read-only history retained the initiating host's skill completion"
+            )
+            fixture.terminal.send(b"\x1b")
+            fixture.terminal.send(b"\x15")
+            fixture.terminal.command("/resources")
+            fixture.terminal.wait("Read-only history: live resource")
+            assert "Reload from disk" not in fixture.terminal.display
             checks[f"trusted-{trusted}"] = {
                 "discovery_cwd": True,
                 "completion": True,
@@ -161,7 +180,8 @@ def main():
                 "reload": True,
                 "conflicts": True,
                 "errors_no_provider": True,
-                "failed_reload_keeps_inventory": trusted,
+                "failed_reload_keeps_inventory": "passed" if trusted else "project source excluded",
+                "readonly_clears_initiating_inventory": True,
             }
     (args.output / "summary.json").write_text(json.dumps(checks, indent=2) + "\n")
     print(json.dumps(checks))

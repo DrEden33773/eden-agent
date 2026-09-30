@@ -235,7 +235,11 @@ def main():
                         break
                     terminal.send(b"\x1b")
                 assert "┌─ Commands" not in terminal.display, "palette did not close"
-                terminal.command("/voice")
+                # Installed skills may fuzzy-match this unsupported literal. Dismiss
+                # completion so this probes the command itself rather than its suggestion.
+                terminal.send(b"/voice")
+                terminal.send(b"\x1b")
+                terminal.send(b"\r")
                 terminal.wait("not provided by the bundled Eden backend")
                 assert not server.requests
                 checks["unavailable_command_not_offered_or_sent"] = True

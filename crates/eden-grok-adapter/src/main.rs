@@ -28,11 +28,13 @@ struct View {
     snapshot: Snapshot,
     projection: Projection,
     prompts: BTreeMap<u64, (String, Option<String>)>,
+    context_revision: Option<(u64, Option<u64>)>,
 }
 struct Adapter {
     client: HostClient,
     reading_diagnostic: Option<String>,
     owns_reader: bool,
+    stopped: std::sync::atomic::AtomicBool,
     endpoint: PathBuf,
     session: u64,
     identity: String,
@@ -78,6 +80,7 @@ impl Adapter {
             endpoint,
             reading_diagnostic: None,
             owns_reader: false,
+            stopped: std::sync::atomic::AtomicBool::new(false),
             session,
             identity: identity.unwrap_or_else(|| format!("eden-{session}")),
             following: std::sync::atomic::AtomicBool::new(false),
@@ -97,6 +100,7 @@ impl Adapter {
                 snapshot,
                 projection: Projection::default(),
                 prompts: BTreeMap::new(),
+                context_revision: None,
             }),
             output,
         })
@@ -164,14 +168,48 @@ impl Adapter {
                 meta["promptId"] = json!(prompt);
                 meta["edenRequestId"] = json!(request);
             }
-            if update.get("_eden_model").is_some() {
+            if let Some(title) = update.get("_eden_title") {
+                self.send(json!({
+                    "method": "_eden/session/title",
+                    "params": { "sessionId": self.identity, "title": title },
+                }));
+            } else if update.get("_eden_model").is_some() {
                 model_changed = true;
             } else {
                 self.correlated_update(update, meta);
             }
         }
+        let context_revision = (
+            snapshot.history.last().map_or(0, |r| r.sequence),
+            snapshot.state.active_run,
+        );
+        let context_changed = replay || view.context_revision != Some(context_revision);
+        view.context_revision = Some(context_revision);
+        let context_readable = !snapshot.state.read_only && snapshot.state.active_run.is_none();
         view.snapshot = snapshot;
         drop(view);
+        if context_changed {
+            let context = if context_readable {
+                self.client.inspect_context().await.ok()
+            } else {
+                None
+            };
+            if self.view.lock().await.context_revision != Some(context_revision) {
+                return;
+            }
+            self.send(json!({
+                "method": "_eden/context/state",
+                "params": {
+                    "sessionId": self.identity,
+                    "used": context.as_ref().map(|c| c.estimated_tokens()),
+                    "window": context
+                        .as_ref()
+                        .and_then(|c| c.model.as_ref())
+                        .map(|m| m.limits.context_window),
+                    "estimated": context.is_some(),
+                },
+            }));
+        }
         if let Some(resources) = resources {
             self.publish_resources(&resources.snapshot, false);
         }
@@ -185,6 +223,9 @@ impl Adapter {
     async fn follow(self: Arc<Self>) {
         let mut disconnected = false;
         loop {
+            if self.stopped.load(Ordering::Acquire) {
+                return;
+            }
             let loaded = self.loaded.notified();
             if self.load_pending.load(Ordering::Acquire) {
                 loaded.await;
@@ -527,7 +568,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Err(error) => Err(error),
                 }
             };
-            let adapter = &server.root;
+            let adapter = server.root().await;
             if !request["id"].is_null() {
                 match result {
                     Ok(value) => adapter.send(json!({ "id": request["id"], "result": value })),

@@ -53,6 +53,7 @@ def main():
             "EDEN_GROK_BRIDGE": str(args.pager.resolve().parent / f"eden-grok-adapter{SUFFIX}"),
             "GROK_AGENT_DASHBOARD": "false",
             "EDEN_GROK_ENDPOINT": str(endpoint),
+            "EDEN_GROK_LEGACY_SESSIONS": str(ROOT / "artifacts/g1-grok-port/sessions"),
         }
     )
     target = json.loads(endpoint.read_text())

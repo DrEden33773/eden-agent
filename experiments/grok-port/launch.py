@@ -17,12 +17,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cwd", type=Path, default=Path.cwd())
     parser.add_argument("--resume", type=Path, help="Stopped Eden JSONL history")
-    parser.add_argument("--host", type=Path, default=ROOT / "artifacts/s4-g2-host/bin/eden")
+    parser.add_argument("--host", type=Path, default=ROOT / "artifacts/s4-g2-session-host/bin/eden")
     args = parser.parse_args()
     task = ROOT / "artifacts/g1-grok-port/sessions" / str(uuid.uuid4())
     task.mkdir(parents=True)
     endpoint = task / "endpoint.json"
-    history = args.resume.resolve() if args.resume else task / "history.jsonl"
+    history = (
+        args.resume.resolve()
+        if args.resume
+        else args.cwd.resolve() / ".eden/sessions" / f"{uuid.uuid4()}.jsonl"
+    )
+    history.parent.mkdir(parents=True, exist_ok=True)
     command = [
         str(args.host.resolve()),
         "--cwd",

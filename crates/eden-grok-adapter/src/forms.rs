@@ -23,10 +23,30 @@ enum Flow {
     Histories,
     Resources,
     History(String),
+    Directory,
+    Stop(String),
+    Tree {
+        path: String,
+        fork: bool,
+    },
+    Navigate {
+        path: String,
+        target: u64,
+    },
+    Copy {
+        path: String,
+        kind: String,
+        target: Option<u64>,
+    },
+    Delete {
+        path: String,
+        session: u64,
+    },
     CopyPreview(String),
     Done,
 }
 struct Form {
+    source_session: String,
     owner: Arc<Adapter>,
     flow: Flow,
     revision: u64,
@@ -245,6 +265,7 @@ impl Forms {
                 forms.insert(
                     id.clone(),
                     Form {
+                        source_session: text(&params["sessionId"]).to_owned(),
                         owner: owner.clone(),
                         flow: flow.clone(),
                         revision: 0,
@@ -275,7 +296,7 @@ impl Forms {
             let form = forms
                 .get_mut(id)
                 .ok_or_else(|| fault("This form has closed; open it again"))?;
-            if params["sessionId"] != form.owner.identity {
+            if params["sessionId"] != form.source_session {
                 return Err(fault("Form belongs to another Session"));
             }
             if command == "close" {
@@ -333,7 +354,8 @@ async fn cleanup(server: &Server, owner: &Adapter, flow: &Flow) {
         }
         Flow::CopyPreview(id) => {
             let _ = server
-                .root
+                .root()
+                .await
                 .post("/manage/copy/discard", json!({ "preview_id": id }))
                 .await;
         }
@@ -583,50 +605,98 @@ async fn execute(
             page["preserveEdits"] = json!(command != "apply");
             Ok((next, page))
         }
-        Flow::Histories => {
+        Flow::Histories | Flow::Directory => {
+            if command == "new" {
+                let identity = server.create(owner).await?;
+                return Ok((
+                    Flow::Done,
+                    json!({ "closed": true, "loadSession": identity }),
+                ));
+            }
+            if command == "directory" {
+                return Ok((
+                    Flow::Directory,
+                    panel(
+                        "Session directory",
+                        "Choose a directory to inspect explicitly.",
+                        vec![entry(
+                            "directory",
+                            "Directory",
+                            "text",
+                            json!(owner.client.snapshot().await?.state.cwd),
+                        )],
+                        vec![action("list", "List this directory")],
+                    ),
+                ));
+            }
             if let Some(path) = command.strip_prefix("history:") {
+                let info = server
+                    .root()
+                    .await
+                    .post("/manage/info", json!({ "path": path }))
+                    .await?;
                 return Ok((
                     Flow::History(path.into()),
                     panel(
                         "Saved session",
                         format!(
-                            "{path}\nOpen with its current binding, inspect read-only, rename, or \
-                             preview migration to a new copy. The original history is preserved."
+                            "{}\n{path}\nSession {} · {}\nTags: {}\nOwner: {}\nDiagnostic: \
+                             {}\nOpen with its saved binding or read without execution. Copy \
+                             operations preserve the source.",
+                            text(&info["name"]),
+                            info["session_id"],
+                            text(&info["status"]),
+                            info["tags"],
+                            info["owner"],
+                            info["diagnostic"]
                         ),
-                        vec![
-                            entry("name", "Session name", "text", Value::Null),
-                            entry(
-                                "destination",
-                                "New copy path",
-                                "text",
-                                json!(format!("{path}.migrated.jsonl")),
-                            ),
-                        ],
+                        vec![entry("name", "Session name", "text", info["name"].clone())],
                         vec![
                             action("open", "Open / resume"),
                             action("read", "Read-only"),
+                            action("stop", "Stop live host"),
                             action("rename", "Rename saved session"),
+                            action("tree", "Tree / branch"),
+                            action("fork", "Fork ancestry"),
+                            action("clone", "Clone complete tree"),
                             action("migrate", "Preview migrated copy"),
+                            action("recover", "Recover valid prefix to copy"),
+                            action("upgrade", "Upgrade format to copy"),
+                            action("delete", "Delete stopped history"),
                         ],
                     ),
                 ));
             }
-            let listing = server.list(&json!({})).await?;
-            let actions = listing["sessions"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|row| {
-                    action(
-                        text(&row["sessionId"]),
-                        format!(
-                            "{} · {}",
-                            text(&row["summary"]),
-                            text(&row["sessionId"]).trim_start_matches("history:")
-                        ),
-                    )
-                })
-                .collect();
+            let listing = server
+                .list(&json!({
+                    "sessionId": owner.identity,
+                    "directory": params["inputs"]["directory"],
+                }))
+                .await?;
+            let mut actions = vec![
+                action("new", "New Session in this cwd"),
+                action("directory", "Choose directory"),
+            ];
+            actions.extend(
+                listing["sessions"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|row| {
+                        action(
+                            text(&row["sessionId"]),
+                            format!(
+                                "{} · {}{}",
+                                text(&row["summary"]),
+                                text(&row["sessionId"]).trim_start_matches("history:"),
+                                row["_meta"]["edenDiagnostic"]
+                                    .as_str()
+                                    .map(|d| format!(" · {d}"))
+                                    .unwrap_or_default()
+                            ),
+                        )
+                    }),
+            );
             Ok((
                 Flow::Histories,
                 panel(
@@ -640,13 +710,32 @@ async fn execute(
         Flow::History(path) => match command {
             "open" | "read" => {
                 let identity = server.open_history(&path, command == "read").await?;
-                let mut page = json!({ "loadSession": identity });
-                page["closed"] = json!(true);
-                Ok((Flow::Done, page))
+                Ok((
+                    Flow::Done,
+                    json!({ "loadSession": identity, "closed": true }),
+                ))
             }
+            "stop" => Ok((
+                Flow::Stop(path.clone()),
+                panel(
+                    "Stop live host",
+                    format!(
+                        "Stop the writer for {path}. Accepted work will be cancelled and cleaned \
+                         up by its owner. The saved history remains available."
+                    ),
+                    vec![entry(
+                        "confirmed",
+                        "Stop this host",
+                        "boolean",
+                        json!(false),
+                    )],
+                    vec![action("stop", "Stop confirmed host")],
+                ),
+            )),
             "rename" => {
                 server
-                    .root
+                    .root()
+                    .await
                     .post(
                         "/manage/rename",
                         json!({
@@ -662,39 +751,187 @@ async fn execute(
                     "Saved session renamed. Reopen /sessions to see the current name.",
                 ))
             }
-            "migrate" => {
-                let reply = server
-                    .root
-                    .post(
-                        "/manage/copy/preview",
-                        json!({
-                            "request_id": owner.request_id(),
-                            "attachment":
-                                server.root.lease.load(std::sync::atomic::Ordering::Relaxed),
-                            "source": path,
-                            "destination": params["inputs"]["destination"],
-                            "kind": "migrate",
-                        }),
-                    )
+            "tree" | "fork" => {
+                let records = server
+                    .root()
+                    .await
+                    .post("/manage/tree", json!({ "path": path }))
                     .await?;
+                let actions = records
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|r| {
+                        action(
+                            r["sequence"].to_string(),
+                            format!(
+                                "#{} ← {} · {} · {}",
+                                r["sequence"],
+                                r["parent_id"],
+                                text(&r["branch"]),
+                                text(&r["kind"])
+                            ),
+                        )
+                    })
+                    .collect();
                 Ok((
-                    Flow::CopyPreview(text(&reply["preview_id"]).into()),
+                    Flow::Tree {
+                        path,
+                        fork: command == "fork",
+                    },
                     panel(
-                        "Review migrated copy",
-                        migration_preview(&reply["plan"]),
+                        "Session tree",
+                        "Select a record. Parent and branch identify its ancestry; navigation \
+                         never replays tools.",
                         vec![],
-                        vec![action("apply", "Create this copy and open it")],
+                        actions,
+                    ),
+                ))
+            }
+            "clone" | "migrate" | "recover" | "upgrade" => {
+                Ok(copy_page(path, command.into(), None))
+            }
+            "delete" => {
+                let records = server
+                    .root()
+                    .await
+                    .post("/manage/tree", json!({ "path": path }))
+                    .await?;
+                let session = records[0]["session_id"]
+                    .as_u64()
+                    .ok_or_else(|| fault("Cannot confirm the identity of this history"))?;
+                Ok((
+                    Flow::Delete {
+                        path: path.clone(),
+                        session,
+                    },
+                    panel(
+                        "Delete stopped history",
+                        format!(
+                            "Permanently delete {path} (Session {session}). Active writers refuse \
+                             deletion."
+                        ),
+                        vec![entry(
+                            "confirmed",
+                            "Delete this exact history",
+                            "boolean",
+                            json!(false),
+                        )],
+                        vec![action("delete", "Delete confirmed history")],
                     ),
                 ))
             }
             _ => Err(fault("Unknown saved-session action")),
         },
+        Flow::Tree { path, fork } => {
+            let target = command
+                .parse::<u64>()
+                .map_err(|_| fault("Select a tree record"))?;
+            if fork {
+                return Ok(copy_page(path, "fork".into(), Some(target)));
+            }
+            Ok((
+                Flow::Navigate { path, target },
+                panel(
+                    "Branch from selected record",
+                    format!(
+                        "Target #{target}; choose a branch label. Existing branches retain their \
+                         history."
+                    ),
+                    vec![
+                        entry("branch", "Branch label", "text", json!("branch")),
+                        entry(
+                            "summarize",
+                            "Summarize before navigation",
+                            "boolean",
+                            json!(false),
+                        ),
+                    ],
+                    vec![action("navigate", "Navigate to this head")],
+                ),
+            ))
+        }
+        Flow::Navigate { path, target } => {
+            let selected = server.selected(&path).await?;
+            operation(
+                &selected,
+                "/manage/navigate",
+                json!({
+                    "target": target,
+                    "branch": params["inputs"]["branch"],
+                    "summarize":
+                        params["inputs"]["summarize"].as_bool().unwrap_or(false),
+                }),
+            )
+            .await?;
+            Ok((
+                Flow::Done,
+                json!({ "closed": true, "loadSession": selected.identity }),
+            ))
+        }
+        Flow::Copy { path, kind, target } => {
+            let reply = server
+                .root()
+                .await
+                .post(
+                    "/manage/copy/preview",
+                    json!({
+                        "request_id": owner.request_id(),
+                        "attachment": server
+                            .root()
+                            .await
+                            .lease
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                        "source": path,
+                        "destination": params["inputs"]["destination"],
+                        "kind": kind,
+                        "target": target,
+                        "cwd": params["inputs"]["cwd"],
+                    }),
+                )
+                .await?;
+            Ok((
+                Flow::CopyPreview(text(&reply["preview_id"]).into()),
+                panel(
+                    "Review session copy",
+                    migration_preview(&reply["plan"]),
+                    vec![],
+                    vec![action("apply", "Create this copy and open it")],
+                ),
+            ))
+        }
+        Flow::Stop(path) => {
+            if params["inputs"]["confirmed"] != true {
+                return Err(fault("Confirm the selected host before stopping it"));
+            }
+            server.stop_history(&path).await?;
+            Ok(done(
+                "Host shutdown requested. Its owner is cleaning up; history is preserved.",
+            ))
+        }
+        Flow::Delete { path, session } => {
+            server
+                .root()
+                .await
+                .post(
+                    "/manage/delete",
+                    json!({
+                        "request_id": owner.request_id(),
+                        "path": path,
+                        "expected_session": session,
+                        "confirmed": params["inputs"]["confirmed"],
+                    }),
+                )
+                .await?;
+            Ok(done("Selected stopped history deleted."))
+        }
         Flow::CopyPreview(preview) => {
             if command != "apply" {
                 return Err(fault("Review the copy before applying"));
             }
             let result = server
-                .root
+                .root()
+                .await
                 .post(
                     "/manage/copy/apply",
                     json!({
@@ -826,4 +1063,27 @@ fn configuration_feedback(command: &str, result: &Value) -> String {
         }
     }
     message
+}
+
+fn copy_page(path: String, kind: String, target: Option<u64>) -> (Flow, Value) {
+    let page = panel(
+        "Session copy",
+        format!("{kind}: {path}; target {target:?}. Review the plan before creating a copy."),
+        vec![
+            entry(
+                "destination",
+                "New copy path",
+                "text",
+                json!(format!("{path}.{kind}.jsonl")),
+            ),
+            entry(
+                "cwd",
+                "Clone cwd (blank keeps saved binding)",
+                "text",
+                json!(""),
+            ),
+        ],
+        vec![action("preview", "Preview copy")],
+    );
+    (Flow::Copy { path, kind, target }, page)
 }

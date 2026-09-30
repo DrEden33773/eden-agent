@@ -1,7 +1,7 @@
 //! Shared request-edit validation. A complete candidate is checked before any durable write.
 use crate::{
     Fault,
-    coding::{Item, ModelInput},
+    coding::{Block, Item, ModelInput},
 };
 use std::collections::BTreeSet;
 
@@ -440,6 +440,62 @@ pub fn remap_record(
             }
         }
         _ => {}
+    }
+}
+
+/// Approximate effective input with the coding loop's shared text and attachment allowances.
+pub fn estimate_items(items: &[Item]) -> u64 {
+    items
+        .iter()
+        .map(|item| match item {
+            Item::Message { content, .. } => {
+                content
+                    .iter()
+                    .map(|block| match block {
+                        Block::Text { text } => text.chars().count() as u64 / 4 + 1,
+                        // Binary attachment size is not text token usage. Until provider usage is
+                        // available use a bounded block allowance, never base64 character count.
+                        _ => 1024,
+                    })
+                    .sum::<u64>()
+                    + 4
+            }
+            Item::ToolResult { result, .. } => {
+                result.text.chars().count() as u64 / 4
+                    + 1
+                    + result
+                        .content
+                        .iter()
+                        .map(|block| match block {
+                            Block::Text { text } => text.chars().count() as u64 / 4 + 1,
+                            _ => 1024,
+                        })
+                        .sum::<u64>()
+                    + result.details.to_string().chars().count() as u64 / 4
+                    + 1
+                    + serde_json::to_string(&result.artifacts)
+                        .map_or(0, |s| s.chars().count() as u64 / 4 + 1)
+            }
+            _ => serde_json::to_string(item).map_or(0, |s| s.chars().count() as u64 / 4 + 1),
+        })
+        .sum()
+}
+
+impl Snapshot {
+    /// Estimate this effective request, including tool schemas, without counting historical branches or cumulative usage.
+    pub fn estimated_tokens(&self) -> u64 {
+        estimate_items(
+            &self
+                .effective
+                .entries
+                .iter()
+                .map(|e| e.item.clone())
+                .collect::<Vec<_>>(),
+        )
+        .saturating_add(
+            serde_json::to_string(&self.effective.tools)
+                .map_or(0, |s| s.chars().count() as u64 / 4 + 1),
+        )
     }
 }
 

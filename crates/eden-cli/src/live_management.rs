@@ -3,6 +3,7 @@ use super::*;
 
 #[derive(Default)]
 pub(super) struct Management {
+    pub(super) inspection: tokio::sync::Mutex<()>,
     pub(super) launch: Option<Cli>,
     pub(super) previews: Mutex<previews::Previews>,
     pub(super) scans: Mutex<HashMap<String, DirectoryReader>>,
@@ -120,6 +121,17 @@ pub(super) async fn management_read(
                 .unwrap_or_else(|| Path::new(shared.session.cwd()).join(".eden/sessions"));
             Ok(json!(Session::list_saved_sessions(directory).await?))
         }
+        "/manage/info" => {
+            let path = managed_path(shared, body, "path")?;
+            let mut info = json!(Session::describe_saved_session(path.clone()).await?);
+            info["owner"] = json!(crate::tui::selected_live_endpoint(&path).await);
+            info["status"] = json!(if info["owner"].is_null() {
+                "stopped; binding checked on open"
+            } else {
+                "live writer"
+            });
+            Ok(info)
+        }
         "/manage/tree" => Ok(json!(
             Session::saved_session_tree(managed_path(shared, body, "path")?).await?
         )),
@@ -157,6 +169,7 @@ pub(super) async fn management_submit(
                 let client = eden_tui_client::HostClient::new(&endpoint);
                 let snapshot = client.snapshot().await?;
                 if snapshot.state.session_id == shared.session.id() {
+                    let _inspection = shared.management.inspection.lock().await;
                     let run = if body["preserve_tags"] == true {
                         shared.session.rename(field(body, "name")?)?
                     } else {
@@ -206,6 +219,30 @@ pub(super) async fn management_submit(
             )
             .await?;
             Ok(json!({ "deleted": body["path"] }))
+        }
+        "/manage/new" => {
+            let mut cli = shared
+                .management
+                .launch
+                .clone()
+                .ok_or_else(|| fault("Unavailable", "host launch options unavailable"))?;
+            cli.session = None;
+            let cwd = body["cwd"]
+                .as_str()
+                .filter(|cwd| !cwd.is_empty())
+                .unwrap_or(shared.session.cwd());
+            if cwd != shared.session.cwd() {
+                cli.trust_project = false;
+                cli.no_trust_project = false;
+            }
+            cli.cwd = Some(PathBuf::from(cwd));
+            cli.no_session = body["management_only"] == true;
+            let endpoint = tokio::task::spawn_blocking(move || {
+                crate::tui::start_host(&cli, None).map_err(|e| fault("HostLaunch", e.to_string()))
+            })
+            .await
+            .map_err(|e| fault("HostLaunch", e.to_string()))??;
+            Ok(json!({ "endpoint": endpoint }))
         }
         "/manage/open" => {
             let mut cli = shared

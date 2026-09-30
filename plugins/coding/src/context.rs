@@ -233,42 +233,8 @@ fn add_uncertainties(items: &mut Vec<Item>, payload: &Value) {
         )));
     }
 }
-pub(crate) fn estimate(items: &[Item]) -> u64 {
-    items
-        .iter()
-        .map(|item| match item {
-            Item::Message { content, .. } => {
-                content
-                    .iter()
-                    .map(|block| match block {
-                        Block::Text { text } => text.chars().count() as u64 / 4 + 1,
-                        // Binary attachment size is not text token usage. Until provider usage is
-                        // available use a bounded block allowance, never base64 character count.
-                        _ => 1024,
-                    })
-                    .sum::<u64>()
-                    + 4
-            }
-            Item::ToolResult { result, .. } => {
-                result.text.chars().count() as u64 / 4
-                    + 1
-                    + result
-                        .content
-                        .iter()
-                        .map(|block| match block {
-                            Block::Text { text } => text.chars().count() as u64 / 4 + 1,
-                            _ => 1024,
-                        })
-                        .sum::<u64>()
-                    + result.details.to_string().chars().count() as u64 / 4
-                    + 1
-                    + serde_json::to_string(&result.artifacts)
-                        .map_or(0, |s| s.chars().count() as u64 / 4 + 1)
-            }
-            _ => serde_json::to_string(item).map_or(0, |s| s.chars().count() as u64 / 4 + 1),
-        })
-        .sum()
-}
+pub(crate) use eden_plugin_sdk::protocol::context_edit::estimate_items as estimate;
+
 pub(crate) fn generation(path: &[Record]) -> u64 {
     path.iter()
         .rev()

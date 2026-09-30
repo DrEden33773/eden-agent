@@ -53,9 +53,28 @@ impl Projection {
         } else {
             self.event = snapshot.events.last().map_or(0, |e| e.sequence);
         }
+        let active = if replay && snapshot.history.iter().any(|r| r.kind == "branch_selected") {
+            eden_protocol::history::active_path(&snapshot.history)
+                .ok()
+                .map(|path| {
+                    path.into_iter()
+                        .map(|r| r.sequence)
+                        .collect::<BTreeSet<_>>()
+                })
+        } else {
+            None
+        };
         for record in fresh {
+            if active
+                .as_ref()
+                .is_some_and(|path| !path.contains(&record.sequence))
+                && !matches!(record.kind.as_str(), "session_metadata" | "model_selection")
+            {
+                continue;
+            }
             self.record(record, replay, &mut updates);
         }
+        self.head = snapshot.history.last().map_or(0, |r| r.sequence);
         if replay && let Some(run) = snapshot.state.active_run {
             let durable_attempts: BTreeSet<_> = snapshot
                 .history
@@ -268,6 +287,9 @@ impl Projection {
                     "rawOutput": raw,
                 }));
             }
+            _ if record.kind == "session_metadata" => updates.push(json!({
+                "_eden_title": record.payload["name"],
+            })),
             _ if record.kind == "model_selection"
                 && value["target"]["provider"].is_string()
                 && value["target"]["model"].is_string() =>
@@ -419,6 +441,58 @@ mod tests {
         }))
         .unwrap()
     }
+    #[test]
+    fn navigation_replay_excludes_departed_messages_and_keeps_saved_title() {
+        let mut frame = snapshot(json!([]), None);
+        let mut history = vec![
+            record(1, 0, "session", json!({})),
+            record(
+                2,
+                1,
+                "message",
+                json!({
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "text", "text": "kept" }],
+                }),
+            ),
+            record(
+                3,
+                2,
+                "message",
+                json!({
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "text", "text": "departed" }],
+                }),
+            ),
+            record(
+                4,
+                3,
+                "session_metadata",
+                json!({ "name": "saved title", "tags": [] }),
+            ),
+            record(
+                5,
+                4,
+                "branch_selected",
+                json!({ "target": 2, "branch": "alternate" }),
+            ),
+        ];
+        for (index, record) in history.iter_mut().enumerate() {
+            record.schema_version = 2;
+            record.parent_id = (index > 0).then_some(index as u64);
+            record.branch = "main".into();
+        }
+        history[4].parent_id = Some(2);
+        history[4].branch = "alternate".into();
+        frame.history = history.into();
+        let updates = Projection::default().apply(&frame, true);
+        assert!(updates.iter().any(|u| u["content"]["text"] == "kept"));
+        assert!(!updates.iter().any(|u| u["content"]["text"] == "departed"));
+        assert!(updates.iter().any(|u| u["_eden_title"] == "saved title"));
+    }
+
     fn snapshot(events: Value, active: Option<u64>) -> Snapshot {
         serde_json::from_value(json!({
             "presentation": {

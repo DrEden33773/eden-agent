@@ -97,10 +97,19 @@ class DeviceServer:
 
 
 class Fixture:
-    def __init__(self, installation, output, *, trusted=False, configuration_author=True):
+    def __init__(
+        self,
+        installation,
+        output,
+        *,
+        trusted=False,
+        configuration_author=True,
+        context_footer=False,
+    ):
         self.installation = installation.resolve()
         self.trusted = trusted
         self.configuration_author = configuration_author
+        self.context_footer = context_footer
         self.output = output
         self.temporary = tempfile.TemporaryDirectory(prefix="eden-grok-workflows-")
         self.root = Path(self.temporary.name)
@@ -162,6 +171,15 @@ class Fixture:
                         },
                     },
                 }
+        if self.context_footer:
+            for package in config["packages"]:
+                if package["descriptor"]["package"] == "coding":
+                    package["config"] = {
+                        **(package["config"] or {}),
+                        "compaction": {"keep_recent_tokens": 1},
+                    }
+                if package["descriptor"]["package"] == "model-access":
+                    package["config"]["catalog"]["models"][1]["limits"]["context_window"] = 0
         author = (
             ROOT
             / "target/verification/seeds/authors/configuration-forms/libauthor_configuration_forms.so"
@@ -710,16 +728,18 @@ def history_recovery(fixture):
     fixture.terminal.command("/sessions")
     fixture.click("older-history.jsonl")
     fixture.click("Preview migrated copy")
-    fixture.terminal.wait("Review migrated copy", seconds=20)
+    fixture.click("Preview copy")
+    fixture.terminal.wait("Review session copy", seconds=20)
     fixture.capture("history-migration-preview")
-    destination = Path(str(source) + ".migrated.jsonl")
+    destination = Path(str(source) + ".migrate.jsonl")
     fixture.terminal.send(b"\x1b")
     assert not destination.exists() and source.read_bytes() == original
     fixture.checks["cancelled_migration_does_not_write"] = True
     fixture.terminal.command("/sessions")
     fixture.click("older-history.jsonl")
     fixture.click("Preview migrated copy")
-    fixture.terminal.wait("Review migrated copy", seconds=20)
+    fixture.click("Preview copy")
+    fixture.terminal.wait("Review session copy", seconds=20)
     fixture.click("Create this copy and open it")
     fixture.terminal.wait("Session opened", seconds=20)
     until = time.monotonic() + 15
@@ -758,10 +778,11 @@ def history_recovery(fixture):
     fixture.capture("launcher-readonly")
     fixture.terminal.command("/sessions")
     fixture.click(str(launch_source))
+    fixture.click("Preview migrated copy")
     fixture.click("New copy path:")
     fixture.terminal.send(b"\x15" + str(fixture.root / "launcher-copy.jsonl").encode())
-    fixture.click("Preview migrated copy")
-    fixture.terminal.wait("Review migrated copy", seconds=20)
+    fixture.click("Preview copy")
+    fixture.terminal.wait("Review session copy", seconds=20)
     fixture.terminal.send(b"\x1b")
     assert launch_source.read_bytes() == launch_original
     fixture.checks["launcher_resume_mismatch_has_readonly_and_migration_exit"] = True

@@ -741,3 +741,34 @@ async fn lease_expiry_cleans_preview_before_reattachment_and_exit() {
     assert_ne!(old, next);
     assert!(cleaned.load(std::sync::atomic::Ordering::SeqCst));
 }
+
+#[tokio::test]
+async fn private_key_admission_waits_for_background_context_inspection() {
+    use std::{future::Future, task::Poll};
+    let session = session().await;
+    let (stop, _) = watch::channel(false);
+    let shared = Arc::new(Shared {
+        session: session.clone(),
+        token: "fixture".into(),
+        web_root: None,
+        submissions: Mutex::new((HashMap::new(), VecDeque::new())),
+        history: tokio::sync::Mutex::new(None),
+        management: Default::default(),
+        stop,
+    });
+    let inspection = shared.management.inspection.lock().await;
+    let mut input = Box::pin(dispatch(
+        &shared,
+        "POST",
+        "/auth/input",
+        json!({ "api_key": true, "operation_id": "fixture", "input": "fixture-key" }),
+    ));
+    std::future::poll_fn(|cx| match input.as_mut().poll(cx) {
+        Poll::Pending => Poll::Ready(()),
+        Poll::Ready(_) => panic!("private API-key admission bypassed the active inspection"),
+    })
+    .await;
+    drop(inspection);
+    let _ = input.await;
+    session.shutdown().await.unwrap();
+}

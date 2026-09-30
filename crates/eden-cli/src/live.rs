@@ -570,6 +570,7 @@ async fn dispatch(
             | "/manage/metadata"
             | "/resources/reload"
             | "/background/warmer"
+            | "/manage/new"
             | "/manage/open"
             | "/manage/delete"
             | "/manage/copy/preview"
@@ -590,6 +591,7 @@ async fn dispatch(
             | "/manage/sessions/start"
             | "/manage/sessions/poll"
             | "/manage/sessions/cancel"
+            | "/manage/info"
             | "/manage/tree"
             | "/trust/inspect"
             | "/configuration/wait",
@@ -625,6 +627,7 @@ async fn dispatch(
             let operation_id = field::<String>(&body, "operation_id")?;
             let input = field::<String>(&body, "input")?;
             if body["api_key"] == true {
+                let _inspection = shared.management.inspection.lock().await;
                 Ok(json!({
                     "run_id": session.authenticate(eden_protocol::models::AuthRequest::Input {
                             operation_id,
@@ -653,7 +656,10 @@ async fn dispatch(
                 .reference_preview(field::<String>(&body, "path")?, body["head"].as_u64())
                 .await?
         )),
-        ("POST", "/context/inspect") => Ok(json!(session.inspect_context().await?)),
+        ("POST", "/context/inspect") => {
+            let _inspection = shared.management.inspection.lock().await;
+            Ok(json!(session.inspect_context().await?))
+        }
         ("POST", "/queue/inspect") => Ok(json!(session.queued().await?)),
         ("POST", "/resources") => Ok(json!(session.resources().await?)),
         ("POST", "/tools") => Ok(json!(session.tools().await?)),
@@ -925,9 +931,31 @@ fn content(body: &Value) -> Result<Vec<eden_protocol::coding::Block>, Fault> {
     }
 }
 async fn perform_submission(shared: &Shared, route: &str, body: &Value) -> Result<Value, Fault> {
+    // Background context inspection must finish its input admission before a user operation
+    // attempts exclusive admission. The UI continues drawing while this short read completes.
+    let _inspection = if matches!(
+        route,
+        "/prompt"
+            | "/models/select"
+            | "/models/cycle"
+            | "/models/catalog"
+            | "/router/manage"
+            | "/auth/start"
+            | "/manage/navigate"
+            | "/manage/metadata"
+            | "/resources/reload"
+            | "/context/compact"
+            | "/context/rebuild"
+            | "/configuration/apply"
+    ) {
+        Some(shared.management.inspection.lock().await)
+    } else {
+        None
+    };
     let session = &shared.session;
     match route {
-        "/manage/open"
+        "/manage/new"
+        | "/manage/open"
         | "/manage/delete"
         | "/manage/copy/preview"
         | "/manage/copy/apply"

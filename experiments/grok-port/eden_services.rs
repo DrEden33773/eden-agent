@@ -169,3 +169,143 @@ pub(crate) fn thinking_label(
         format!("{name} ({requested} → {effective})")
     })
 }
+
+pub(crate) fn context_update(
+    notification: &agent_client_protocol::ExtNotification,
+    app: &mut crate::app::app_view::AppView,
+) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(notification.params.get()) else {
+        return false;
+    };
+    let Some(session) = value["sessionId"].as_str() else {
+        return false;
+    };
+    for agent in app.agents.values_mut() {
+        if agent
+            .session
+            .session_id
+            .as_ref()
+            .is_some_and(|id| id.0.as_ref() == session)
+        {
+            agent.eden_context = value.clone();
+        }
+    }
+    true
+}
+
+pub(crate) fn context_line(
+    value: &serde_json::Value,
+    model_window: Option<u64>,
+    width: u16,
+    theme: &crate::theme::Theme,
+) -> ratatui::text::Line<'static> {
+    use crate::views::context_bar::{blend_color, default_breakpoints, fmt_tokens};
+    let used = value["used"].as_u64();
+    let total = value["window"].as_u64().or(model_window).filter(|n| *n > 0);
+    let mut label = format!(
+        "{}{} / {}",
+        if used.is_some() && value["estimated"] == true {
+            "~"
+        } else {
+            ""
+        },
+        used.map(fmt_tokens).unwrap_or_else(|| "?".into()),
+        total.map(fmt_tokens).unwrap_or_else(|| "?".into())
+    );
+    let ratio = used.zip(total).map(|(u, t)| u as f64 / t as f64);
+    let cells = if width >= 70 {
+        10
+    } else if width >= 42 {
+        5
+    } else {
+        0
+    };
+    if let Some(ratio) = ratio.filter(|_| cells > 0) {
+        let filled = (ratio.clamp(0.0, 1.0) * cells as f64).round() as usize;
+        label.push_str(&format!(
+            "  {}{}",
+            "█".repeat(filled),
+            "░".repeat(cells - filled)
+        ));
+    }
+    let color = ratio
+        .map(|r| blend_color(r * 100.0, &default_breakpoints(theme)))
+        .unwrap_or(theme.text_primary);
+    ratatui::text::Line::from(ratatui::text::Span::styled(
+        label,
+        ratatui::style::Style::default().fg(color).bg(theme.bg_base),
+    ))
+}
+
+static CONTEXT_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub(crate) fn context_visible() -> bool {
+    CONTEXT_VISIBLE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn set_context_visible(value: bool) {
+    CONTEXT_VISIBLE.store(value, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn title_update(
+    notification: &agent_client_protocol::ExtNotification,
+    app: &mut crate::app::app_view::AppView,
+) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(notification.params.get()) else {
+        return false;
+    };
+    let (Some(session), Some(title)) = (value["sessionId"].as_str(), value["title"].as_str())
+    else {
+        return false;
+    };
+    for agent in app.agents.values_mut() {
+        if agent
+            .session
+            .session_id
+            .as_ref()
+            .is_some_and(|id| id.0.as_ref() == session)
+        {
+            agent.display_name =
+                Some(crate::views::session_title::sanitize_display_text(title).into_owned());
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+mod eden_context_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn unknown_is_not_zero_and_narrow_counts_survive() {
+        let theme = crate::theme::Theme::default();
+        assert_eq!(
+            context_line(&json!({}), None, 38, &theme).to_string(),
+            "? / ?"
+        );
+        assert_eq!(
+            context_line(
+                &json!({ "used": 18200, "estimated": true }),
+                Some(128000),
+                38,
+                &theme
+            )
+            .to_string(),
+            "~18K / 128K"
+        );
+    }
+
+    #[test]
+    fn high_occupancy_uses_error_color_and_full_character_cells() {
+        let theme = crate::theme::Theme::default();
+        let line = context_line(
+            &json!({ "used": 99000, "window": 100000, "estimated": true }),
+            None,
+            100,
+            &theme,
+        );
+        assert!(line.to_string().contains("██████████"));
+        assert_eq!(line.spans[0].style.fg, Some(theme.accent_error));
+    }
+}

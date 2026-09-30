@@ -24,12 +24,17 @@ MODIFIED = (
     "app/effects/session_list.rs",
     "app/dispatch/session/foreign.rs",
     "app/dispatch/session/load.rs",
+    "app/dispatch/session/modal.rs",
     "app/dispatch/settings/setters.rs",
+    "app/dispatch/settings/ui.rs",
     "app/dispatch/task_result.rs",
     "views/settings_modal/state.rs",
     "views/settings_modal/render.rs",
     "views/agent.rs",
     "app/agent_view/input.rs",
+    "app/agent_view/mod.rs",
+    "app/agent_view/session.rs",
+    "app/agent_view/render.rs",
     "views/settings_modal/input.rs",
     "app/dispatch/prompt.rs",
     "app/acp_handler/mod.rs",
@@ -304,6 +309,8 @@ def main():
     patch_eden_management(root)
     patch_eden_cancel_identity(root)
     patch_eden_startup(root)
+    patch_eden_rename(root)
+    patch_eden_context(root)
     acp = root / "crates/codegen/xai-grok-pager/src/acp"
     path = acp / "mod.rs"
     source = path.read_text()
@@ -785,6 +792,113 @@ def patch_busy_send(root):
         )
         assert marker in source
         path.write_text(source.replace(marker, replacement, 1))
+
+
+def patch_eden_rename(root):
+    pager = root / "crates/codegen/xai-grok-pager/src"
+    path = pager / "app/dispatch/session/modal.rs"
+    source = path.read_text()
+    source = source.replace(
+        "\n    agent.display_name = Some(title.clone());",
+        "\n    if !crate::eden_services::enabled() { agent.display_name = Some(title.clone()); }",
+    )
+    path.write_text(source)
+    path = pager / "app/dispatch/task_result.rs"
+    source = path.read_text()
+    marker = "TaskResult::RenameSessionComplete { agent_id, title } => {\n            if let Some(agent) = app.agents.get_mut(&agent_id) {"
+    replacement = (
+        marker
+        + "\n                if crate::eden_services::enabled() { agent.display_name = Some(title.clone()); }"
+    )
+    if replacement not in source:
+        assert marker in source
+        source = source.replace(marker, replacement, 1)
+    path.write_text(source)
+
+
+def patch_eden_context(root):
+    pager = root / "crates/codegen/xai-grok-pager/src"
+    path = pager / "app/agent_view/render.rs"
+    source = path.read_text()
+    prior = '            status.push("context", crate::eden_services::context_line(&self.eden_context, model_window, layout.status_bar.width, &theme));'
+    if prior in source:
+        path.write_text(
+            source.replace(
+                prior,
+                '            if crate::eden_services::context_visible() { status.push("context", crate::eden_services::context_line(&self.eden_context, model_window, layout.status_bar.width, &theme)); }',
+                1,
+            )
+        )
+    changes = [
+        (
+            "app/dispatch/session/load.rs",
+            "    let expected_conversation_entry = session_opens_as_chat(app, chat_kind);",
+            "    if crate::eden_services::enabled() { return None; }\n    let expected_conversation_entry = session_opens_as_chat(app, chat_kind);",
+        ),
+        (
+            "app/acp_handler/mod.rs",
+            "    let method = notif.method.as_ref();",
+            '    let method = notif.method.as_ref();\n    if crate::eden_services::enabled() && method == "eden/session/title" { return crate::eden_services::title_update(notif, app); }',
+        ),
+        (
+            "app/actions.rs",
+            "    SetMultilineMode(bool),",
+            "    EdenContextVisible(bool),\n    SetMultilineMode(bool),",
+        ),
+        (
+            "app/dispatch/router.rs",
+            "        Action::SetMultilineMode(v) => set_multiline_mode(app, v),",
+            "        Action::EdenContextVisible(v) => { crate::eden_services::set_context_visible(v); crate::app::dispatch::refresh_open_settings_modals(app); vec![] },\n        Action::SetMultilineMode(v) => set_multiline_mode(app, v),",
+        ),
+        (
+            "views/settings_modal/state.rs",
+            '        "multiline_mode" => Some(Action::SetMultilineMode(new)),',
+            '        "eden_context_footer" => Some(Action::EdenContextVisible(new)),\n        "multiline_mode" => Some(Action::SetMultilineMode(new)),',
+        ),
+        (
+            "settings/registry.rs",
+            '        "multiline_mode" => Some(SettingValue::Bool(pager.multiline_mode)),',
+            '        "eden_context_footer" => Some(SettingValue::Bool(crate::eden_services::context_visible())),\n        "multiline_mode" => Some(SettingValue::Bool(pager.multiline_mode)),',
+        ),
+        (
+            "app/dispatch/settings/ui.rs",
+            '        ("multiline_mode", SettingValue::Bool(b)) => Some(Action::SetMultilineMode(*b)),',
+            '        ("eden_context_footer", SettingValue::Bool(b)) => Some(Action::EdenContextVisible(*b)),\n        ("multiline_mode", SettingValue::Bool(b)) => Some(Action::SetMultilineMode(*b)),',
+        ),
+        (
+            "settings/defs.rs",
+            '    vec![\n        SettingMeta {\n            key: "compact_mode",',
+            '    vec![\n        SettingMeta { key: "eden_context_footer", category: SettingCategory::Appearance, owner: SettingOwner::Pager, label: "Context footer", description: "Show effective context estimate and model window in this frontend process.", keywords: &["context", "tokens", "footer"], kind: SettingKind::Bool { default: true }, restart_required: false, hidden_in_minimal: false },\n        SettingMeta {\n            key: "compact_mode",',
+        ),
+        (
+            "app/agent_view/mod.rs",
+            "    pub context_state: Option<xai_grok_shell::session::ContextInfo>,",
+            "    pub eden_context: serde_json::Value,\n    pub context_state: Option<xai_grok_shell::session::ContextInfo>,",
+        ),
+        (
+            "app/agent_view/session.rs",
+            "            context_state: None,",
+            "            eden_context: serde_json::Value::Null,\n            context_state: None,",
+        ),
+        (
+            "app/acp_handler/mod.rs",
+            "    let method = notif.method.as_ref();",
+            '    let method = notif.method.as_ref();\n    if crate::eden_services::enabled() && method == "eden/context/state" { return crate::eden_services::context_update(notif, app); }',
+        ),
+        (
+            "app/agent_view/render.rs",
+            "        if let Some(ctx_line) = context_bar::context_bar_line_for_session(",
+            '        if crate::eden_services::enabled() {\n            if crate::eden_services::context_visible() { status.push("context", crate::eden_services::context_line(&self.eden_context, model_window, layout.status_bar.width, &theme)); }\n        } else if let Some(ctx_line) = context_bar::context_bar_line_for_session(',
+        ),
+    ]
+    for file, old, new in changes:
+        path = pager / file
+        source = path.read_text()
+        if file == "app/acp_handler/mod.rs" and new.splitlines()[-1] in source:
+            continue
+        if new not in source:
+            assert old in source, file
+            path.write_text(source.replace(old, new, 1))
 
 
 if __name__ == "__main__":

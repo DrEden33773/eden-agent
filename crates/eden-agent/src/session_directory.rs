@@ -10,6 +10,7 @@ use std::path::PathBuf;
 pub struct SavedSession {
     pub path: PathBuf,
     pub session_id: Option<u64>,
+    pub cwd: Option<String>,
     pub name: String,
     pub tags: Vec<String>,
     pub modified: Option<u64>,
@@ -33,6 +34,11 @@ fn describe_records(
     let metadata = records.iter().rev().find(|r| r.kind == "session_metadata");
     SavedSession {
         session_id: records.first().map(|r| r.session_id),
+        cwd: records
+            .iter()
+            .find(|r| r.kind == "session")
+            .and_then(|r| r.payload["cwd"].as_str())
+            .map(str::to_owned),
         name: metadata
             .and_then(|r| r.payload["name"].as_str())
             .filter(|s| !s.is_empty())
@@ -69,6 +75,16 @@ impl Session {
     /// Save an explicit trust choice. Current startup overrides retain precedence.
     pub fn save_project_trust(&self, path: &std::path::Path, trusted: bool) -> Result<(), Fault> {
         crate::save_trust(&self.0.workspace_options.global_dir, path, trusted)
+    }
+
+    /// Inspect one selected identity without opening a writer or executing its composition.
+    pub async fn describe_saved_session(path: PathBuf) -> Result<SavedSession, Fault> {
+        tokio::task::spawn_blocking(move || {
+            describe_cancellable(path, &eden_plugin_sdk::Cancellation::default())?
+                .ok_or_else(|| fault("inspection cancelled"))
+        })
+        .await
+        .map_err(fault)?
     }
 
     /// Scan only the explicitly selected directory. Bad histories stay visible; no plugin runs.
@@ -141,6 +157,8 @@ impl SavedSessionScan {
         if let Some(worker) = self.worker.take() {
             let _ = worker.await;
         }
+        // A producer may already hold a channel permit when close() races its send.
+        while self.receiver.try_recv().is_ok() {}
     }
     /// Drain already produced rows without delaying the next UI frame.
     pub fn try_next(&mut self) -> Option<Result<SavedSession, Fault>> {

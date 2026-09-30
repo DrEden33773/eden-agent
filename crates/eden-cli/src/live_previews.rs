@@ -125,7 +125,10 @@ pub(super) async fn prepare_copy(shared: &Shared, body: &Value) -> Result<Value,
             destination: management::managed_path(shared, body, "destination")?,
             kind: field(body, "kind")?,
             target: body["target"].as_u64(),
-            cwd: None,
+            cwd: body["cwd"]
+                .as_str()
+                .filter(|cwd| !cwd.is_empty())
+                .map(PathBuf::from),
             public_only: false,
         },
     )

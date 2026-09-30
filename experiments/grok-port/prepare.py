@@ -32,8 +32,249 @@ MODIFIED = (
     "app/agent_view/input.rs",
     "views/settings_modal/input.rs",
     "app/dispatch/prompt.rs",
+    "app/acp_handler/mod.rs",
+    "acp/model_state.rs",
+    "eden_panel.rs",
+    "eden_commands.rs",
+    "app/actions.rs",
+    "app/dispatch/router.rs",
+    "app/modals.rs",
+    "app/app_view.rs",
+    "slash/commands/login.rs",
+    "slash/commands/logout.rs",
+    "acp/leader_bridge.rs",
+    "app/dispatch/turn.rs",
 )
 NOTICE = "// Modified by Eden Agent for native host integration; see the accompanying EDEN-FRONTEND.md.\n"
+
+
+def patch_eden_thinking(root):
+    pager = root / "crates/codegen/xai-grok-pager/src"
+    path = pager / "app/acp_handler/mod.rs"
+    source = path.read_text()
+    marker = "    let method = notif.method.as_ref();"
+    if '"eden/model/state"' not in source:
+        source = source.replace(
+            marker,
+            marker
+            + '\n    if crate::eden_services::enabled() && method == "eden/model/state" { let changed = crate::eden_services::model_update(notif, app); super::dispatch::refresh_open_settings_modals(app); return changed; }',
+            1,
+        )
+        path.write_text(source)
+    path = pager / "acp/model_state.rs"
+    source = path.read_text()
+    marker = "        let name = self.footer_model_name()?;"
+    if "eden_services::thinking_label" not in source:
+        source = source.replace(
+            marker,
+            marker
+            + "\n        if crate::eden_services::enabled() { if let Some(label) = crate::eden_services::thinking_label(self, &name) { return Some(label); } }",
+            1,
+        )
+        path.write_text(source)
+
+
+def patch_eden_management(root):
+    pager = root / "crates/codegen/xai-grok-pager/src"
+    for name in ("eden_panel.rs", "eden_commands.rs"):
+        shutil.copyfile(HERE / name, pager / name)
+
+    def patch(file, marker, replacement):
+        path = pager / file
+        source = path.read_text()
+        if replacement not in source:
+            if (
+                file == "app/effects/mod.rs"
+                and marker == "    match effect {"
+                and "Effect::EdenUi" in source
+            ):
+                return
+            assert marker in source, (file, marker)
+            path.write_text(source.replace(marker, replacement, 1))
+
+    patch("lib.rs", "mod eden_services;", "mod eden_services;\nmod eden_panel;\nmod eden_commands;")
+    patch(
+        "app/actions.rs",
+        "pub enum Action {",
+        "pub enum Action {\n    EdenOpen(&'static str),\n    EdenRequest { generation: u64, request: crate::eden_panel::PrivateValue },",
+    )
+    patch(
+        "app/actions.rs",
+        "pub enum Effect {",
+        "pub enum Effect {\n    EdenUi { agent_id: AgentId, session_id: acp::SessionId, generation: u64, request: crate::eden_panel::PrivateValue },",
+    )
+    patch(
+        "app/actions.rs",
+        "pub enum TaskResult {",
+        "pub enum TaskResult {\n    EdenUi { agent_id: AgentId, generation: u64, result: Result<crate::eden_panel::PrivateValue, String> },",
+    )
+    patch(
+        "app/dispatch/router.rs",
+        "    let effects = match action {",
+        "    let effects = match action {\n        Action::EdenOpen(kind) => crate::eden_panel::open(app, kind),\n        Action::EdenRequest { generation, request } => crate::eden_panel::request(app, generation, request),",
+    )
+    patch(
+        "app/effects/mod.rs",
+        "    match effect {",
+        """    match effect {
+        Effect::EdenUi { agent_id, session_id, generation, mut request } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                request.0["sessionId"] = serde_json::json!(session_id);
+                let result = async {
+                    if let Some(reply) = crate::eden_panel::local_action(&request.0).await { return Ok(reply); }
+                    let payload = serde_json::value::to_raw_value(&request.0).map_err(|_| "Invalid private form request".to_string())?;
+                    let reply = acp_send(acp::ExtRequest::new("eden/ui", payload.into()), &tx).await.map_err(|error| error.to_string())?;
+                    serde_json::from_str(reply.0.get()).map(crate::eden_panel::PrivateValue).map_err(|_| "Invalid management response".to_string())
+                }.await;
+                TaskResult::EdenUi { agent_id, generation, result }
+            });
+        }""",
+    )
+    path = pager / "app/effects/mod.rs"
+    source = path.read_text()
+    marker = '                    let payload = serde_json::value::to_raw_value(&request.0).map_err(|_| "Invalid private form request".to_string())?;'
+    if "eden_panel::local_action" not in source:
+        path.write_text(
+            source.replace(
+                marker,
+                "                    if let Some(reply) = crate::eden_panel::local_action(&request.0).await { return Ok(reply); }\n"
+                + marker,
+                1,
+            )
+        )
+    patch(
+        "app/dispatch/task_result.rs",
+        "    match result {\n        TaskResult::WithPinnedMemoryMode { .. }",
+        """    match result {
+        TaskResult::EdenUi { agent_id, generation, result } => {
+            if let Some(action) = crate::eden_panel::receive(app, agent_id, generation, result) { dispatch(action, app) } else { vec![] }
+        }
+        TaskResult::WithPinnedMemoryMode { .. }""",
+    )
+    patch(
+        "views/modal.rs",
+        "pub enum ActiveModal {",
+        "pub enum ActiveModal {\n    Eden { state: Box<crate::eden_panel::State> },",
+    )
+    patch(
+        "views/modal.rs",
+        "            | ActiveModal::Settings { .. }",
+        "            | ActiveModal::Settings { .. }\n            | ActiveModal::Eden { .. }",
+    )
+    patch(
+        "views/modal.rs",
+        "            ActiveModal::Settings { .. } => crate::views::settings_modal::MODAL_TITLE,",
+        '            ActiveModal::Eden { .. } => "Eden",\n            ActiveModal::Settings { .. } => crate::views::settings_modal::MODAL_TITLE,',
+    )
+    patch(
+        "app/modals.rs",
+        "            | ActiveModal::Settings { .. }",
+        "            | ActiveModal::Settings { .. }\n            | ActiveModal::Eden { .. }",
+    )
+    patch(
+        "app/modals.rs",
+        "            } else if let modal::ActiveModal::Settings {",
+        "            } else if let modal::ActiveModal::Eden { state } = active_modal {\n                state.render(buf, area, &theme);\n            } else if let modal::ActiveModal::Settings {",
+    )
+    patch(
+        "app/dispatch/session/load.rs",
+        "        agent.session.loading_replay = false;",
+        '        agent.session.loading_replay = false;\n        if crate::eden_services::enabled() { agent.show_toast("Session opened"); }',
+    )
+    patch(
+        "app/app_view.rs",
+        "        let ev: &Event = &normalized;",
+        """        let ev: &Event = &normalized;
+        if !matches!(ev, Event::Resize(..))
+            && let ActiveView::Agent(id) = self.active_view
+            && let Some(agent) = self.agents.get_mut(&id)
+            && matches!(agent.active_modal, Some(crate::views::modal::ActiveModal::Eden { .. }))
+        {
+            return agent.handle_input(ev, &self.registry);
+        }""",
+    )
+    path = pager / "app/agent_view/input.rs"
+    old_private = """        // Eden private modals own every input event before composer and run shortcuts.
+        if let Some(crate::views::modal::ActiveModal::Eden { state }) = self.active_modal.as_mut() {
+            let (outcome, close) = state.input(ev);
+            if close { self.active_modal = None; }
+            return outcome;
+        }
+        // Eden cancellation keeps"""
+    path.write_text(path.read_text().replace(old_private, "        // Eden cancellation keeps", 1))
+    patch(
+        "app/agent_view/input.rs",
+        "        if self.scrollback_drag_latched() {",
+        """        // Private forms own editing; foreground Ctrl+C keeps its established priority.
+        if let Some(crate::views::modal::ActiveModal::Eden { state }) = self.active_modal.as_mut() {
+            let (outcome, close) = state.input(ev);
+            if close { self.active_modal = None; }
+            return outcome;
+        }
+        if self.scrollback_drag_latched() {""",
+    )
+    patch(
+        "slash/commands/mod.rs",
+        "    let commands: Vec<Arc<dyn SlashCommand>>",
+        "    let mut commands: Vec<Arc<dyn SlashCommand>>",
+    )
+    patch(
+        "slash/commands/mod.rs",
+        "    if crate::eden_services::enabled() { commands.into_iter()",
+        "    if crate::eden_services::enabled() { commands.extend([Arc::new(crate::eden_commands::Auth) as Arc<dyn SlashCommand>, Arc::new(crate::eden_commands::Config), Arc::new(crate::eden_commands::Sessions)]); }\n    if crate::eden_services::enabled() { commands.into_iter()",
+    )
+    patch(
+        "slash/commands/login.rs",
+        "        CommandResult::Action(Action::Login)",
+        '        CommandResult::Action(if crate::eden_services::enabled() { Action::EdenOpen("auth") } else { Action::Login })',
+    )
+    patch(
+        "slash/commands/login.rs",
+        "        Distribution::current().allows",
+        "        crate::eden_services::enabled() || Distribution::current().allows",
+    )
+    patch(
+        "slash/commands/logout.rs",
+        "        CommandResult::Action(Action::Logout)",
+        '        CommandResult::Action(if crate::eden_services::enabled() { Action::EdenOpen("auth") } else { Action::Logout })',
+    )
+    patch(
+        "acp/leader_bridge.rs",
+        ".with_tracing(true)",
+        ".with_tracing(!crate::eden_services::enabled())",
+    )
+    # There are separate sender/receiver gateways; neither may log private RPC bodies.
+    path = pager / "acp/leader_bridge.rs"
+    path.write_text(
+        path.read_text().replace(
+            ".with_tracing(true)", ".with_tracing(!crate::eden_services::enabled())"
+        )
+    )
+
+
+def patch_eden_cancel_identity(root):
+    pager = root / "crates/codegen/xai-grok-pager/src"
+    path = pager / "app/dispatch/turn.rs"
+    source = path.read_text()
+    old = "        rewind_prompt_id,\n    }\n}"
+    new = "        rewind_prompt_id: if crate::eden_services::enabled() { agent.session.current_prompt_id.clone() } else { rewind_prompt_id },\n    }\n}"
+    if new not in source:
+        assert old in source
+        source = source.replace(old, new, 1)
+        source = source.replace(
+            "        rewind_prompt_id: None,\n    })",
+            "        rewind_prompt_id: if crate::eden_services::enabled() { pending.prompt_id.clone() } else { None },\n    })",
+            1,
+        )
+        path.write_text(source)
+    path = pager / "app/effects/mod.rs"
+    source = path.read_text()
+    old = '    if let Some(pid) = cancel.rewind_prompt_id {\n        meta.insert("rewindIfNoOutput".into(), true.into());'
+    new = '    if let Some(pid) = cancel.rewind_prompt_id {\n        if crate::eden_services::enabled() { meta.insert("promptId".into(), pid.into()); return meta; }\n        meta.insert("rewindIfNoOutput".into(), true.into());'
+    if new not in source:
+        assert old in source
+        path.write_text(source.replace(old, new, 1))
 
 
 def main():
@@ -49,6 +290,9 @@ def main():
     patch_eden_cancel(root)
     patch_cancel_help(root)
     patch_busy_send(root)
+    patch_eden_thinking(root)
+    patch_eden_management(root)
+    patch_eden_cancel_identity(root)
     acp = root / "crates/codegen/xai-grok-pager/src/acp"
     path = acp / "mod.rs"
     source = path.read_text()

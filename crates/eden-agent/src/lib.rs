@@ -223,16 +223,17 @@ impl Session {
         let local = embedded.packages;
         let desired = composition::binding(&selected, &cwd)?;
         if !rebind
-            && previous
-                .iter()
-                .rev()
-                .find(|r| r.kind == "composition_lock")
-                .is_some_and(|saved| !composition::equivalent(&saved.payload, &desired))
+            && let Some(saved) = previous.iter().rev().find(|r| r.kind == "composition_lock")
+            && !composition::equivalent(&saved.payload, &desired)
         {
             return Err(Fault::new(
                 "Unavailable",
                 "composition",
-                "saved package binding differs; use an explicit session switch",
+                format!(
+                    "saved package binding differs: {}; use an explicit session switch or migrate \
+                     a copy",
+                    composition::differences(&saved.payload, &desired)
+                ),
             ));
         }
         let kernel = Kernel::load_embedded(
@@ -342,8 +343,11 @@ impl Session {
                     return Err(Fault::new(
                         "Unavailable",
                         "composition",
-                        "saved package binding differs; explicitly switch the saved session \
-                         composition",
+                        format!(
+                            "saved package binding differs: {}; explicitly switch the saved \
+                             session composition or migrate a copy",
+                            composition::differences(&saved.payload, &locked)
+                        ),
                     ));
                 }
                 if let Some(record) = reply.records.first() {

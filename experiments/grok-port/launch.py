@@ -17,7 +17,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cwd", type=Path, default=Path.cwd())
     parser.add_argument("--resume", type=Path, help="Stopped Eden JSONL history")
-    parser.add_argument("--host", type=Path, default=ROOT / "artifacts/r1-candidate/bin/eden")
+    parser.add_argument("--host", type=Path, default=ROOT / "artifacts/g1-native-host/bin/eden")
     args = parser.parse_args()
     task = ROOT / "artifacts/g1-grok-port/sessions" / str(uuid.uuid4())
     task.mkdir(parents=True)
@@ -39,14 +39,32 @@ def main():
             command, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True
         )
     deadline = time.monotonic() + 30
+    recovery = False
     while not endpoint.exists():
-        if host.poll() is not None or time.monotonic() > deadline:
+        if host.poll() is not None:
+            if args.resume and not recovery:
+                recovery = True
+                command[command.index("--session") + 1] = str(task / "management.jsonl")
+                command[command.index("resume-live")] = "live"
+                with (task / "host.log").open("ab") as log:
+                    host = subprocess.Popen(
+                        command,
+                        stdin=subprocess.DEVNULL,
+                        stdout=log,
+                        stderr=log,
+                        start_new_session=True,
+                    )
+                deadline = time.monotonic() + 30
+                continue
+            raise SystemExit(f"Host did not start; see {task / 'host.log'}")
+        if time.monotonic() > deadline:
             raise SystemExit(f"Host did not start; see {task / 'host.log'}")
         time.sleep(0.05)
     json.loads(endpoint.read_text())
-    result = subprocess.call(
-        [sys.executable, str(HERE / "run.py"), "--endpoint", str(endpoint)], cwd=args.cwd
-    )
+    frontend = [sys.executable, str(HERE / "run.py"), "--endpoint", str(endpoint)]
+    if recovery:
+        frontend.extend(["--history", str(history)])
+    result = subprocess.call(frontend, cwd=args.cwd)
     print(f"Attach: python3 {HERE / 'run.py'} --endpoint {endpoint}")
     print(f"History: {history}")
     print(f"Stop host: attach with {args.host} live-tui --endpoint {endpoint}, then /stop-host.")

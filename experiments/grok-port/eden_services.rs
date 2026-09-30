@@ -10,6 +10,12 @@ pub(crate) fn command_connected(name: &str) -> bool {
     matches!(
         name,
         "resume"
+            | "rename"
+            | "auth"
+            | "login"
+            | "logout"
+            | "config"
+            | "sessions"
             | "settings"
             | "model"
             | "effort"
@@ -26,6 +32,7 @@ pub(crate) fn command_connected(name: &str) -> bool {
             | "theme"
             | "vim-mode"
             | "exit"
+            | "quit"
             | "help"
     )
 }
@@ -114,4 +121,50 @@ pub(crate) fn palette_connected(entry: &crate::views::modal::PaletteEntry) -> bo
         | PaletteCommand::EditPromptExternal => true,
         _ => false,
     }
+}
+
+/// The host broadcasts the complete selection so sparse compatibility mapping survives reopen.
+pub(crate) fn model_update(
+    notification: &agent_client_protocol::ExtNotification,
+    app: &mut crate::app::app_view::AppView,
+) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(notification.params.get()) else {
+        return false;
+    };
+    let Some(session_id) = value["sessionId"].as_str() else {
+        return false;
+    };
+    let Ok(models) =
+        serde_json::from_value::<agent_client_protocol::SessionModelState>(value["models"].clone())
+    else {
+        return false;
+    };
+    for agent in app.agents.values_mut() {
+        if agent
+            .session
+            .session_id
+            .as_ref()
+            .is_some_and(|id| id.0.as_ref() == session_id)
+        {
+            agent.session.models = Some(models.clone()).into();
+            agent.session.models.model_changed_during_switch = agent.session.model_switch_pending;
+            agent.refresh_context_total();
+        }
+    }
+    true
+}
+
+pub(crate) fn thinking_label(
+    models: &crate::acp::model_state::ModelState,
+    name: &str,
+) -> Option<String> {
+    let info = models.available.get(models.current.as_ref()?)?;
+    let thinking = info.meta.as_ref()?.get("edenThinking")?;
+    let requested = thinking["requested"].as_str()?;
+    let effective = thinking["effective"].as_str().unwrap_or("default");
+    Some(if requested == effective {
+        format!("{name} ({requested})")
+    } else {
+        format!("{name} ({requested} → {effective})")
+    })
 }

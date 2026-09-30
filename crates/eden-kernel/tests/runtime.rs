@@ -571,3 +571,45 @@ async fn host_auxiliary_timeout_waits_for_the_author_cleanup_barrier() {
     );
     kernel.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn cancelled_before_dispatch_reports_cancellation_without_entering_service() {
+    let entered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observer = entered.clone();
+    let package =
+        Package::new("cancel-probe").service("test.cancel-before-admission", move |_: (), _| {
+            observer.store(true, std::sync::atomic::Ordering::SeqCst);
+            async { Ok::<_, p::Fault>(()) }
+        });
+    let kernel = mount(
+        vec![tail(), package],
+        json!({
+            "scopes": {
+                "": { "bindings": { "test.cancel-before-admission": { "tail": "cancel-probe" } } },
+            },
+        }),
+    )
+    .await;
+    let cancel = Cancellation::default();
+    cancel.cancel();
+    let terminal = kernel
+        .invoke(
+            Request {
+                execution: None,
+                session_id: 1,
+                run_id: 1,
+                contract: "test.cancel-before-admission".into(),
+                payload: Value::Null,
+            },
+            cancel,
+        )
+        .await;
+    assert!(
+        matches!(terminal.outcome, p::Outcome::Cancelled),
+        "{:?}",
+        terminal.outcome
+    );
+    assert!(!entered.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(terminal.cleanup_errors.is_empty());
+    kernel.shutdown().await.unwrap();
+}

@@ -153,6 +153,25 @@ pub(super) async fn management_submit(
                 .as_ref()
                 .ok_or_else(|| fault("Unavailable", "launch options unavailable"))?;
             let path = managed_path(shared, body, "path")?;
+            if let Some(endpoint) = crate::tui::selected_live_endpoint(&path).await {
+                let client = eden_tui_client::HostClient::new(&endpoint);
+                let snapshot = client.snapshot().await?;
+                if snapshot.state.session_id == shared.session.id() {
+                    let run = if body["preserve_tags"] == true {
+                        shared.session.rename(field(body, "name")?)?
+                    } else {
+                        shared
+                            .session
+                            .set_metadata(field(body, "name")?, field(body, "tags")?)?
+                    };
+                    return shared.session.wait(run).await?.into_result();
+                }
+                let mut request = body.clone();
+                request["session_id"] = json!(snapshot.state.session_id);
+                let reply =
+                    super::call(&endpoint, "POST", "/manage/metadata", Some(&request)).await?;
+                return client.wait(field(&reply, "run_id")?).await?.into_result();
+            }
             let session = Session::open_saved_with_workspace(
                 crate::composition(cli).map_err(|e| fault("InvalidInput", e.to_string()))?,
                 path,
@@ -161,7 +180,11 @@ pub(super) async fn management_submit(
             )
             .await?;
             let result = async {
-                let run = session.set_metadata(field(body, "name")?, field(body, "tags")?)?;
+                let run = if body["preserve_tags"] == true {
+                    session.rename(field(body, "name")?)?
+                } else {
+                    session.set_metadata(field(body, "name")?, field(body, "tags")?)?
+                };
                 session.wait(run).await?.into_result()
             }
             .await;

@@ -884,6 +884,30 @@ impl Session {
             .await?;
         Ok(reply.snapshot)
     }
+    /// Rename without replacing tags; the guarded run reads the latest durable metadata.
+    pub fn rename(&self, name: String) -> Result<u64, Fault> {
+        self.start(true, move |session, run_id, _| async move {
+            let result = async {
+                let records = session.history().await?;
+                let tags = records
+                    .iter()
+                    .rev()
+                    .find(|record| record.kind == "session_metadata")
+                    .map(|record| record.payload["tags"].clone())
+                    .unwrap_or_else(|| json!([]));
+                session
+                    .commit(
+                        run_id,
+                        "session_metadata",
+                        json!({ "name": name, "tags": tags }),
+                    )
+                    .await?;
+                Ok(json!("Session renamed."))
+            }
+            .await;
+            as_terminal(result)
+        })
+    }
     /// Save the session's name and tags as a committed record.
     pub fn set_metadata(&self, name: String, tags: Vec<String>) -> Result<u64, Fault> {
         self.start(true, move |session, run_id, _| async move {

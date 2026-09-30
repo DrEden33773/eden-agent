@@ -55,14 +55,17 @@ class Terminal(streaming.Terminal):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--installation", type=Path, default=ROOT / "artifacts/g1-native-host")
     parser.add_argument("--management", action="store_true")
     parser.add_argument("--draft-cancel", action="store_true")
     parser.add_argument("--busy-send", action="store_true")
+    parser.add_argument("--ack-lifecycle", action="store_true")
+    parser.add_argument("--thinking", action="store_true")
     args = parser.parse_args()
     if args.busy_send and not args.draft_cancel:
         parser.error("--busy-send requires --draft-cancel")
     args.output.mkdir(parents=True, exist_ok=True)
-    candidate = ROOT / "artifacts/r1-candidate"
+    candidate = args.installation.resolve()
     binary = candidate / "bin/eden"
     server = streaming.Provider()
     server.RequestHandlerClass = ProviderHandler
@@ -106,6 +109,12 @@ def main():
                         },
                         "credentials": {"path": str(root / "global/keys.json")},
                     }
+            if args.thinking:
+                for package in config["packages"]:
+                    if package["descriptor"]["package"] == "model-access":
+                        model = package["config"]["catalog"]["models"][0]
+                        model["capabilities"]["reasoning"] = True
+                        model["compat"] = {"thinkingLevelMap": {"minimal": None, "max": "max"}}
             if args.management:
                 for package in config["packages"]:
                     if package["descriptor"]["package"] == "model-access":
@@ -171,6 +180,8 @@ def main():
                 "/models/select",
                 {"selection": {"provider": "fixture", "model": "audit-A", "thinking": "off"}},
             )
+            if args.ack_lifecycle:
+                os.environ["GROK_PROMPT_ACK_TIMEOUT_SECS"] = "5"
             terminal = Terminal(HERE / "run.py", relay_file, width=110, height=40)
 
             def capture(name):
@@ -193,6 +204,26 @@ def main():
 
             terminal.wait("audit-A", seconds=30)
             capture("startup")
+            if args.thinking:
+                for requested, effective in [("max", "max"), ("off", "off"), ("minimal", "low")]:
+                    terminal.command(f"/effort {requested}")
+                    deadline = time.monotonic() + 5
+                    thinking = None
+                    while time.monotonic() < deadline:
+                        thinking = call("/models/current", {})["effective_target"]["thinking"]
+                        if thinking == {"requested": requested, "effective": effective}:
+                            break
+                        terminal.read(0.1)
+                    assert thinking == {"requested": requested, "effective": effective}, (
+                        requested,
+                        thinking,
+                        terminal.display,
+                    )
+                    terminal.wait(
+                        f"({requested})" if requested == effective else f"{requested} → {effective}"
+                    )
+                    capture(f"thinking-{requested}")
+                checks["thinking_full_levels_and_sparse_mapping"] = True
             assert "Shift+Tab:mode" not in terminal.display.replace(" ", "")
             if args.management:
                 terminal.send(b"\x10voice")
@@ -215,7 +246,20 @@ def main():
             terminal.wait("/eden-status")
             terminal.send(b"\x15")
             checks["input_completion"] = True
+            if args.ack_lifecycle:
+                server.allow.clear()
             terminal.command("hello scripted tui")
+            if args.ack_lifecycle:
+                assert server.started.wait(10), "provider was not reached"
+                terminal.read(6)
+                state = call("/tui/snapshot")["state"]
+                assert state["active_run"] is not None, (
+                    "accepted prompt cancelled before the first provider event",
+                    state,
+                )
+                assert "not acknowledge" not in terminal.display
+                checks["accepted_before_first_event"] = True
+                server.allow.set()
             terminal.wait("item_00010", seconds=30)
             capture("stream")
             if args.draft_cancel:
@@ -283,9 +327,18 @@ def main():
             )
             frame = call("/tui/snapshot")
             checks["reopened_history"] = len(frame["history"])
+            if args.ack_lifecycle:
+                os.environ["GROK_PROMPT_ACK_TIMEOUT_SECS"] = "5"
             terminal = Terminal(HERE / "run.py", relay_file, width=110, height=40)
             terminal.wait("audit-A", seconds=30)
             terminal.wait("TOOLS_FINISHED", seconds=20)
+            if args.thinking:
+                assert call("/models/current", {})["effective_target"]["thinking"] == {
+                    "requested": "minimal",
+                    "effective": "low",
+                }
+                terminal.wait("minimal → low")
+                checks["thinking_reopens_requested_and_effective"] = True
             capture("reopen")
             terminal.send(b"\x1b[5~")
             terminal.wait("item_000", seconds=10)
@@ -315,7 +368,11 @@ def main():
             checks["cancelled_process_tree"] = True
             capture("tool-cancel")
             if args.management:
-                terminal.command("/model fixture/audit-B")
+                terminal.command(
+                    "/model fixture/audit-B minimal"
+                    if args.thinking
+                    else "/model fixture/audit-B off"
+                )
                 streaming.live.wait_for(
                     endpoint,
                     lambda frame: any(
@@ -332,6 +389,11 @@ def main():
                     != "audit-B"
                 )
                 terminal.wait("audit-B")
+                if args.thinking:
+                    assert call("/models/current", {})["effective_target"]["thinking"] == {
+                        "requested": "minimal",
+                        "effective": "low",
+                    }
                 checks["model_current_only"] = True
                 capture("model-current")
                 terminal.command("/settings")
@@ -342,6 +404,8 @@ def main():
                 terminal.send(b"\x1b[A\r")
                 terminal.wait("Current model and new-session default saved", seconds=20)
                 assert call("/models/current", {})["effective_target"]["model"] == "audit-A"
+                if args.thinking:
+                    assert json.loads(catalog_path.read_text())["default"]["thinking"] == "minimal"
                 assert json.loads(catalog_path.read_text())["default"]["model"] == "audit-A"
                 checks["model_current_and_default"] = True
                 capture("settings-saved")
@@ -396,7 +460,11 @@ def main():
                 checks["session_switch_did_not_execute"] = True
                 assert relay.opened, "picker never opened an Eden endpoint"
                 child = json.loads(relay.opened[-1].read_text())
-                terminal.command("/model fixture/audit-A")
+                terminal.command(
+                    "/model fixture/audit-A minimal"
+                    if args.thinking
+                    else "/model fixture/audit-A off"
+                )
                 terminal.wait("audit-A")
                 deadline = time.monotonic() + 10
                 while (

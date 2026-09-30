@@ -1,12 +1,16 @@
 //! ACP transport for the Grok-derived frontend, backed by the existing Eden host.
+mod forms;
+mod models;
 mod projection;
 mod sessions;
+mod submission;
 
-use eden_protocol::{Fault, Outcome, coding::Block};
+use eden_protocol::Fault;
 use eden_tui_client::{HostClient, Snapshot};
 use projection::{Projection, text};
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
     path::PathBuf,
     sync::{
         Arc,
@@ -16,22 +20,28 @@ use std::{
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    sync::{Mutex, mpsc},
+    sync::{Mutex, Notify, mpsc},
 };
 
 struct View {
     snapshot: Snapshot,
     projection: Projection,
+    prompts: BTreeMap<u64, (String, Option<String>)>,
 }
 struct Adapter {
     client: HostClient,
+    reading_diagnostic: Option<String>,
+    owns_reader: bool,
     endpoint: PathBuf,
     session: u64,
     identity: String,
     following: std::sync::atomic::AtomicBool,
+    load_pending: std::sync::atomic::AtomicBool,
+    loaded: Notify,
     lease: AtomicU64,
     shell_run: AtomicU64,
     model_operation: Mutex<()>,
+    active_prompt: Mutex<Option<submission::Prompt>>,
     nonce: u128,
     next: AtomicU64,
     view: Mutex<View>,
@@ -53,11 +63,16 @@ impl Adapter {
         Ok(Self {
             client: HostClient::for_session(&endpoint, session),
             endpoint,
+            reading_diagnostic: None,
+            owns_reader: false,
             session,
             identity: identity.unwrap_or_else(|| format!("eden-{session}")),
             following: std::sync::atomic::AtomicBool::new(false),
+            load_pending: std::sync::atomic::AtomicBool::new(false),
+            loaded: Notify::new(),
             shell_run: AtomicU64::new(0),
             model_operation: Mutex::new(()),
+            active_prompt: Mutex::new(None),
             lease: AtomicU64::new(0),
             nonce: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -67,6 +82,7 @@ impl Adapter {
             view: Mutex::new(View {
                 snapshot,
                 projection: Projection::default(),
+                prompts: BTreeMap::new(),
             }),
             output,
         })
@@ -84,13 +100,12 @@ impl Adapter {
         let _ = self.output.send(value);
     }
     fn update(&self, update: Value, replay: bool) {
+        self.correlated_update(update, json!({ "isReplay": replay }));
+    }
+    fn correlated_update(&self, update: Value, meta: Value) {
         self.send(json!({
             "method": "session/update",
-            "params": {
-                "sessionId": self.identity,
-                "update": update,
-                "_meta": { "isReplay": replay },
-            },
+            "params": { "sessionId": self.identity, "update": update, "_meta": meta },
         }));
     }
     async fn post(&self, route: &str, mut body: Value) -> Result<Value, Fault> {
@@ -100,58 +115,53 @@ impl Adapter {
     async fn complete(&self, run: u64) -> Result<Value, Fault> {
         self.client.wait(run).await?.into_result()
     }
-    async fn model_state(&self) -> Result<Value, Fault> {
-        let catalog = self.post("/models/list", json!({})).await?;
-        let current = self.post("/models/current", json!({})).await?;
-        let target = &current["effective_target"];
-        let current_id = format!("{}/{}", text(&target["provider"]), text(&target["model"]));
-        let models: Vec<_> = catalog["models"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|entry| {
-                let model = &entry["target"];
-                json!({
-                    "modelId": format!("{}/{}", text(&model["provider"]), text(&model["model"])),
-                    "name":
-                        format!("{}/{}", text(&model["provider"]), text(&model["model"])),
-                    "description":
-                        format!("{} · {}", text(&entry["name"]), text(&entry["status"])),
-                    "_meta": {
-                        "totalContextTokens": model["limits"]["context_window"],
-                        "acceptsImages": model["capabilities"]["images"],
-                        "supportsReasoningEffort": model["capabilities"]["reasoning"],
-                    },
-                })
-            })
-            .collect();
-        Ok(json!({ "currentModelId": current_id, "availableModels": models }))
-    }
     async fn project(&self, snapshot: Snapshot, replay: bool) {
         let mut view = self.view.lock().await;
-        for update in view.projection.apply(&snapshot, replay) {
-            if let Some(model) = update.get("_eden_model") {
-                self.send(json!({
-                    "method": "_x.ai/session_notification",
-                    "params": {
-                        "sessionId": self.identity,
-                        "update": {
-                            "sessionUpdate": "model_changed",
-                            "model_id":
-                                format!("{}/{}", text(&model["provider"]), text(&model["model"])),
-                        },
-                        "_meta": { "isReplay": replay },
-                    },
-                }));
+        if replay {
+            view.projection = Projection::default();
+        } else if self.load_pending.load(Ordering::Acquire) {
+            return;
+        }
+        let mut model_changed = false;
+        for mut update in view.projection.apply(&snapshot, replay) {
+            let run = update.as_object_mut().and_then(|u| u.remove("_eden_run"));
+            let attempt = update
+                .as_object_mut()
+                .and_then(|u| u.remove("_eden_attempt"));
+            let mut meta =
+                json!({ "isReplay": replay, "edenRunId": run, "edenAttemptId": attempt });
+            if !replay
+                && let Some((prompt, request)) = run
+                    .as_ref()
+                    .and_then(Value::as_u64)
+                    .and_then(|run| view.prompts.get(&run))
+            {
+                meta["promptId"] = json!(prompt);
+                meta["edenRequestId"] = json!(request);
+            }
+            if update.get("_eden_model").is_some() {
+                model_changed = true;
             } else {
-                self.update(update, replay);
+                self.correlated_update(update, meta);
             }
         }
         view.snapshot = snapshot;
+        drop(view);
+        if model_changed && let Ok(models) = self.model_state().await {
+            self.send(json!({
+                "method": "_eden/model/state",
+                "params": { "sessionId": self.identity, "models": models },
+            }));
+        }
     }
     async fn follow(self: Arc<Self>) {
         let mut disconnected = false;
         loop {
+            let loaded = self.loaded.notified();
+            if self.load_pending.load(Ordering::Acquire) {
+                loaded.await;
+                continue;
+            }
             let previous = self.view.lock().await.snapshot.clone();
             let lease = self.lease.load(Ordering::Relaxed);
             if lease == 0 {
@@ -164,6 +174,7 @@ impl Adapter {
                     }
                     disconnected = false;
                     self.project(snapshot, false).await;
+                    self.finish_adopted().await;
                 }
                 Err(error)
                     if error.code == "AttachmentExpired"
@@ -232,68 +243,23 @@ impl Adapter {
             );
             return Ok(json!({ "stopReason": "end_turn" }));
         }
-        let run = if let Some(command) = blocks
-            .iter()
-            .find_map(|b| b["_meta"]["bash_command"].as_str())
-        {
-            let run = self
-                .client
-                .user_shell(&self.request_id(), command, "bash", false)
-                .await?;
-            self.shell_run.store(run, Ordering::Relaxed);
-            run
-        } else if let Some(instructions) = body.strip_prefix("/compact") {
-            self.client
-                .compact(&self.request_id(), instructions.trim())
-                .await?
-        } else {
-            if body.starts_with('/') {
-                let command = body.split_whitespace().next().unwrap_or("");
-                self.message(
-                    if matches!(
-                        command,
-                        "/voice" | "/loop" | "/tasks" | "/imagine" | "/imagine-video"
-                    ) {
-                        "This capability is not provided by the bundled Eden backend. Use \
-                         /capabilities to see available features."
-                    } else {
-                        "This command is not connected yet. Use /capabilities for current \
-                         coverage; no model request was sent."
-                    },
-                );
-                return Ok(json!({ "stopReason": "end_turn" }));
-            }
-            let content: Result<Vec<_>, Fault> = blocks
-                .iter()
-                .map(|block| match text(&block["type"]) {
-                    "text" => Ok(Block::Text {
-                        text: text(&block["text"]).into(),
-                    }),
-                    _ => Err(fault("This attachment type is not connected yet")),
-                })
-                .collect();
-            self.client
-                .submit_blocks(&self.request_id(), content?)
-                .await?
-        };
-        let terminal = self.client.wait(run).await?;
-        let _ = self
-            .shell_run
-            .compare_exchange(run, 0, Ordering::Relaxed, Ordering::Relaxed);
-        self.project(self.client.snapshot().await?, false).await;
-        if let Some(error) = terminal.cleanup_errors.first() {
-            return Err(error.clone());
-        }
-        if let Outcome::Failed(error) = &terminal.outcome {
-            return Err(error.clone());
-        }
-        Ok(json!({
-            "stopReason": if matches!(terminal.outcome, Outcome::Cancelled) {
-                    "cancelled"
+        if body.starts_with('/') && !body.starts_with("/compact") {
+            let command = body.split_whitespace().next().unwrap_or("");
+            self.message(
+                if matches!(
+                    command,
+                    "/voice" | "/loop" | "/tasks" | "/imagine" | "/imagine-video"
+                ) {
+                    "This capability is not provided by the bundled Eden backend. Use \
+                     /capabilities to see available features."
                 } else {
-                    "end_turn"
+                    "This command is not connected yet. Use /capabilities for current coverage; no \
+                     model request was sent."
                 },
-        }))
+            );
+            return Ok(json!({ "stopReason": "end_turn" }));
+        }
+        self.run_prompt(params, &body, blocks).await
     }
     async fn dispatch(self: &Arc<Self>, request: &Value) -> Result<Value, Fault> {
         let method = text(&request["method"]).trim_start_matches('_');
@@ -335,15 +301,53 @@ impl Adapter {
                 Ok(json!({}))
             }
             "session/load" | "session/new" => {
+                self.load_pending.store(true, Ordering::Release);
                 if self.lease.load(Ordering::Relaxed) == 0 {
                     let lease = self.client.attach("tui").await?;
                     self.lease.store(lease, Ordering::Relaxed);
                 }
-                self.view.lock().await.projection = Projection::default();
-                self.project(self.client.snapshot().await?, true).await;
+                let snapshot = self.client.snapshot().await?;
+                let running = self.adopt_run(&snapshot).await;
+                self.project(snapshot, true).await;
+                if self.view.lock().await.snapshot.state.read_only {
+                    self.update(
+                        json!({
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {
+                                "type": "text",
+                                "text": format!(
+                                    "\n\nRead-only history. {}\nUse /sessions to preview a \
+                                     migrated copy with the current composition. The original \
+                                     remains unchanged.",
+                                    self.reading_diagnostic
+                                        .as_deref()
+                                        .unwrap_or("Execution and edits are disabled.")
+                                ),
+                            },
+                        }),
+                        true,
+                    );
+                }
+                let models = self.model_state().await?;
+                if let Some(error) = models["_meta"]["edenDiagnostic"].as_str() {
+                    self.update(
+                        json!({
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {
+                                "type": "text",
+                                "text": format!(
+                                    "{error}\nSelect a model with /model, authenticate with \
+                                     /auth, or inspect /config."
+                                ),
+                            },
+                        }),
+                        true,
+                    );
+                }
                 let reply = json!({
                     "sessionId": self.identity,
-                    "models": self.model_state().await?,
+                    "models": models,
+                    "_meta": { "x.ai/runningPromptId": running },
                 });
                 Ok(reply)
             }
@@ -373,27 +377,39 @@ impl Adapter {
                     .collect();
                 Ok(json!({ "prompts": prompts }))
             }
-            "session/prompt" => self.prompt(params).await,
-            "session/cancel" => {
-                let snapshot = self.client.snapshot().await?;
-                if let Some(run) = snapshot.state.active_run {
-                    self.client.cancel(run).await?;
+            "session/prompt" => {
+                if self.view.lock().await.snapshot.state.read_only {
+                    return Err(fault(
+                        "This history is read-only; use /sessions to resume a matching session or \
+                         create a migrated copy",
+                    ));
                 }
-                let run = self.shell_run.load(Ordering::Relaxed);
-                if run != 0 {
-                    self.client.cancel_shell(run).await?;
-                }
+                self.prompt(params).await
+            }
+            "x.ai/session/rename" => {
+                let reply = self
+                    .post(
+                        "/manage/metadata",
+                        json!({
+                            "request_id": self.request_id(),
+                            "name": params["title"],
+                            "preserve_tags": true,
+                            "tags": [],
+                        }),
+                    )
+                    .await?;
+                self.complete(
+                    reply["run_id"]
+                        .as_u64()
+                        .ok_or_else(|| fault("Missing rename operation"))?,
+                )
+                .await?;
                 Ok(json!({}))
             }
+            "session/cancel" => self.cancel_prompt(params).await,
             "session/set_model" => {
                 let _operation = self.model_operation.lock().await;
-                let (provider, model) = text(&params["modelId"])
-                    .split_once('/')
-                    .ok_or_else(|| fault("Invalid Eden model identity"))?;
-                let mut selection = json!({ "provider": provider, "model": model });
-                if let Some(effort) = params["_meta"]["reasoningEffort"].as_str() {
-                    selection["thinking"] = json!(effort);
-                }
+                let selection = self.model_selection(params).await?;
                 let reply = self
                     .post(
                         "/models/select",
@@ -406,14 +422,14 @@ impl Adapter {
                         .ok_or_else(|| fault("Missing model operation"))?,
                 )
                 .await?;
+                self.project(self.client.snapshot().await?, false).await;
                 Ok(json!({}))
             }
             "eden/model/default" => {
                 let _operation = self.model_operation.lock().await;
-                let (provider, model) = text(&params["modelId"])
-                    .split_once('/')
-                    .ok_or_else(|| fault("Invalid Eden model identity"))?;
-                let selection = json!({ "provider": provider, "model": model });
+                let selection = self.model_selection(params).await?;
+                let provider = text(&selection["provider"]);
+                let model = text(&selection["model"]);
                 let chosen = self
                     .post(
                         "/models/select",
@@ -484,8 +500,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let request: Value = serde_json::from_str(&line)?;
         let server = server.clone();
         tasks.spawn(async move {
-            let result = if text(&request["method"]).trim_start_matches('_') == "x.ai/session/list"
-            {
+            let result = if text(&request["method"]).trim_start_matches('_') == "eden/ui" {
+                server.forms.dispatch(&server, &request["params"]).await
+            } else if text(&request["method"]).trim_start_matches('_') == "x.ai/session/list" {
                 server.list(&request["params"]).await
             } else {
                 match server.target(&request).await {
@@ -503,22 +520,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     })),
                 }
             }
-            for adapter in server.all().await {
-                if adapter.lease.load(Ordering::Relaxed) != 0
-                    && !adapter.following.swap(true, Ordering::Relaxed)
-                {
-                    adapter.follow().await;
-                }
+            if matches!(text(&request["method"]), "session/load" | "session/new") {
+                server.finish_load(&request["params"]).await;
             }
+            server.follow_all().await;
         });
         while tasks.try_join_next().is_some() {}
     }
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
+    server.stop_followers().await;
+    server.forms.close_all(&server).await;
     for adapter in server.all().await {
         let lease = adapter.lease.load(Ordering::Relaxed);
         if lease != 0 && adapter.endpoint.exists() {
             adapter.client.detach(lease).await?;
+        }
+        if adapter.owns_reader && adapter.endpoint.exists() {
+            let _ = adapter.post("/shutdown", json!({})).await;
         }
     }
     drop(server);

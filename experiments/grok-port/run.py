@@ -17,6 +17,9 @@ def main():
     parser.add_argument("command", nargs="?", choices=["live-tui"])
     parser.add_argument("--endpoint", type=Path, required=True)
     parser.add_argument(
+        "--history", type=Path, help="Open this saved history through the attached management host"
+    )
+    parser.add_argument(
         "--pager", type=Path, default=ROOT / f"artifacts/g1-native-port/eden-grok{SUFFIX}"
     )
     args = parser.parse_args()
@@ -27,6 +30,7 @@ def main():
         key: value
         for key, value in os.environ.items()
         if not key.startswith(("GROK_", "XAI_", "LC_GROK_"))
+        or key == "GROK_PROMPT_ACK_TIMEOUT_SECS"
     }
     environment.update(
         {
@@ -50,10 +54,15 @@ def main():
             "EDEN_GROK_ENDPOINT": str(endpoint),
         }
     )
-    identity = json.loads(endpoint.read_text())["session_id"]
+    identity = f"eden-{json.loads(endpoint.read_text())['session_id']}"
+    if args.history:
+        history = args.history.resolve()
+        environment["EDEN_GROK_INITIAL_HISTORY"] = str(history)
+        environment["EDEN_GROK_SESSION_DIR"] = str(history.parent)
+        identity = f"history:{history}"
     raise SystemExit(
         subprocess.call(
-            [str(args.pager.resolve()), "--no-leader", "--resume", f"eden-{identity}"],
+            [str(args.pager.resolve()), "--no-leader", "--resume", identity],
             env=environment,
         )
     )

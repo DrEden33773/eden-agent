@@ -110,7 +110,10 @@ impl Projection {
                 .entry((event.run_id, kind.into()))
                 .or_default()
                 .push_str(delta);
-            updates.push(chunk(kind, delta));
+            let mut update = chunk(kind, delta);
+            update["_eden_run"] = json!(event.run_id);
+            update["_eden_attempt"] = event.payload["attempt_id"].clone();
+            updates.push(update);
         }
     }
 
@@ -124,6 +127,7 @@ impl Projection {
             return;
         }
         self.head = record.sequence;
+        let start = updates.len();
         let value = &record.payload;
         let run = record.run_id;
         match text(&value["type"]) {
@@ -335,6 +339,10 @@ impl Projection {
             }
             _ => {}
         }
+        for update in &mut updates[start..] {
+            update["_eden_run"] = json!(run);
+            update["_eden_attempt"] = value["attempt_id"].clone();
+        }
     }
 
     fn message(
@@ -530,10 +538,11 @@ mod tests {
             ]),
             Some(7),
         );
-        assert_eq!(
-            projection.apply(&frame, true),
-            vec![chunk("agent_message_chunk", "buffered text")]
-        );
+        let updates = projection.apply(&frame, true);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0]["content"]["text"], "buffered text");
+        assert_eq!(updates[0]["_eden_run"], 7);
+        assert_eq!(updates[0]["_eden_attempt"], "live");
         assert!(projection.apply(&frame, false).is_empty());
     }
     #[test]
@@ -571,9 +580,8 @@ mod tests {
         );
         projection.record(&record, true, &mut updates);
         projection.record(&record, true, &mut updates);
-        assert_eq!(
-            updates,
-            vec![chunk("agent_message_chunk", "partial answer")]
-        );
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0]["content"]["text"], "partial answer");
+        assert_eq!(updates[0]["_eden_run"], 7);
     }
 }

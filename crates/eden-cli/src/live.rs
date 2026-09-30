@@ -1001,8 +1001,11 @@ async fn perform_submission(shared: &Shared, route: &str, body: &Value) -> Resul
             )?,
         })),
         "/manage/metadata" => Ok(json!({
-            "run_id":
-                session.set_metadata(field(body, "name")?, field(body, "tags")?)?,
+            "run_id": if body["preserve_tags"] == true {
+                    session.rename(field(body, "name")?)?
+                } else {
+                    session.set_metadata(field(body, "name")?, field(body, "tags")?)?
+                },
         })),
         "/resources/reload" => Ok(json!({ "run_id": session.reload_resources()? })),
         "/context/images" => Ok(json!(session.edit_images(field(body, "edit")?).await?)),

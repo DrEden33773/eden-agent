@@ -139,11 +139,18 @@ impl Router {
                         Ok(unit) => unit,
                         Err(e) => return Terminal::failed(e),
                     };
-                    if !unit.open.load(Ordering::Acquire) || cancel.is_cancelled() {
+                    if cancel.is_cancelled() {
+                        return Terminal {
+                            outcome: p::Outcome::Cancelled,
+                            cleanup_errors: vec![],
+                            partial_result: None,
+                        };
+                    }
+                    if !unit.open.load(Ordering::Acquire) {
                         return Terminal::failed(Fault::new(
                             "Unavailable",
                             &unit.identity.id,
-                            "instance admission closed or call cancelled",
+                            "instance admission closed",
                         ));
                     }
                     let declared = &router.graph.instances[&unit.identity.id].scope;

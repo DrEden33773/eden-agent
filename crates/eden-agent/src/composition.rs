@@ -102,6 +102,51 @@ pub(crate) fn equivalent(left: &Value, right: &Value) -> bool {
     }
     left == right
 }
+/// Diagnose identity differences without exposing package configuration or private values.
+pub(crate) fn differences(saved: &Value, current: &Value) -> String {
+    let mut changes = vec![];
+    let names: std::collections::BTreeSet<_> = [saved, current]
+        .into_iter()
+        .filter_map(|value| value["packages"].as_object())
+        .flat_map(|packages| packages.keys())
+        .collect();
+    for name in names {
+        let before = &saved["packages"][name];
+        let after = &current["packages"][name];
+        if before == after {
+            continue;
+        }
+        let reason = if before.is_null() {
+            "added"
+        } else if after.is_null() {
+            "removed"
+        } else if before["descriptor"] != after["descriptor"] {
+            "descriptor changed"
+        } else if before["sha256"] != after["sha256"]
+            || before["embedded_identity"] != after["embedded_identity"]
+        {
+            "binary changed"
+        } else {
+            "requirements or target changed"
+        };
+        changes.push(format!("package {name} ({reason})"));
+    }
+    for (key, label) in [
+        ("cwd", "working directory"),
+        ("roles", "role bindings"),
+        ("runtime", "runtime topology"),
+        ("resource_packages", "resource packages"),
+    ] {
+        if saved[key] != current[key] {
+            changes.push(format!("{label} changed"));
+        }
+    }
+    if changes.is_empty() {
+        "binding metadata changed".into()
+    } else {
+        changes.join("; ")
+    }
+}
 impl Session {
     /// Explicit generation replacement; static failure leaves the current generation live.
     pub fn switch_composition(&self, path: PathBuf) -> Result<u64, Fault> {

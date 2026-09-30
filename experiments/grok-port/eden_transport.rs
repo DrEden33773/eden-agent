@@ -23,7 +23,9 @@ pub(super) async fn connect(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
+        // The pager runtime can drop this task before EOF cleanup finishes. Let the
+        // adapter detach leases and close its readers after the pipe closes.
+        .kill_on_drop(false)
         .spawn()
         .context("start Eden host adapter")?;
     let mut input = child.stdin.take().context("adapter stdin")?;

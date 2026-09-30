@@ -1,50 +1,78 @@
-# Whole-pager Eden transplant experiment
+# Grok-derived frontend with a native Eden adapter
 
-This executable experiment connects the complete Grok Build Rust pager to a real Eden Session. It is an integration probe, not the default Eden frontend or a completed replacement. The existing host, history, trust policy and native UI contracts are unchanged. The new pager does not yet consume all of them.
+This local G1 candidate runs the complete fixed Grok Build Rust frontend against a real Eden host. `eden-grok-adapter` is now a Rust workspace binary using `eden-tui-client`; Python only prepares the reference source, launches processes and drives verification. The default `eden` frontend has not been replaced, and the remaining S4 workflows are still being connected.
 
-The reference is xai-org/grok-build commit `2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8`. `prepare.py` adds an ACP process transport and replaces Grok's local resume lookup with explicit Eden endpoint identity. The original pager, render, textarea, prompt, scrollback, tool tracker and event loop remain in use. `adapter.py` maps Eden's authenticated loopback API, incremental snapshots, commits and events to this tracker. It never invokes Grok's agent to execute tools.
+The reference is xai-org/grok-build commit `2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8`. The original pager, render, textarea, prompt, scrollback, tool tracker and Presenter remain in use. The source patches select Eden services and connect the existing widgets to them; they do not start Grok's agent to execute tools.
 
-## Run the local experiment
+## Run the candidate
 
-With the locally built `artifacts/g1-grok-port/eden-grok` and preserved `artifacts/r1-candidate` installation, run from the product root:
+From the product root, using the preserved local host installation:
 
 ```sh
 python3 experiments/grok-port/launch.py --cwd /path/to/project
 ```
 
-The launcher creates a persistent isolated task under `artifacts/g1-grok-port/sessions/`, uses Eden's existing model and credential configuration, and prints the endpoint and history on exit. Detaching leaves the Eden host running. To attach an existing explicit host:
+Use `--host /path/to/installed/bin/eden` for another Eden installation. The launcher creates a persistent task under `artifacts/g1-grok-port/sessions/`, uses the host's existing model and credentials, and prints the endpoint and history on exit. Detaching leaves accepted work and the host running. To attach an existing host or restore a stopped history:
 
 ```sh
 python3 experiments/grok-port/run.py --endpoint /path/to/endpoint.json
+python3 experiments/grok-port/launch.py --resume /path/to/history.jsonl --cwd /path/to/project
 ```
 
-To restore a stopped Eden history, use `launch.py --resume /path/to/history.jsonl --cwd /path/to/project`. Startup replays history through Grok's load barrier without executing a prompt. Ctrl+C cancels the active Eden run; the ACP prompt settles only after Eden's actual terminal result. Repeated idle Ctrl+C exits the pager. `/eden-status` reads the actual host state and is advertised to Grok's command completion.
+Ordinary sends while busy keep the draft instead of entering a private Grok queue. Ctrl+C cancels a running Eden operation immediately and preserves the composer draft. Repeated idle Ctrl+C exits the pager. The original Grok resume hint may still be printed; use the launcher's final `Attach:` command for Eden. The older Python-backed experiment remains at commit `0fc0c70` and in the preserved local candidate directory.
 
-## Reproduce the build
+## Connected workflows
 
-Obtain the fixed source with `git clone https://github.com/xai-org/grok-build.git`, check out the commit above, and retain its LICENSE and THIRD-PARTY-NOTICES. Alternatively extract a `git archive` of that commit into `artifacts/g1-grok-source`. The private integration evidence retains that archive as well as the patches here, so recovery does not depend on a temporary checkout.
+| Entry | Actual owner and effect |
+| --- | --- |
+| Composer, completion, streaming, tool rows and Diff | Eden prompt/events/history drive the original Grok components. Tool identities include their run; finished-attempt late deltas are ignored. |
+| Ctrl+C and reopen | Eden cancel/terminal controls actual cleanup. Loading uses Grok's replay barrier and never submits a new prompt. Cancelled partial output remains readable. |
+| `/model <provider/model>` | Changes the current Eden Session only. Canonical provider/model labels distinguish otherwise identical catalog names. |
+| `/settings` → Use & save model | Sequentially changes the initiating Session and saves the new-session default through Eden. The result stays inside the settings modal; partial failure preserves the actual current model and reports that the default was not saved. |
+| Display settings | Original Grok typed settings control local presentation. Their state is isolated in `.grok-port` beside the endpoint; it is not shared business configuration. |
+| `/resume` | The original picker lists saved Eden histories from the current project's `.eden/sessions` and the endpoint directory. Selection calls the host's `/manage/open`; subsequent actions use the selected host. |
+| `/usage` | Shows the latest reported request counters from persisted Eden usage, preserving unknown counters as `?`. |
+| `!command` | Uses the independent Eden user-shell operation and renders its result as user-owned tool output. It does not request a model response. |
+| `/compact`, prompt history | Use Eden's compaction and actual saved user prompts. These paths are connected; the complete compaction/context workflow matrix is still pending. |
+| `/capabilities` | Lists the connected coverage, pending integrations and bundled-backend gaps. |
+
+Slash commands, the command palette, registered shortcuts and settings expose the connected subset. Unavailable voice/task/cloud commands are not offered. Manually typing a disconnected command produces an explanation and does not send it to the model. Existing-but-unconnected capabilities remain required work; their absence is not a backend exemption.
+
+## Build from fixed source
+
+Build and install an Eden host using the normal project instructions. For an explicit local installation from debug artifacts:
 
 ```sh
-python3 experiments/grok-port/prepare.py artifacts/g1-grok-source
+cargo build --workspace --locked
+python3 scripts/install.py artifacts/g1-host --profile debug
 ```
 
-Build in the extracted source directory with its locked dependencies and pinned Rust 1.94.0 reference toolchain: `cargo build --locked -p xai-grok-pager-bin --bin xai-grok-pager`. This is an isolated upstream dependency trial; normal Eden builds continue to use Rust 1.98.1. Protobuf code generation requires `protoc`. The upstream lockfile contains its pinned git dependencies. Copy the resulting binary to `artifacts/g1-grok-port/eden-grok` and its license files into that directory. A final integrated Eden crate and toolchain build remain to be done.
-
-For accurate PTY captures, copy `decode.rs` to the reference's `crates/codegen/ptyctl/examples/eden-decode.rs`, build with `cargo build --locked -p ptyctl --example eden-decode`, and copy that executable to `artifacts/g1-grok-port/eden-decode`. It uses the same Alacritty terminal model as the official reference harness; the earlier Eden text-only driver does not fully decode OSC title sequences.
+Obtain `https://github.com/xai-org/grok-build.git` at the fixed commit above, or extract a `git archive` of that commit into `artifacts/g1-grok-source`. Retain its LICENSE and THIRD-PARTY-NOTICES. The private integration evidence contains the original archive; source recovery does not depend on a temporary checkout.
 
 ```sh
-python3 -m unittest discover -s experiments/grok-port -p 'test_*.py'
-python3 experiments/grok-port/verify.py --output artifacts/g1-grok-port/verification
+python3 experiments/grok-port/build.py --source artifacts/g1-grok-source --protoc /path/to/protoc
+python3 experiments/grok-port/launch.py --host artifacts/g1-host/bin/eden --cwd /path/to/project
 ```
 
-The verification starts an isolated Eden host and a loopback SSE provider, uses fixture credentials, and executes real filesystem and shell tools. It exercises completion, streaming, cancellation, continued interaction, six tool calls, resize, history reopening, and cancellation of a shell process tree. Captures come from the PTY; successful host operations alone do not establish visual parity.
+Both binaries build with Rust 1.98.1 and their locked dependencies. Protobuf generation was verified with protoc 31.1. The reference's locked git dependencies must be available to Cargo. Build output lives in `artifacts/g1-native-target` and the runnable candidate in `artifacts/g1-native-port`; the script includes both projects' notices. This is a local candidate build, not a release installation or a change to the default CLI.
 
-## Known integration gaps
+## Verification
 
-Grok's settings and several commands call its own config/session services directly, outside ACP. Their presence in a menu does not mean they manage Eden. Model defaults, authentication challenges, session management, queue/steering, shell mode, context editing, resources, plugins, exports and updates are not connected. Native Editor/Renderer/Theme/Overlay/TerminalFrontend replacement is preserved in the existing Eden installation but is not loaded by this experiment. The default interface has not been replaced.
+```sh
+cargo test -p eden-grok-adapter --locked
+python3 experiments/grok-port/verify.py --management --draft-cancel --busy-send --output artifacts/g1-native-port/verification
+```
 
-The adapter is deliberately kept here as an inspectable experiment until those ownership boundaries are replaced. It also needs attempt-scoped retry/reconnect handling, usage/status-line mapping, complete tool metadata including batch Diff line origins, attachment/presentation handling, and Eden branding/default-background integration. Upstream local settings still belong to the isolated `.grok-port` directory beside the endpoint. Use an isolated project for exploration of unconnected Grok controls. The launcher disables Grok telemetry, feedback and updater channels and does not export Eden credentials to Grok.
+The POSIX PTY probe uses the preserved `artifacts/r1-candidate` host, isolated configuration, fixture credentials and a loopback SSE provider. It performs real filesystem/shell work, checks model scope and injected default-save failure, observes the endpoint opened by the picker, verifies mutations reach that host, and preserves the host's public provider failure diagnostic. Test-created hosts are shut down. These receipts are distinct from real-service, manual terminal and native Windows/macOS evidence.
+
+For styled captures, copy `decode.rs` to the reference's `crates/codegen/ptyctl/examples/eden-decode.rs`, build it with `cargo +1.98.1 build --locked -p ptyctl --example eden-decode`, and place the binary at `artifacts/g1-grok-port/eden-decode`. It uses the reference's Alacritty terminal model to decode the raw PTY output. `screens.py` converts that cell data to SVG.
+
+## Remaining integration
+
+Provider API-key/OAuth forms and private input, generic business configuration, attachments/resources/skills, explicit steering/follow-up queues, complete session directory/tree/fork/clone management, context editing and fixed references, router/notes/cache-warmer, presentation forms and slots, five native UI replacement roles, reading/export/share and updates are not yet connected to this frontend. They remain available through the existing Eden implementation and are required follow-up work. Full retry/event-lag combinations, complete tool metadata and artifact browsing, history reasoning/attachments, global display preferences, branding and background policy also remain to be completed and checked.
+
+The native C ABI is unchanged and contains no ratatui types. This candidate does not load those UI replacements; it must not be used as evidence that the five roles work in the new frontend. The complete Grok dependency tree is still compiled, while connected execution/model/session operations use Eden. Local display preferences continue to use the isolated upstream configuration machinery.
 
 ## Attribution
 
-Grok Build is copyright xAI and distributed under Apache-2.0. The reference archive and binary retain its LICENSE and THIRD-PARTY-NOTICES, including third-party dependencies. The changes made here are the Eden transport, explicit-session restore hooks, protocol projection, launchers and verification/decoding entrypoints. They do not imply affiliation or endorsement by xAI. The upstream branding visible in this experiment is an outstanding product integration task.
+Grok Build is copyright xAI and Apache-2.0 licensed. The full reference source and candidate retain its LICENSE and THIRD-PARTY-NOTICES, including upstream assets and transitive dependency notices. Eden's modifications are the transport, service/capability routing, explicit-session restore hooks, model scope and feedback handling, run-first cancellation policy, native protocol projection, launch/build tools and verification. The inherited branding is still being adapted and does not imply affiliation or endorsement by xAI.

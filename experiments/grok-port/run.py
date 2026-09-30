@@ -9,13 +9,16 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
+SUFFIX = ".exe" if os.name == "nt" else ""
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", nargs="?", choices=["live-tui"])
     parser.add_argument("--endpoint", type=Path, required=True)
-    parser.add_argument("--pager", type=Path, default=ROOT / "artifacts/g1-grok-port/eden-grok")
+    parser.add_argument(
+        "--pager", type=Path, default=ROOT / f"artifacts/g1-native-port/eden-grok{SUFFIX}"
+    )
     args = parser.parse_args()
     endpoint = args.endpoint.resolve()
     home = endpoint.parent / ".grok-port"
@@ -42,7 +45,8 @@ def main():
             "GROK_AGENT_ID": "eden-grok-port",
             "GROK_TURN_SUMMARY": "0",
             "GROK_XAI_API_BASE_URL": "http://127.0.0.1:9",
-            "EDEN_GROK_BRIDGE": str(HERE / "adapter.py"),
+            "EDEN_GROK_BRIDGE": str(args.pager.resolve().parent / f"eden-grok-adapter{SUFFIX}"),
+            "GROK_AGENT_DASHBOARD": "false",
             "EDEN_GROK_ENDPOINT": str(endpoint),
         }
     )

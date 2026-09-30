@@ -1,0 +1,529 @@
+//! ACP transport for the Grok-derived frontend, backed by the existing Eden host.
+mod projection;
+mod sessions;
+
+use eden_protocol::{Fault, Outcome, coding::Block};
+use eden_tui_client::{HostClient, Snapshot};
+use projection::{Projection, text};
+use serde_json::{Value, json};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    sync::{Mutex, mpsc},
+};
+
+struct View {
+    snapshot: Snapshot,
+    projection: Projection,
+}
+struct Adapter {
+    client: HostClient,
+    endpoint: PathBuf,
+    session: u64,
+    identity: String,
+    following: std::sync::atomic::AtomicBool,
+    lease: AtomicU64,
+    shell_run: AtomicU64,
+    model_operation: Mutex<()>,
+    nonce: u128,
+    next: AtomicU64,
+    view: Mutex<View>,
+    output: mpsc::UnboundedSender<Value>,
+}
+
+fn fault(message: impl Into<String>) -> Fault {
+    Fault::new("InvalidInput", "grok-adapter", message)
+}
+
+impl Adapter {
+    async fn new(
+        endpoint: PathBuf,
+        output: mpsc::UnboundedSender<Value>,
+        identity: Option<String>,
+    ) -> Result<Self, Fault> {
+        let snapshot = HostClient::new(&endpoint).snapshot().await?;
+        let session = snapshot.presentation.session_id;
+        Ok(Self {
+            client: HostClient::for_session(&endpoint, session),
+            endpoint,
+            session,
+            identity: identity.unwrap_or_else(|| format!("eden-{session}")),
+            following: std::sync::atomic::AtomicBool::new(false),
+            shell_run: AtomicU64::new(0),
+            model_operation: Mutex::new(()),
+            lease: AtomicU64::new(0),
+            nonce: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|e| fault(e.to_string()))?
+                .as_nanos(),
+            next: AtomicU64::new(0),
+            view: Mutex::new(View {
+                snapshot,
+                projection: Projection::default(),
+            }),
+            output,
+        })
+    }
+
+    fn request_id(&self) -> String {
+        format!(
+            "grok-{}-{}",
+            self.nonce,
+            self.next.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+    fn send(&self, mut value: Value) {
+        value["jsonrpc"] = json!("2.0");
+        let _ = self.output.send(value);
+    }
+    fn update(&self, update: Value, replay: bool) {
+        self.send(json!({
+            "method": "session/update",
+            "params": {
+                "sessionId": self.identity,
+                "update": update,
+                "_meta": { "isReplay": replay },
+            },
+        }));
+    }
+    async fn post(&self, route: &str, mut body: Value) -> Result<Value, Fault> {
+        body["session_id"] = json!(self.session);
+        eden_tui_client::call(&self.endpoint, "POST", route, Some(&body)).await
+    }
+    async fn complete(&self, run: u64) -> Result<Value, Fault> {
+        self.client.wait(run).await?.into_result()
+    }
+    async fn model_state(&self) -> Result<Value, Fault> {
+        let catalog = self.post("/models/list", json!({})).await?;
+        let current = self.post("/models/current", json!({})).await?;
+        let target = &current["effective_target"];
+        let current_id = format!("{}/{}", text(&target["provider"]), text(&target["model"]));
+        let models: Vec<_> = catalog["models"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|entry| {
+                let model = &entry["target"];
+                json!({
+                    "modelId": format!("{}/{}", text(&model["provider"]), text(&model["model"])),
+                    "name":
+                        format!("{}/{}", text(&model["provider"]), text(&model["model"])),
+                    "description":
+                        format!("{} · {}", text(&entry["name"]), text(&entry["status"])),
+                    "_meta": {
+                        "totalContextTokens": model["limits"]["context_window"],
+                        "acceptsImages": model["capabilities"]["images"],
+                        "supportsReasoningEffort": model["capabilities"]["reasoning"],
+                    },
+                })
+            })
+            .collect();
+        Ok(json!({ "currentModelId": current_id, "availableModels": models }))
+    }
+    async fn project(&self, snapshot: Snapshot, replay: bool) {
+        let mut view = self.view.lock().await;
+        for update in view.projection.apply(&snapshot, replay) {
+            if let Some(model) = update.get("_eden_model") {
+                self.send(json!({
+                    "method": "_x.ai/session_notification",
+                    "params": {
+                        "sessionId": self.identity,
+                        "update": {
+                            "sessionUpdate": "model_changed",
+                            "model_id":
+                                format!("{}/{}", text(&model["provider"]), text(&model["model"])),
+                        },
+                        "_meta": { "isReplay": replay },
+                    },
+                }));
+            } else {
+                self.update(update, replay);
+            }
+        }
+        view.snapshot = snapshot;
+    }
+    async fn follow(self: Arc<Self>) {
+        let mut disconnected = false;
+        loop {
+            let previous = self.view.lock().await.snapshot.clone();
+            let lease = self.lease.load(Ordering::Relaxed);
+            if lease == 0 {
+                return;
+            }
+            match self.client.poll_incremental(lease, previous).await {
+                Ok(snapshot) => {
+                    if disconnected {
+                        self.message("Reconnected to the same Eden Session.");
+                    }
+                    disconnected = false;
+                    self.project(snapshot, false).await;
+                }
+                Err(error)
+                    if error.code == "AttachmentExpired"
+                        || (error.code == "InvalidInput"
+                            && error.message.contains("attachment")) =>
+                {
+                    match self.client.attach("tui").await {
+                        Ok(lease) => {
+                            self.lease.store(lease, Ordering::Relaxed);
+                        }
+                        Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
+                    }
+                }
+                Err(error) => {
+                    if !disconnected {
+                        self.message(&format!("Host disconnected: {error}"));
+                    }
+                    if matches!(error.code.as_str(), "SessionMismatch" | "SessionClosed") {
+                        return;
+                    }
+                    disconnected = true;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    }
+    fn message(&self, body: &str) {
+        self.update(
+            json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": body },
+            }),
+            false,
+        );
+    }
+    async fn prompt(&self, params: &Value) -> Result<Value, Fault> {
+        let blocks = params["prompt"]
+            .as_array()
+            .ok_or_else(|| fault("Missing prompt blocks"))?;
+        let body = blocks
+            .iter()
+            .filter_map(|b| b["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if body == "/eden-status" {
+            self.message(
+                &serde_json::to_string_pretty(&self.client.snapshot().await?.state)
+                    .map_err(|e| fault(e.to_string()))?,
+            );
+            return Ok(json!({ "stopReason": "end_turn" }));
+        }
+        if body == "/usage" {
+            self.message(&projection::usage_text(
+                &self.client.snapshot().await?.history,
+            ));
+            return Ok(json!({ "stopReason": "end_turn" }));
+        }
+        if body == "/capabilities" {
+            self.message(
+                "Connected: conversation, tools and Diff, cancellation, history replay, model \
+                 selection, use & save model, local display settings, saved-session picker, shell \
+                 mode, usage.\nStill being connected: provider authentication, attachments and \
+                 resources, queues, context editing, plugins, delivery and native UI \
+                 replacement.\nNo bundled backend: subagents, voice, scheduled user tasks and xAI \
+                 cloud services.",
+            );
+            return Ok(json!({ "stopReason": "end_turn" }));
+        }
+        let run = if let Some(command) = blocks
+            .iter()
+            .find_map(|b| b["_meta"]["bash_command"].as_str())
+        {
+            let run = self
+                .client
+                .user_shell(&self.request_id(), command, "bash", false)
+                .await?;
+            self.shell_run.store(run, Ordering::Relaxed);
+            run
+        } else if let Some(instructions) = body.strip_prefix("/compact") {
+            self.client
+                .compact(&self.request_id(), instructions.trim())
+                .await?
+        } else {
+            if body.starts_with('/') {
+                let command = body.split_whitespace().next().unwrap_or("");
+                self.message(
+                    if matches!(
+                        command,
+                        "/voice" | "/loop" | "/tasks" | "/imagine" | "/imagine-video"
+                    ) {
+                        "This capability is not provided by the bundled Eden backend. Use \
+                         /capabilities to see available features."
+                    } else {
+                        "This command is not connected yet. Use /capabilities for current \
+                         coverage; no model request was sent."
+                    },
+                );
+                return Ok(json!({ "stopReason": "end_turn" }));
+            }
+            let content: Result<Vec<_>, Fault> = blocks
+                .iter()
+                .map(|block| match text(&block["type"]) {
+                    "text" => Ok(Block::Text {
+                        text: text(&block["text"]).into(),
+                    }),
+                    _ => Err(fault("This attachment type is not connected yet")),
+                })
+                .collect();
+            self.client
+                .submit_blocks(&self.request_id(), content?)
+                .await?
+        };
+        let terminal = self.client.wait(run).await?;
+        let _ = self
+            .shell_run
+            .compare_exchange(run, 0, Ordering::Relaxed, Ordering::Relaxed);
+        self.project(self.client.snapshot().await?, false).await;
+        if let Some(error) = terminal.cleanup_errors.first() {
+            return Err(error.clone());
+        }
+        if let Outcome::Failed(error) = &terminal.outcome {
+            return Err(error.clone());
+        }
+        Ok(json!({
+            "stopReason": if matches!(terminal.outcome, Outcome::Cancelled) {
+                    "cancelled"
+                } else {
+                    "end_turn"
+                },
+        }))
+    }
+    async fn dispatch(self: &Arc<Self>, request: &Value) -> Result<Value, Fault> {
+        let method = text(&request["method"]).trim_start_matches('_');
+        let params = &request["params"];
+        if let Some(session) = params["sessionId"].as_str()
+            && session != self.identity
+        {
+            return Err(fault("Session identity mismatch"));
+        }
+        match method {
+            "initialize" => Ok(json!({
+                "protocolVersion": 1,
+                "agentCapabilities": { "loadSession": true },
+                "agentInfo": {
+                    "name": "eden",
+                    "title": "Eden",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+                "authMethods": [{ "id": "eden-host", "name": "Eden host attachment" }],
+                "_meta": {
+                    "grokShell": false,
+                    "cancelRewind": false,
+                    "modelState": self.model_state().await?,
+                    "availableCommands": [
+                        {
+                            "name": "eden-status",
+                            "description": "Inspect the actual Eden host state",
+                        },
+                        { "name": "usage", "description": "Show reported Eden token usage" },
+                        {
+                            "name": "capabilities",
+                            "description": "Connected capabilities and remaining work",
+                        }
+                    ],
+                },
+            })),
+            "authenticate" => {
+                self.client.snapshot().await?;
+                Ok(json!({}))
+            }
+            "session/load" | "session/new" => {
+                if self.lease.load(Ordering::Relaxed) == 0 {
+                    let lease = self.client.attach("tui").await?;
+                    self.lease.store(lease, Ordering::Relaxed);
+                }
+                self.view.lock().await.projection = Projection::default();
+                self.project(self.client.snapshot().await?, true).await;
+                let reply = json!({
+                    "sessionId": self.identity,
+                    "models": self.model_state().await?,
+                });
+                Ok(reply)
+            }
+            "x.ai/compact_conversation" => {
+                let run = self.client.compact(&self.request_id(), "").await?;
+                self.complete(run).await?;
+                self.project(self.client.snapshot().await?, false).await;
+                Ok(json!({}))
+            }
+            "x.ai/prompt_history" => {
+                let snapshot = self.client.snapshot().await?;
+                let prompts: Vec<_> = snapshot
+                    .history
+                    .iter()
+                    .filter(|record| {
+                        record.payload["type"] == "message" && record.payload["role"] == "user"
+                    })
+                    .map(|record| {
+                        record.payload["content"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|block| block["text"].as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .collect();
+                Ok(json!({ "prompts": prompts }))
+            }
+            "session/prompt" => self.prompt(params).await,
+            "session/cancel" => {
+                let snapshot = self.client.snapshot().await?;
+                if let Some(run) = snapshot.state.active_run {
+                    self.client.cancel(run).await?;
+                }
+                let run = self.shell_run.load(Ordering::Relaxed);
+                if run != 0 {
+                    self.client.cancel_shell(run).await?;
+                }
+                Ok(json!({}))
+            }
+            "session/set_model" => {
+                let _operation = self.model_operation.lock().await;
+                let (provider, model) = text(&params["modelId"])
+                    .split_once('/')
+                    .ok_or_else(|| fault("Invalid Eden model identity"))?;
+                let mut selection = json!({ "provider": provider, "model": model });
+                if let Some(effort) = params["_meta"]["reasoningEffort"].as_str() {
+                    selection["thinking"] = json!(effort);
+                }
+                let reply = self
+                    .post(
+                        "/models/select",
+                        json!({ "request_id": self.request_id(), "selection": selection }),
+                    )
+                    .await?;
+                self.complete(
+                    reply["run_id"]
+                        .as_u64()
+                        .ok_or_else(|| fault("Missing model operation"))?,
+                )
+                .await?;
+                Ok(json!({}))
+            }
+            "eden/model/default" => {
+                let _operation = self.model_operation.lock().await;
+                let (provider, model) = text(&params["modelId"])
+                    .split_once('/')
+                    .ok_or_else(|| fault("Invalid Eden model identity"))?;
+                let selection = json!({ "provider": provider, "model": model });
+                let chosen = self
+                    .post(
+                        "/models/select",
+                        json!({ "request_id": self.request_id(), "selection": selection }),
+                    )
+                    .await?;
+                self.complete(
+                    chosen["run_id"]
+                        .as_u64()
+                        .ok_or_else(|| fault("Missing selection operation"))?,
+                )
+                .await?;
+                self.project(self.client.snapshot().await?, false).await;
+                let saved = self
+                    .post(
+                        "/models/catalog",
+                        json!({
+                            "request_id": self.request_id(),
+                            "request": { "action": "set_default", "selection": selection },
+                        }),
+                    )
+                    .await;
+                let result = match saved {
+                    Ok(reply) => {
+                        self.complete(
+                            reply["run_id"]
+                                .as_u64()
+                                .ok_or_else(|| fault("Missing catalog operation"))?,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                };
+                result.map_err(|error| {
+                    fault(format!(
+                        "Current session changed to {provider}/{model}; saving the new-session \
+                         default failed: {error}"
+                    ))
+                })?;
+                Ok(json!({}))
+            }
+            _ => Err(fault(format!("Method not connected: {method}"))),
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let endpoint = PathBuf::from(
+        std::env::var_os("EDEN_GROK_ENDPOINT").ok_or("EDEN_GROK_ENDPOINT is required")?,
+    );
+    let (output, mut responses) = mpsc::unbounded_channel::<Value>();
+    let adapter = Arc::new(Adapter::new(endpoint, output, None).await?);
+    let server = Arc::new(sessions::Server::new(adapter));
+    let writer = tokio::spawn(async move {
+        let mut stdout = tokio::io::stdout();
+        while let Some(value) = responses.recv().await {
+            let mut line = serde_json::to_vec(&value)?;
+            line.push(b'\n');
+            stdout.write_all(&line).await?;
+            stdout.flush().await?;
+        }
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+    });
+    let mut requests = BufReader::new(tokio::io::stdin()).lines();
+    let mut tasks = tokio::task::JoinSet::new();
+    while let Some(line) = requests.next_line().await? {
+        let request: Value = serde_json::from_str(&line)?;
+        let server = server.clone();
+        tasks.spawn(async move {
+            let result = if text(&request["method"]).trim_start_matches('_') == "x.ai/session/list"
+            {
+                server.list(&request["params"]).await
+            } else {
+                match server.target(&request).await {
+                    Ok(target) => target.dispatch(&request).await,
+                    Err(error) => Err(error),
+                }
+            };
+            let adapter = &server.root;
+            if !request["id"].is_null() {
+                match result {
+                    Ok(value) => adapter.send(json!({ "id": request["id"], "result": value })),
+                    Err(error) => adapter.send(json!({
+                        "id": request["id"],
+                        "error": { "code": -32603, "message": error.to_string() },
+                    })),
+                }
+            }
+            for adapter in server.all().await {
+                if adapter.lease.load(Ordering::Relaxed) != 0
+                    && !adapter.following.swap(true, Ordering::Relaxed)
+                {
+                    adapter.follow().await;
+                }
+            }
+        });
+        while tasks.try_join_next().is_some() {}
+    }
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+    for adapter in server.all().await {
+        let lease = adapter.lease.load(Ordering::Relaxed);
+        if lease != 0 && adapter.endpoint.exists() {
+            adapter.client.detach(lease).await?;
+        }
+    }
+    drop(server);
+    writer
+        .await?
+        .map_err(|e| -> Box<dyn std::error::Error> { e })?;
+    Ok(())
+}

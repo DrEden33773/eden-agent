@@ -1394,6 +1394,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "eden-grok-adapter"
+version = "0.1.0"
+dependencies = [
+ "eden-protocol",
+ "eden-tui-client",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "eden-kernel"
 version = "0.1.0"
 dependencies = [

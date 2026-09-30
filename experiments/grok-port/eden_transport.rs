@@ -9,8 +9,17 @@ pub(super) async fn connect(
     flags: super::ConnectFlags,
     adapter: std::path::PathBuf,
 ) -> Result<super::AcpConnection> {
-    let mut child = tokio::process::Command::new("python3")
-        .arg(adapter)
+    let mut command = if adapter
+        .extension()
+        .is_some_and(|extension| extension == "py")
+    {
+        let mut command = tokio::process::Command::new("python3");
+        command.arg(&adapter);
+        command
+    } else {
+        tokio::process::Command::new(&adapter)
+    };
+    let mut child = command
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())

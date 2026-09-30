@@ -1,6 +1,6 @@
 //! Prompt acceptance and terminal observation are distinct, correlated lifecycle boundaries.
-use crate::{Adapter, fault, projection::text};
-use eden_protocol::{Fault, Outcome, coding::Block};
+use crate::{Adapter, fault};
+use eden_protocol::{Fault, Outcome};
 use eden_tui_client::RequestStatus;
 use serde_json::{Value, json};
 use std::sync::atomic::Ordering;
@@ -113,28 +113,16 @@ impl Adapter {
                 json!({ "command": command, "shell": "bash", "exclude_from_context": false }),
                 true,
             )
-        } else if let Some(instructions) = body.strip_prefix("/compact") {
+        } else if body.split_whitespace().next() == Some("/compact") {
+            let instructions = body.strip_prefix("/compact").unwrap_or_default();
             (
                 "/context/compact",
                 json!({ "instructions": instructions.trim() }),
                 false,
             )
         } else {
-            if body.starts_with('/') {
-                return Err(fault(
-                    "This command is not connected; no model request was sent",
-                ));
-            }
-            let content: Result<Vec<_>, Fault> = blocks
-                .iter()
-                .map(|block| match text(&block["type"]) {
-                    "text" => Ok(Block::Text {
-                        text: text(&block["text"]).into(),
-                    }),
-                    _ => Err(fault("This attachment type is not connected yet")),
-                })
-                .collect();
-            ("/prompt", json!({ "content": content? }), false)
+            let content = self.resource_content(body, blocks).await?;
+            ("/prompt", json!({ "content": content }), false)
         };
         request["request_id"] = json!(request_id);
         {

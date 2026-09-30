@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -54,18 +55,37 @@ def main():
             "EDEN_GROK_ENDPOINT": str(endpoint),
         }
     )
-    identity = f"eden-{json.loads(endpoint.read_text())['session_id']}"
+    target = json.loads(endpoint.read_text())
+    identity = f"eden-{target['session_id']}"
+    try:
+        check = subprocess.run(
+            [environment["EDEN_GROK_BRIDGE"], "--check"],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise SystemExit(
+            f"Eden connection failed: {error}. Start the host, then attach again with --endpoint {endpoint}."
+        ) from error
+    if check.returncode:
+        raise SystemExit(
+            f"Eden connection failed: {check.stderr.strip()}. Start or repair the host, then attach again with --endpoint {endpoint}."
+        )
     if args.history:
         history = args.history.resolve()
         environment["EDEN_GROK_INITIAL_HISTORY"] = str(history)
         environment["EDEN_GROK_SESSION_DIR"] = str(history.parent)
         identity = f"history:{history}"
-    raise SystemExit(
-        subprocess.call(
-            [str(args.pager.resolve()), "--no-leader", "--resume", identity],
-            env=environment,
-        )
+    result = subprocess.call(
+        [str(args.pager.resolve()), "--no-leader", "--resume", identity],
+        env=environment,
     )
+    print(
+        f"Attach: python3 {shlex.quote(str(HERE / 'run.py'))} --endpoint {shlex.quote(str(endpoint))}"
+    )
+    raise SystemExit(result)
 
 
 if __name__ == "__main__":

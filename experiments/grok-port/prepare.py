@@ -44,6 +44,10 @@ MODIFIED = (
     "slash/commands/logout.rs",
     "acp/leader_bridge.rs",
     "app/dispatch/turn.rs",
+    "app/mod.rs",
+    "notifications/title.rs",
+    "app/dispatch/status.rs",
+    "app/acp_handler/permissions.rs",
 )
 NOTICE = "// Modified by Eden Agent for native host integration; see the accompanying EDEN-FRONTEND.md.\n"
 
@@ -219,11 +223,17 @@ def patch_eden_management(root):
         "    let commands: Vec<Arc<dyn SlashCommand>>",
         "    let mut commands: Vec<Arc<dyn SlashCommand>>",
     )
-    patch(
-        "slash/commands/mod.rs",
-        "    if crate::eden_services::enabled() { commands.into_iter()",
-        "    if crate::eden_services::enabled() { commands.extend([Arc::new(crate::eden_commands::Auth) as Arc<dyn SlashCommand>, Arc::new(crate::eden_commands::Config), Arc::new(crate::eden_commands::Sessions)]); }\n    if crate::eden_services::enabled() { commands.into_iter()",
+    path = pager / "slash/commands/mod.rs"
+    source = path.read_text()
+    source = "\n".join(
+        line
+        for line in source.split("\n")
+        if "commands.extend([Arc::new(crate::eden_commands::Auth)" not in line
     )
+    marker = "    if crate::eden_services::enabled() { commands.into_iter()"
+    assert marker in source
+    registration = "    if crate::eden_services::enabled() { commands.extend([Arc::new(crate::eden_commands::Auth) as Arc<dyn SlashCommand>, Arc::new(crate::eden_commands::Config), Arc::new(crate::eden_commands::Sessions), Arc::new(crate::eden_commands::Resources)]); }\n"
+    path.write_text(source.replace(marker, registration + marker, 1))
     patch(
         "slash/commands/login.rs",
         "        CommandResult::Action(Action::Login)",
@@ -293,6 +303,7 @@ def main():
     patch_eden_thinking(root)
     patch_eden_management(root)
     patch_eden_cancel_identity(root)
+    patch_eden_startup(root)
     acp = root / "crates/codegen/xai-grok-pager/src/acp"
     path = acp / "mod.rs"
     source = path.read_text()
@@ -337,6 +348,67 @@ def main():
         body = path.read_text()
         if not body.startswith(NOTICE):
             path.write_text(NOTICE + body)
+
+
+def patch_eden_startup(root):
+    pager = root / "crates/codegen/xai-grok-pager/src"
+    path = pager / "app/app_view.rs"
+    source = path.read_text()
+    marker = "    fn draw_inner(&mut self, terminal: &mut PagerTerminal) {"
+    replacement = (
+        marker
+        + """
+        // Eden attaches an existing host; the upstream Welcome menu is not a startup view.
+        if crate::eden_services::enabled() && matches!(self.active_view, ActiveView::Welcome) {
+            let status = self.welcome_toast.as_ref().map(|(message, _)| message.as_str())
+                .unwrap_or("Connecting to Eden Session…  Ctrl+C to exit");
+            let _ = terminal.draw(|frame| {
+                let area = frame.area();
+                let content = ratatui::layout::Rect { x: area.x + 2, y: area.y + area.height / 3,
+                    width: area.width.saturating_sub(4), height: area.height.saturating_sub(area.height / 3) };
+                frame.render_widget(ratatui::widgets::Paragraph::new(format!("Eden\\n\\n{status}"))
+                    .wrap(ratatui::widgets::Wrap { trim: false }), content);
+            });
+            return;
+        }
+"""
+    )
+    if replacement not in source:
+        assert marker in source
+        path.write_text(source.replace(marker, replacement, 1))
+    path = pager / "notifications/title.rs"
+    source = path.read_text()
+    before, tests = source.split("#[cfg(test)]", 1)
+    brand = 'if crate::eden_services::enabled() { "Eden" } else { "grok" }'
+    if brand not in before:
+        path.write_text(before.replace('"grok"', brand) + "#[cfg(test)]" + tests)
+    for file in ("app/dispatch/status.rs", "app/acp_handler/permissions.rs"):
+        path = pager / file
+        source = path.read_text()
+        marker = 'title: "Grok".into(),'
+        replacement = 'title: if crate::eden_services::enabled() { "Eden" } else { "Grok" }.into(),'
+        if replacement not in source:
+            assert marker in source
+            path.write_text(source.replace(marker, replacement))
+    path = pager / "app/mod.rs"
+    source = path.read_text()
+    marker = "fn print_exit_resume_hint(info: &ExitInfo, max_width: usize, w: &mut impl Write) {"
+    replacement = marker + "\n    if crate::eden_services::enabled() { return; }"
+    if replacement not in source:
+        assert marker in source
+        path.write_text(source.replace(marker, replacement, 1))
+
+    source = path.read_text()
+    marker = "fn terminal_title_string(title: &str) -> String {"
+    brand = '    let brand = if crate::eden_services::enabled() { "Eden" } else { "grok" };'
+    if brand not in source:
+        assert marker in source
+        source = source.replace(marker, marker + "\n" + brand, 1)
+        source = source.replace('        "grok".into()', "        brand.into()", 1)
+        source = source.replace(
+            'format!("{} - grok", truncated)', 'format!("{truncated} - {brand}")', 1
+        )
+        path.write_text(source)
 
 
 def patch_services(root):

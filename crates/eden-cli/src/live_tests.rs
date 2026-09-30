@@ -276,6 +276,103 @@ fn multimodal_submission_does_not_flatten_attachment_blocks() {
 }
 
 #[tokio::test]
+async fn idle_snapshots_do_not_refresh_history_from_their_own_store_reads() {
+    let cwd = std::env::current_dir().unwrap();
+    let reads = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counted = reads.clone();
+    let package = Package::new("idle-store")
+        .service(AGENT_LOOP, |_: RunInput, _| async {
+            Ok::<_, Fault>(Value::Null)
+        })
+        .service(CONTEXT, |_: Value, _| async { Ok::<_, Fault>(Value::Null) })
+        .service(PROVIDER, |_: Value, _| async {
+            Ok::<_, Fault>(Value::Null)
+        })
+        .service(TOOL, |_: Value, _| async { Ok::<_, Fault>(Value::Null) })
+        .service(
+            eden_protocol::coding::STORE,
+            move |request: eden_protocol::coding::StoreRequest, _| {
+                let counted = counted.clone();
+                async move {
+                    if matches!(request, eden_protocol::coding::StoreRequest::Read) {
+                        counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    Ok::<_, Fault>(eden_protocol::coding::StoreReply {
+                        active_head: None,
+                        active_branch: "main".into(),
+                        session_id: 0,
+                        sequence: 0,
+                        records: vec![],
+                    })
+                }
+            },
+        );
+    let session = Embedded::new(
+        Composition {
+            host_environment: None,
+            runtime: Default::default(),
+            packages: vec![],
+            roles: BTreeMap::new(),
+            resource_packages: vec![],
+        },
+        cwd.clone(),
+    )
+    .package(package, "idle-store-v1")
+    .unwrap()
+    .open(
+        SessionOptions { cwd, history: None },
+        WorkspaceOptions::default(),
+    )
+    .await
+    .unwrap();
+    session.enable_shared_presentation();
+    let (stop, _) = watch::channel(false);
+    let shared = Arc::new(Shared {
+        management: Default::default(),
+        session: session.clone(),
+        token: "unused".into(),
+        web_root: None,
+        submissions: Mutex::new((HashMap::new(), VecDeque::new())),
+        history: tokio::sync::Mutex::new(None),
+        stop,
+    });
+    for _ in 0..4 {
+        dispatch(&shared, "GET", "/tui/snapshot", Value::Null)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        reads.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "a snapshot's service_called event must not invalidate its own history cache"
+    );
+    let snapshot = dispatch(&shared, "GET", "/tui/snapshot", Value::Null)
+        .await
+        .unwrap();
+    let cursor = snapshot["events"].as_array().unwrap().last().unwrap()["sequence"]
+        .as_u64()
+        .unwrap();
+    let sequence = snapshot["presentation"]["sequence"].as_u64().unwrap();
+    let route = format!("/tui/snapshot?after={sequence}&events_after={cursor}");
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(40),
+            dispatch(&shared, "GET", &route, Value::Null)
+        )
+        .await
+        .is_err()
+    );
+    // Real run transitions still invalidate the cache, including run completion.
+    let run = session.submit("changed").unwrap();
+    session.wait(run).await.unwrap();
+    dispatch(&shared, "GET", "/tui/snapshot", Value::Null)
+        .await
+        .unwrap();
+    assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 2);
+    session.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn idle_poll_waits_and_expired_attachment_can_rejoin_same_session() {
     let session = session().await;
     let (stop, _) = watch::channel(false);

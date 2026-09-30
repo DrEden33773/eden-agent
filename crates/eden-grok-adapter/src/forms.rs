@@ -21,6 +21,7 @@ enum Flow {
         node: Value,
     },
     Histories,
+    Resources,
     History(String),
     CopyPreview(String),
     Done,
@@ -229,6 +230,7 @@ impl Forms {
                 "auth" => Flow::AuthProviders,
                 "config" => Flow::ConfigInstances,
                 "sessions" => Flow::Histories,
+                "resources" => Flow::Resources,
                 _ => return Err(fault("Unknown management form")),
             };
             let id = text(&params["formId"]).to_owned();
@@ -346,6 +348,39 @@ async fn execute(
     params: &Value,
 ) -> Result<(Flow, Value), Fault> {
     match flow {
+        Flow::Resources => {
+            let mut diagnostic = None;
+            if command == "reload" {
+                if let Err(error) = operation(owner, "/resources/reload", json!({})).await {
+                    diagnostic = Some(format!(
+                        "Reload failed; previous inventory retained.\n{error}\n\n"
+                    ));
+                }
+            } else if !matches!(command, "open" | "" | "refresh") {
+                return Err(fault("Unknown resource action"));
+            }
+            let snapshot = owner.resource_inventory().await?;
+            owner.publish_resources(&snapshot);
+            let mut description = diagnostic.unwrap_or_default();
+            description.push_str(&owner.resource_description(&snapshot).await?);
+            let read_only = owner.view.lock().await.snapshot.state.read_only;
+            Ok((
+                Flow::Resources,
+                panel(
+                    "Skills and templates",
+                    description,
+                    vec![],
+                    if read_only {
+                        vec![]
+                    } else {
+                        vec![
+                            action("reload", "Reload from disk"),
+                            action("refresh", "Refresh inventory"),
+                        ]
+                    },
+                ),
+            ))
+        }
         Flow::AuthProviders => {
             if let Some(provider) = command.strip_prefix("provider:") {
                 return auth_methods(owner, provider).await;

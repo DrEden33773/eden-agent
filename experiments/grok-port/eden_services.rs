@@ -16,6 +16,7 @@ pub(crate) fn command_connected(name: &str) -> bool {
             | "logout"
             | "config"
             | "sessions"
+            | "resources"
             | "settings"
             | "model"
             | "effort"

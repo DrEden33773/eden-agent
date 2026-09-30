@@ -1101,7 +1101,13 @@ async fn snapshot_history(
             .first()
             .is_some_and(|event| event.sequence > previous.saturating_add(1))
             || events.iter().any(|event| {
+                // A history read emits this trace after the snapshot's event cursor was
+                // captured. It cannot change history, so must not invalidate its own cache.
+                let history_read = event.kind == "service_called"
+                    && event.payload["contract"] == eden_protocol::coding::STORE
+                    && event.payload["input"]["operation"] == "read";
                 event.sequence > *previous
+                    && !history_read
                     && !matches!(
                         event.kind.as_str(),
                         "model_text_delta"

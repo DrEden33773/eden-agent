@@ -97,8 +97,10 @@ class DeviceServer:
 
 
 class Fixture:
-    def __init__(self, installation, output):
+    def __init__(self, installation, output, *, trusted=False, configuration_author=True):
         self.installation = installation.resolve()
+        self.trusted = trusted
+        self.configuration_author = configuration_author
         self.output = output
         self.temporary = tempfile.TemporaryDirectory(prefix="eden-grok-workflows-")
         self.root = Path(self.temporary.name)
@@ -164,7 +166,7 @@ class Fixture:
             ROOT
             / "target/verification/seeds/authors/configuration-forms/libauthor_configuration_forms.so"
         )
-        if author.exists():
+        if self.configuration_author and author.exists():
             config["packages"].append(
                 {
                     "descriptor": {
@@ -193,7 +195,7 @@ class Fixture:
                     },
                 }
             )
-        config["roles"]["author.configuration-forms.state.v1"] = "configuration-forms"
+            config["roles"]["author.configuration-forms.state.v1"] = "configuration-forms"
         self.composition = self.root / "composition.json"
         self.composition.write_text(json.dumps(config))
         self.endpoint_file = self.root / "endpoint.json"
@@ -210,7 +212,7 @@ class Fixture:
                 "--session",
                 str(self.history),
                 "--offline-startup",
-                "--no-trust-project",
+                "--trust-project" if self.trusted else "--no-trust-project",
                 "live",
                 "--endpoint",
                 str(self.endpoint_file),

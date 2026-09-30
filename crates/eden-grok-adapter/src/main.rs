@@ -2,6 +2,7 @@
 mod forms;
 mod models;
 mod projection;
+mod resources;
 mod sessions;
 mod submission;
 
@@ -40,6 +41,7 @@ struct Adapter {
     loaded: Notify,
     lease: AtomicU64,
     shell_run: AtomicU64,
+    resource_revision: AtomicU64,
     model_operation: Mutex<()>,
     active_prompt: Mutex<Option<submission::Prompt>>,
     nonce: u128,
@@ -58,7 +60,18 @@ impl Adapter {
         output: mpsc::UnboundedSender<Value>,
         identity: Option<String>,
     ) -> Result<Self, Fault> {
-        let snapshot = HostClient::new(&endpoint).snapshot().await?;
+        let metadata: Value = serde_json::from_slice(
+            &tokio::fs::read(&endpoint)
+                .await
+                .map_err(|error| fault(error.to_string()))?,
+        )
+        .map_err(|error| fault(error.to_string()))?;
+        let expected = metadata["session_id"]
+            .as_u64()
+            .ok_or_else(|| fault("Missing endpoint Session identity"))?;
+        let snapshot = HostClient::for_session(&endpoint, expected)
+            .snapshot()
+            .await?;
         let session = snapshot.presentation.session_id;
         Ok(Self {
             client: HostClient::for_session(&endpoint, session),
@@ -71,6 +84,7 @@ impl Adapter {
             load_pending: std::sync::atomic::AtomicBool::new(false),
             loaded: Notify::new(),
             shell_run: AtomicU64::new(0),
+            resource_revision: AtomicU64::new(0),
             model_operation: Mutex::new(()),
             active_prompt: Mutex::new(None),
             lease: AtomicU64::new(0),
@@ -116,6 +130,17 @@ impl Adapter {
         self.client.wait(run).await?.into_result()
     }
     async fn project(&self, snapshot: Snapshot, replay: bool) {
+        let resources = snapshot
+            .events
+            .iter()
+            .rev()
+            .filter(|event| event.kind == "settled")
+            .find_map(|event| {
+                serde_json::from_value::<eden_protocol::resources::ResourceReply>(
+                    event.payload["outcome"]["value"].clone(),
+                )
+                .ok()
+            });
         let mut view = self.view.lock().await;
         if replay {
             view.projection = Projection::default();
@@ -147,6 +172,9 @@ impl Adapter {
         }
         view.snapshot = snapshot;
         drop(view);
+        if let Some(resources) = resources {
+            self.publish_resources(&resources.snapshot);
+        }
         if model_changed && let Ok(models) = self.model_state().await {
             self.send(json!({
                 "method": "_eden/model/state",
@@ -236,26 +264,10 @@ impl Adapter {
             self.message(
                 "Connected: conversation, tools and Diff, cancellation, history replay, model \
                  selection, use & save model, local display settings, saved-session picker, shell \
-                 mode, usage.\nStill being connected: provider authentication, attachments and \
-                 resources, queues, context editing, plugins, delivery and native UI \
-                 replacement.\nNo bundled backend: subagents, voice, scheduled user tasks and xAI \
-                 cloud services.",
-            );
-            return Ok(json!({ "stopReason": "end_turn" }));
-        }
-        if body.starts_with('/') && !body.starts_with("/compact") {
-            let command = body.split_whitespace().next().unwrap_or("");
-            self.message(
-                if matches!(
-                    command,
-                    "/voice" | "/loop" | "/tasks" | "/imagine" | "/imagine-video"
-                ) {
-                    "This capability is not provided by the bundled Eden backend. Use \
-                     /capabilities to see available features."
-                } else {
-                    "This command is not connected yet. Use /capabilities for current coverage; no \
-                     model request was sent."
-                },
+                 mode, usage, authentication, Session configuration, skills/templates and \
+                 resource reload.\nStill being connected: attachments/images, queues, context \
+                 editing, plugins, delivery and native UI replacement.\nNo bundled backend: \
+                 subagents, voice, scheduled user tasks and xAI cloud services.",
             );
             return Ok(json!({ "stopReason": "end_turn" }));
         }
@@ -283,17 +295,7 @@ impl Adapter {
                     "grokShell": false,
                     "cancelRewind": false,
                     "modelState": self.model_state().await?,
-                    "availableCommands": [
-                        {
-                            "name": "eden-status",
-                            "description": "Inspect the actual Eden host state",
-                        },
-                        { "name": "usage", "description": "Show reported Eden token usage" },
-                        {
-                            "name": "capabilities",
-                            "description": "Connected capabilities and remaining work",
-                        }
-                    ],
+                    "availableCommands": self.available_commands().await?,
                 },
             })),
             "authenticate" => {
@@ -309,6 +311,7 @@ impl Adapter {
                 let snapshot = self.client.snapshot().await?;
                 let running = self.adopt_run(&snapshot).await;
                 self.project(snapshot, true).await;
+                self.publish_resources(&self.resource_inventory().await?);
                 if self.view.lock().await.snapshot.state.read_only {
                     self.update(
                         json!({
@@ -483,6 +486,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let (output, mut responses) = mpsc::unbounded_channel::<Value>();
     let adapter = Arc::new(Adapter::new(endpoint, output, None).await?);
+    if std::env::args().any(|argument| argument == "--check") {
+        adapter.available_commands().await?;
+        return Ok(());
+    }
     let server = Arc::new(sessions::Server::new(adapter));
     let writer = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();

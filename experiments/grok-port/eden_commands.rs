@@ -31,3 +31,9 @@ management_command!(
     "Read, rename or migrate saved sessions",
     "/sessions"
 );
+management_command!(
+    Resources,
+    "resources",
+    "Discover and reload this Session's skills and templates",
+    "/resources"
+);

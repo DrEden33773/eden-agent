@@ -774,6 +774,8 @@ pub struct AppView {
     pub session_picker_entries: Option<Vec<SessionPickerEntry>>,
     /// Whether the session list is currently being fetched.
     pub session_picker_loading: bool,
+    /// A preparing view never owns focus until its load result has been consumed.
+    pub(crate) eden_opening_agent: Option<AgentId>,
     /// Unified picker state for the session picker.
     pub session_picker_state: crate::views::picker::PickerState,
     /// Source filter for the welcome-screen session picker.
@@ -1458,6 +1460,7 @@ impl AppView {
             native_select_hold: false,
             session_picker_entries: None,
             session_picker_loading: false,
+            eden_opening_agent: None,
             session_picker_state: crate::views::picker::PickerState::with_mode(
                 crate::views::picker::PickerMode::FullScreen,
             ),
@@ -2248,6 +2251,15 @@ impl AppView {
         );
         let normalized = self.keyboard_normalizer.rescue(ev);
         let ev: &Event = &normalized;
+        if crate::eden_services::enabled()
+            && self.eden_opening_agent.is_some()
+            && let Event::Key(key) = ev
+            && key.kind != KeyEventKind::Release
+            && (key.code == KeyCode::Esc
+                || (key.code == KeyCode::Char('c') && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)))
+        {
+            return InputOutcome::Action(Action::EdenCancelLoad);
+        }
         if !matches!(ev, Event::Resize(..))
             && let ActiveView::Agent(id) = self.active_view
             && let Some(agent) = self.agents.get_mut(&id)

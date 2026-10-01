@@ -21,7 +21,8 @@ fn descriptor() -> Descriptor {
         ],
     }
 }
-fn create(_: Value) -> Result<Package, Fault> {
+fn create(config: Value) -> Result<Package, Fault> {
+    let intent_probe = config["intent_probe"] == true;
     Ok(Package::new("service-b")
         .service("example.client.v1", |request: Value, cx| async move {
             let reply: Value = cx.call("example.compute.v1", &request).await?;
@@ -44,7 +45,25 @@ fn create(_: Value) -> Result<Package, Fault> {
         })
         .service(
             "example.command.v1",
-            |request: CommandRequest, cx| async move {
+            move |request: CommandRequest, cx| async move {
+                if intent_probe {
+                    let read = || -> Result<Value, Box<dyn std::error::Error>> {
+                        let history = request.arguments["history"]
+                            .as_str()
+                            .ok_or("history missing")?;
+                        let receipt = request.arguments["receipt"]
+                            .as_str()
+                            .ok_or("receipt missing")?;
+                        let durable = std::fs::read(history)?;
+                        // This write is the command's external effect; its contents were
+                        // read from disk at entry, before invoking any downstream service.
+                        std::fs::write(receipt, durable)?;
+                        Ok(json!({ "observed": true }))
+                    };
+                    return read().map_err(|error| {
+                        Fault::new("ProbeFailure", "service-b", error.to_string())
+                    });
+                }
                 cx.call::<_, Value>("example.compute.v1", &request.arguments)
                     .await
             },

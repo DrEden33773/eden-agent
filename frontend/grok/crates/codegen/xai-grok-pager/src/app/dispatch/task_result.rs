@@ -483,6 +483,14 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         crate::app::workspace_sync::request(app);
     }
     match result {
+        TaskResult::EdenView { session_id, result } => {
+            if let Err(error) = result
+                && super::ctx::get_active_agent(app).is_some_and(|agent| agent.session.session_id.as_ref() == Some(&session_id))
+            {
+                app.show_toast(&format!("Session change failed: {error}"));
+            }
+            vec![]
+        }
         TaskResult::EdenUi {
             agent_id,
             generation,

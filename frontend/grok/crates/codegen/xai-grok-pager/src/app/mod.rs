@@ -722,7 +722,15 @@ pub async fn run_eden(launch: EdenLaunch) -> anyhow::Result<bool> {
     let initial = workspace.initial_view().to_owned();
     let cancel = CancellationToken::new();
     let (connection, bridge) =
-        crate::acp::eden_transport::connect(workspace, events, cancel.clone()).await?;
+        match crate::acp::eden_transport::connect(workspace.clone(), events, cancel.clone()).await {
+            Ok(connected) => connected,
+            Err(error) => {
+                if let Err(cleanup) = workspace.close().await {
+                    return Err(error.context(format!("Session cleanup also failed: {cleanup}")));
+                }
+                return Err(error);
+            }
+        };
     let result = async {
         let args = PagerArgs::try_parse_from(["eden-ui"])?;
         let screen_mode_override = None;

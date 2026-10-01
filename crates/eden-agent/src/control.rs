@@ -308,13 +308,9 @@ impl Session {
         let session = self.clone();
         tokio::spawn(async move {
             let admission = if durable_command {
-                session
-                    .admit_work(
-                        run_id,
-                        serde_json::json!({ "kind": "command", "name": accepted["command"] }),
-                        &cancel,
-                    )
-                    .await
+                let mut intent = payload.clone();
+                intent["kind"] = serde_json::json!("command");
+                session.admit_work(run_id, intent, &cancel).await
             } else {
                 Ok(())
             };

@@ -218,25 +218,36 @@ async fn serve_session(
             "address": endpoint.address,
         })
     );
-    loop {
+    let mut connections = tokio::task::JoinSet::new();
+    let serving = loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let (stream, _) = accepted?;
+                let (stream, _) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(error) => break Err(error),
+                };
                 let shared = shared.clone();
-                tokio::spawn(async move {
+                connections.spawn(async move {
                     let _ = serve(stream, Host::Live(shared)).await;
                 });
             },
+            _ = connections.join_next(), if !connections.is_empty() => {},
             _ = stopped.changed() => {
                 if *stopped.borrow() {
-                    break;
+                    break Ok(());
                 }
             },
-            _ = tokio::signal::ctrl_c() => break,
+            _ = tokio::signal::ctrl_c() => break Ok(()),
         }
-    }
+    };
+    drop(listener);
+    shared.stop.send_replace(true);
     let closed = shared.session.shutdown().await;
+    // Shutdown settles service waiters; their HTTP replies still belong to this
+    // host until written (or a bounded I/O failure), including the last detach.
+    while connections.join_next().await.is_some() {}
     let removed = std::fs::remove_file(endpoint_path);
+    serving?;
     closed?;
     removed?;
     Ok(0)
@@ -246,6 +257,12 @@ enum Host {
     Static(Arc<StaticShared>),
 }
 impl Host {
+    fn stopped(&self) -> watch::Receiver<bool> {
+        match self {
+            Self::Live(shared) => shared.stop.subscribe(),
+            Self::Static(shared) => shared.stop.subscribe(),
+        }
+    }
     fn token(&self) -> &str {
         match self {
             Self::Live(shared) => &shared.token,
@@ -269,7 +286,20 @@ impl Host {
     }
 }
 async fn serve(mut stream: TcpStream, host: Host) -> Result<(), Fault> {
-    let request = read_request(&mut stream).await;
+    let mut stopped = host.stopped();
+    if *stopped.borrow() {
+        return Ok(());
+    }
+    let request = tokio::select! {
+        _ = stopped.changed() => return Ok(()),
+        request = tokio::time::timeout(
+                Duration::from_secs(10),
+                read_request(&mut stream)
+            ) => request.map_err(|_| fault("InputFailure", "request read deadline elapsed"))?,
+    };
+    if *stopped.borrow() {
+        return Ok(());
+    }
     let (status, mime, bytes) = match request {
         Ok((method, path, headers, body)) => {
             let route = path.split('?').next().unwrap_or("/");
@@ -299,14 +329,14 @@ async fn serve(mut stream: TcpStream, host: Host) -> Result<(), Fault> {
         if status == 200 { "OK" } else { "Error" },
         bytes.len()
     );
-    stream
-        .write_all(header.as_bytes())
-        .await
-        .map_err(|error| fault("OutputFailure", error.to_string()))?;
-    stream
-        .write_all(&bytes)
-        .await
-        .map_err(|error| fault("OutputFailure", error.to_string()))?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        stream.write_all(header.as_bytes()).await?;
+        stream.write_all(&bytes).await?;
+        stream.shutdown().await
+    })
+    .await
+    .map_err(|_| fault("OutputFailure", "response write deadline elapsed"))?
+    .map_err(|error| fault("OutputFailure", error.to_string()))?;
     Ok(())
 }
 fn json_error(error: Fault) -> (u16, &'static str, Vec<u8>) {
@@ -825,22 +855,31 @@ pub async fn run_read_host(
             "read_only": true,
         })
     );
-    loop {
+    let mut connections = tokio::task::JoinSet::new();
+    let serving = loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let (stream, _) = accepted?;
+                let (stream, _) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(error) => break Err(error),
+                };
                 let shared = shared.clone();
-                tokio::spawn(async move {
+                connections.spawn(async move {
                     let _ = serve(stream, Host::Static(shared)).await;
                 });
             },
+            _ = connections.join_next(), if !connections.is_empty() => {},
             _ = stopped.changed() => if *stopped.borrow() {
-                    break;
+                    break Ok(());
                 },
-            _ = tokio::signal::ctrl_c() => break,
+            _ = tokio::signal::ctrl_c() => break Ok(()),
         }
-    }
+    };
+    drop(listener);
+    shared.stop.send_replace(true);
+    while connections.join_next().await.is_some() {}
     std::fs::remove_file(endpoint_path)?;
+    serving?;
     Ok(0)
 }
 async fn dispatch_static(shared: &StaticShared, method: &str, path: &str) -> Result<Value, Fault> {

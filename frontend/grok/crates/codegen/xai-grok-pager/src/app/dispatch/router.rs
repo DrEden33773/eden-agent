@@ -166,6 +166,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
 fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
     app.reconcile_foreign_resume_launch();
     let effects = match action {
+        Action::EdenCancelLoad => super::session::load::cancel_eden_load(app),
         Action::EdenOpen("sessions") => dispatch_show_session_picker(app),
         Action::EdenLoadAfterRemoval(session) => {
             let target = crate::app::agent::AgentId(app.next_agent_id);
@@ -227,7 +228,11 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             effects.push(Effect::Quit);
             effects
         }
-        Action::NewSession => dispatch_new_session(app),
+        Action::NewSession => {
+            let mut effects = super::session::load::cancel_eden_load(app);
+            effects.extend(dispatch_new_session(app));
+            effects
+        },
         Action::LeaveHome => leave_welcome_for_session(app),
         #[cfg(feature = "local-workspace")]
         Action::ConfirmWelcomeLocalWorkspaceAck => {

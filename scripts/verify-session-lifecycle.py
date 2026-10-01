@@ -26,7 +26,18 @@ def main():
         return
     installation = Path(prepare()["seeds"]) / "default"
     results = {}
-    for name in ("product", "catalog", "recovery", "boundaries", "execution", "admission"):
+    for name in (
+        "product",
+        "catalog",
+        "recovery",
+        "boundaries",
+        "execution",
+        "admission",
+        "startup",
+        "command",
+        "opening",
+        "handoff",
+    ):
         output = ROOT / "artifacts/session-lifecycle" / name
         run(
             [
@@ -36,7 +47,20 @@ def main():
                 installation,
                 "--output",
                 output,
-                *(["--author", author_artifact("model-services")] if name == "admission" else []),
+                *(
+                    [
+                        "--author",
+                        author_artifact(
+                            "service-b"
+                            if name == "command"
+                            else "coding-replacements"
+                            if name == "handoff"
+                            else "model-services"
+                        ),
+                    ]
+                    if name in {"admission", "startup", "command", "opening", "handoff"}
+                    else []
+                ),
             ],
             ROOT,
             timeout=None,

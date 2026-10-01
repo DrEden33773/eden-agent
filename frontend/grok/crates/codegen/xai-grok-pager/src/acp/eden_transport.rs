@@ -37,6 +37,8 @@ fn extension(request: &acp::ExtRequest) -> Result<Request, acp::Error> {
         .or_else(|| data["session_id"].as_str())
         .map(str::to_owned);
     Ok(match request.method.trim_start_matches('_') {
+        "eden/session/activate" => Request::Activate { view: view.ok_or_else(|| error("missing view"))? },
+        "eden/session/cancel_load" => Request::CancelLoad { view: view.ok_or_else(|| error("missing view"))? },
         "eden/ui" => Request::Form(data),
         "x.ai/session/list" => Request::Catalog(data),
         "x.ai/prompt_history" => selected(view, SessionOperation::PromptHistory),

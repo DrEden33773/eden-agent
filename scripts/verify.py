@@ -178,7 +178,12 @@ def main() -> None:
                     [host, "--composition", path, "--json", "hello"], caller
                 ).stdout.splitlines()
             ]
-            assert events[0]["kind"] == "accepted" and events[-1]["kind"] == "settled"
+            kinds = [event["kind"] for event in events]
+            assert kinds[0] == "reserved" and kinds[-1] == "settled", kinds
+            assert kinds.count("reserved") == kinds.count("accepted") == 1, kinds
+            assert (
+                kinds.index("reserved") < kinds.index("accepted") < kinds.index("service_called")
+            ), kinds
             assert events[-1]["payload"] == {
                 "outcome": {"status": "completed", "value": expected},
                 "cleanup_errors": [],

@@ -18,7 +18,7 @@ Prompt-only options such as `--model`, `--thinking`, `--tools`, `--read-only`, a
 
 `--attach PATH` embeds a UTF-8 text file; `--image PATH` embeds PNG/JPEG/GIF/WebP data; `--file PATH` embeds PDF data. Paths resolve against `--cwd`. The public blocks contain the bytes encoded as base64, so resume does not depend on the original attachment remaining at a temporary path. The selected model must support the input modalities. Credentials are not included in history records.
 
-`--json` emits ordered live events to stdout. `accepted` identifies the admitted run; `committed` identifies confirmed records; model delta events are transient. `settled` includes the fixed outcome and any cleanup/persistence errors. A successfully accepted or partially streamed run can still fail. Failed operations exit nonzero; cancelled runs exit 130; stdout failures trigger session shutdown. Ctrl-C requests cancellation and waits for cleanup.
+`--json` emits ordered live events to stdout. `reserved` allocates a work identity while preflight is pending; a rejection can settle without an `accepted` event. Preflight service events may occur between reservation and admission. `accepted` identifies the admitted run; prompts, shell work and extension commands save their original intent in a persistent coding session before admission and business execution; `committed` identifies confirmed records; model delta events are transient. `settled` includes the fixed outcome and any cleanup/persistence errors. A successfully accepted or partially streamed run can still fail. Failed operations exit nonzero; cancelled runs exit 130; stdout failures trigger session shutdown. Ctrl-C requests cancellation and waits for cleanup.
 
 ## Command line
 

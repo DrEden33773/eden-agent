@@ -45,6 +45,8 @@ pub enum OpenTarget {
 pub enum SessionOperation {
     Initialize,
     Authenticate,
+    /// Prepare replay without selecting it. The consumer applies the ready reply
+    /// before sending `Request::Activate`, or cancels this view's opening attempt.
     Load,
     Prompt {
         blocks: Vec<Value>,
@@ -76,6 +78,14 @@ pub enum Request {
         operation: SessionOperation,
     },
     New,
+    /// Commit a prepared view after the consumer has applied its ready result.
+    Activate {
+        view: String,
+    },
+    /// Abandon one opening attempt without cancelling work in either Session.
+    CancelLoad {
+        view: String,
+    },
     Catalog(Value),
     Form(Value),
 }
@@ -97,18 +107,21 @@ impl SessionWorkspace {
             OpenTarget::History { path, reading } => context.open(&path, reading).await?,
             OpenTarget::Endpoint(path) => context.attach(&path, None).await?,
         };
+        let mut ownership = context.preparing_consumer(&opened);
         let (output, events) = mpsc::unbounded_channel();
         let mut adapter =
             match Adapter::new(opened.endpoint.clone(), output, Some(opened.view_key())).await {
                 Ok(adapter) => adapter,
                 Err(error) => {
                     context.failed_consumer(&opened).await?;
+                    ownership.disarm();
                     return Err(error);
                 }
             };
         adapter.opened = Some(opened.clone());
         adapter.reading_diagnostic = opened.diagnostic.clone();
         let initial = adapter.identity.clone();
+        ownership.disarm();
         Ok((
             Arc::new(Self {
                 server: Arc::new(Server::new(Arc::new(adapter), context, opened)),
@@ -129,6 +142,8 @@ impl SessionWorkspace {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let (method, view) = match &request {
             Request::New => ("session/new", None),
+            Request::Activate { view } => ("session/activate", Some(view.as_str())),
+            Request::CancelLoad { view } => ("session/cancel_load", Some(view.as_str())),
             Request::Catalog(_) => ("session/catalog", None),
             Request::Form(_) => ("eden/ui", None),
             Request::View { view, operation } => (
@@ -152,6 +167,14 @@ impl SessionWorkspace {
             match request {
                 Request::Catalog(query) => self.server.list(&query).await,
                 Request::Form(input) => self.server.forms.dispatch(&self.server, &input).await,
+                Request::Activate { view } => {
+                    self.server.activate(&view).await?;
+                    Ok(json!({}))
+                }
+                Request::CancelLoad { view } => {
+                    self.server.cancel_load(&view).await?;
+                    Ok(json!({}))
+                }
                 Request::New => {
                     let root = self.server.root().await;
                     let id = self.server.create(&root).await?;
@@ -161,15 +184,27 @@ impl SessionWorkspace {
                 }
                 Request::View { view, operation } => {
                     let loading = matches!(operation, SessionOperation::Load);
-                    let target = self.server.target(view.as_deref(), loading).await?;
-                    let result = target.execute(&operation).await;
-                    if loading && result.is_ok() {
-                        self.server.presented().await?;
-                    }
+                    let identity = view
+                        .clone()
+                        .unwrap_or(self.server.root().await.identity.clone());
                     if loading {
-                        self.server
-                            .finish_load(view.as_deref(), result.is_ok())
-                            .await;
+                        self.server.begin_load(&identity).await?;
+                    }
+                    let mut result = async {
+                        let target = self.server.target(view.as_deref(), loading).await?;
+                        let reply = target.execute(&operation).await?;
+                        if loading {
+                            self.server.presented().await?;
+                        }
+                        Ok(reply)
+                    }
+                    .await;
+                    if loading && !self.server.prepare_load(&identity, result.is_ok()).await {
+                        result = Err(Fault::new(
+                            "Cancelled",
+                            "session-workspace",
+                            "session opening cancelled",
+                        ));
                     }
                     result
                 }
@@ -189,16 +224,26 @@ impl SessionWorkspace {
     /// Finish consumer-owned cleanup. A draft with no accepted work is closed; saved hosts detach.
     pub async fn close(&self) -> Result<(), Fault> {
         self.server.cancel_catalog();
-        self.server.finish_startup_cleanup().await;
+        let mut error = self.server.finish_startup_cleanup().await.err();
         self.server.stop_followers().await;
         self.server.forms.close_all(&self.server).await;
-        let mut error = None;
-        for adapter in self.server.all().await {
+        let adapters = self.server.all().await;
+        // A host can back several view generations. Release this consumer's full
+        // attachment set before transferring cleanup once to each owned host.
+        for adapter in &adapters {
             let lease = adapter.lease.swap(0, Ordering::AcqRel);
             if lease != 0 {
                 let _ = adapter.client.detach(lease).await;
             }
+        }
+        let mut released = std::collections::BTreeSet::new();
+        for adapter in adapters {
             if let Some(opened) = &adapter.opened {
+                let owned = opened.cleanup == Cleanup::OwnedReader
+                    || opened.outcome == OpenOutcome::Created;
+                if !owned || !released.insert((opened.endpoint.clone(), opened.instance.clone())) {
+                    continue;
+                }
                 if opened.cleanup == Cleanup::OwnedReader {
                     if let Err(fault) = self.server.close_reader(opened).await {
                         error.get_or_insert(fault);

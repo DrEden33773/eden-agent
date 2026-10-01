@@ -740,6 +740,7 @@ fn create(config: Value) -> Result<Package, Fault> {
         .get("open_gate")
         .and_then(Value::as_str)
         .map(str::to_owned);
+    let snapshot_gate = config["snapshot_gate"].as_str().map(str::to_owned);
     let storage = Arc::new(Mutex::new(Storage {
         fail_kind: config
             .get("fail_kind")
@@ -760,15 +761,55 @@ fn create(config: Value) -> Result<Package, Fault> {
         .service(CONTEXT, context)
         .service(TOOL, tool)
         .service(STORE, move |request: StoreRequest, _| {
+            let reading = matches!(request, StoreRequest::Read);
             let opening = matches!(request, StoreRequest::Open { .. });
             let closing = matches!(request, StoreRequest::Close);
             let gate = open_gate.clone();
+            let snapshot_gate = snapshot_gate.clone();
             let result = storage
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .request(request);
             async move {
                 let receipt = result?;
+                if reading
+                    && let Some(path) =
+                        snapshot_gate.filter(|path| std::path::Path::new(path).is_file())
+                {
+                    let gate: Value = serde_json::from_slice(&std::fs::read(path).map_err(fault)?)
+                        .map_err(fault)?;
+                    let pid = std::process::id();
+                    let published = std::fs::read_dir(
+                        gate["hosts"]
+                            .as_str()
+                            .ok_or_else(|| fault("hosts missing"))?,
+                    )
+                    .map_err(fault)?
+                    .filter_map(Result::ok)
+                    .any(|entry| {
+                        std::fs::read(entry.path())
+                            .ok()
+                            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                            .is_some_and(|endpoint| {
+                                endpoint["pid"] == pid && endpoint["address"].is_string()
+                            })
+                    });
+                    if gate["except_pid"] != pid && published {
+                        let mut stream = TcpStream::connect(
+                            gate["address"]
+                                .as_str()
+                                .ok_or_else(|| fault("address missing"))?,
+                        )
+                        .await
+                        .map_err(fault)?;
+                        stream
+                            .write_all(format!("{pid}\n").as_bytes())
+                            .await
+                            .map_err(fault)?;
+                        let mut release = [0];
+                        stream.read_exact(&mut release).await.map_err(fault)?;
+                    }
+                }
                 if let Some(address) = gate {
                     if opening {
                         let mut stream = TcpStream::connect(&address).await.map_err(fault)?;

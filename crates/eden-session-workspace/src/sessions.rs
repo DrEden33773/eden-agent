@@ -14,8 +14,14 @@ pub(crate) struct Server {
     sessions: Mutex<BTreeMap<String, Arc<Adapter>>>,
     saved: std::sync::Mutex<BTreeMap<String, String>>,
     opening: Mutex<()>,
+    loads: Mutex<BTreeMap<String, LoadAttempt>>,
     catalog_generation: tokio::sync::watch::Sender<u64>,
     followers: Mutex<tokio::task::JoinSet<()>>,
+}
+#[derive(Default)]
+struct LoadAttempt {
+    cancelled: bool,
+    ready: bool,
 }
 
 impl Server {
@@ -37,6 +43,7 @@ impl Server {
             forms: Default::default(),
             saved: std::sync::Mutex::new(saved),
             opening: Mutex::new(()),
+            loads: Mutex::new(BTreeMap::new()),
             catalog_generation: tokio::sync::watch::channel(0).0,
             followers: Mutex::new(tokio::task::JoinSet::new()),
         }
@@ -83,14 +90,77 @@ impl Server {
         }
     }
 
-    pub(crate) async fn finish_startup_cleanup(&self) {
-        self.lifecycle.finish_startup_cleanup().await;
+    pub(crate) async fn finish_startup_cleanup(&self) -> Result<(), Fault> {
+        self.lifecycle.finish_startup_cleanup().await
     }
     pub(crate) async fn stop_followers(&self) {
         self.followers.lock().await.shutdown().await;
     }
 
-    pub(crate) async fn finish_load(&self, requested: Option<&str>, success: bool) {
+    pub(crate) async fn begin_load(&self, id: &str) -> Result<(), Fault> {
+        let mut loads = self.loads.lock().await;
+        let attempt = loads.entry(id.into()).or_default();
+        if attempt.cancelled {
+            return Err(Fault::new(
+                "Cancelled",
+                "session-workspace",
+                "session opening cancelled",
+            ));
+        }
+        attempt.ready = false;
+        Ok(())
+    }
+
+    pub(crate) async fn prepare_load(&self, id: &str, success: bool) -> bool {
+        let mut loads = self.loads.lock().await;
+        let attempt = loads.entry(id.into()).or_default();
+        let accepted = !attempt.cancelled;
+        attempt.ready = success && accepted;
+        if let Some(adapter) = self.sessions.lock().await.get(id).cloned() {
+            adapter
+                .load_pending
+                .store(false, std::sync::atomic::Ordering::Release);
+            adapter.loaded.notify_one();
+        }
+        if !attempt.ready {
+            self.finish_load(Some(id), false).await;
+            loads.remove(id);
+        }
+        accepted
+    }
+
+    pub(crate) async fn cancel_load(&self, id: &str) -> Result<(), Fault> {
+        let mut loads = self.loads.lock().await;
+        if self.root().await.identity == id {
+            return Ok(());
+        }
+        let attempt = loads.entry(id.into()).or_default();
+        attempt.cancelled = true;
+        if attempt.ready {
+            self.finish_load(Some(id), false).await;
+            loads.remove(id);
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn activate(&self, id: &str) -> Result<(), Fault> {
+        let mut loads = self.loads.lock().await;
+        if !loads
+            .get(id)
+            .is_some_and(|attempt| attempt.ready && !attempt.cancelled)
+        {
+            return Err(Fault::new(
+                "Cancelled",
+                "session-workspace",
+                "view is not ready for activation",
+            ));
+        }
+        self.finish_load(Some(id), true).await;
+        loads.remove(id);
+        Ok(())
+    }
+
+    async fn finish_load(&self, requested: Option<&str>, success: bool) {
         let root = self.root().await;
         let id = requested.unwrap_or(&root.identity);
         let selected = self.sessions.lock().await.get(id).cloned();
@@ -110,11 +180,11 @@ impl Server {
             let keys = sessions
                 .iter()
                 .filter(|(key, adapter)| {
+                    if !success {
+                        return key.as_str() == id && !Arc::ptr_eq(adapter, &root);
+                    }
                     if Arc::ptr_eq(adapter, &selected) {
                         return false;
-                    }
-                    if !success {
-                        return key.as_str() == id;
                     }
                     key.as_str() != id
                         && adapter.lease.load(std::sync::atomic::Ordering::Acquire) != 0
@@ -131,10 +201,23 @@ impl Server {
                 .filter_map(|key| sessions.remove(&key))
                 .collect::<Vec<_>>()
         };
+        // Every removed reader needs an owner before any await, including later
+        // members of the batch whose detach has not started when we are cancelled.
+        let retired = retired
+            .into_iter()
+            .map(|adapter| {
+                let ownership = adapter
+                    .opened
+                    .as_ref()
+                    .filter(|opened| opened.cleanup == crate::Cleanup::OwnedReader)
+                    .map(|opened| self.lifecycle.preparing_consumer(opened));
+                (adapter, ownership)
+            })
+            .collect::<Vec<_>>();
         if success {
             *self.root.lock().await = selected.clone();
         }
-        for adapter in retired {
+        for (adapter, mut ownership) in retired {
             adapter
                 .stopped
                 .store(true, std::sync::atomic::Ordering::Release);
@@ -144,13 +227,16 @@ impl Server {
             }
             if let Some(opened) = &adapter.opened
                 && opened.cleanup == crate::Cleanup::OwnedReader
-                && self.lifecycle.close(opened).await.is_err()
+                && self.close_reader(opened).await.is_err()
             {
                 // Keep cleanup ownership even when the retired reader cannot be reached yet.
                 self.sessions
                     .lock()
                     .await
                     .insert(adapter.identity.clone(), adapter);
+            }
+            if let Some(ownership) = ownership.as_mut() {
+                ownership.disarm();
             }
         }
     }
@@ -252,6 +338,7 @@ impl Server {
             .lifecycle
             .open(std::path::Path::new(path), reading)
             .await?;
+        let mut ownership = self.lifecycle.preparing_consumer(&opened);
         crate::trace(json!({
             "direction": "phase",
             "phase": "connection",
@@ -268,6 +355,7 @@ impl Server {
             Ok(adapter) => adapter,
             Err(error) => {
                 self.lifecycle.failed_consumer(&opened).await?;
+                ownership.disarm();
                 return Err(error);
             }
         };
@@ -280,6 +368,12 @@ impl Server {
             .await
             .insert(id.into(), adapter.clone())
         {
+            let mut retired = old
+                .opened
+                .as_ref()
+                .filter(|opened| opened.cleanup == crate::Cleanup::OwnedReader)
+                .map(|opened| self.lifecycle.preparing_consumer(opened));
+            ownership.disarm();
             old.stopped
                 .store(true, std::sync::atomic::Ordering::Release);
             let lease = old.lease.load(std::sync::atomic::Ordering::Acquire);
@@ -289,9 +383,13 @@ impl Server {
             if let Some(opened) = &old.opened
                 && opened.cleanup == crate::Cleanup::OwnedReader
             {
-                self.lifecycle.close(opened).await?;
+                self.close_reader(opened).await?;
+            }
+            if let Some(retired) = retired.as_mut() {
+                retired.disarm();
             }
         }
+        ownership.disarm();
         Ok(adapter)
     }
     pub(crate) async fn owner(&self, path: &str) -> Result<crate::Opened, Fault> {
@@ -322,6 +420,7 @@ impl Server {
         }
         lifecycle.cwd = cwd;
         let opened = lifecycle.create(true).await?;
+        let mut ownership = lifecycle.preparing_consumer(&opened);
         let mut adapter = match Adapter::new(
             opened.endpoint.clone(),
             self.output.clone(),
@@ -332,6 +431,7 @@ impl Server {
             Ok(adapter) => adapter,
             Err(error) => {
                 self.lifecycle.failed_consumer(&opened).await?;
+                ownership.disarm();
                 return Err(error);
             }
         };
@@ -345,6 +445,7 @@ impl Server {
                 .insert(identity.clone(), path.to_string_lossy().into_owned());
         }
         self.sessions.lock().await.insert(identity.clone(), adapter);
+        ownership.disarm();
         Ok(identity)
     }
     pub(crate) fn path_for_reference(&self, reference: &str) -> Result<String, Fault> {
@@ -745,3 +846,7 @@ impl Server {
         }))
     }
 }
+
+#[cfg(test)]
+#[path = "sessions_tests.rs"]
+mod tests;

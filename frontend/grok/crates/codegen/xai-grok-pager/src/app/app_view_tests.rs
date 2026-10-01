@@ -248,6 +248,7 @@ pub(crate) fn test_app() -> AppView {
         native_select_hold: false,
         session_picker_entries: None,
         session_picker_loading: false,
+        eden_opening_agent: None,
         session_picker_state: crate::views::picker::PickerState::with_mode(
             crate::views::picker::PickerMode::FullScreen,
         ),

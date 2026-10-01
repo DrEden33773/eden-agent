@@ -134,6 +134,16 @@ pub(crate) fn execute(
         Effect::FetchBundleStatus | Effect::FetchAppBilling { .. } | Effect::FetchBilling { .. } | Effect::FetchSessionAgentName { .. }
         | Effect::DebounceSessionSearch { .. } | Effect::DeepSearchSessions { .. } | Effect::ShowSessionInfo { .. } | Effect::ShowContextInfo { .. }) { return (false, meta); }
     match effect {
+        Effect::EdenView { session_id, activate } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let method = if activate { "eden/session/activate" } else { "eden/session/cancel_load" };
+                let payload = serde_json::value::to_raw_value(&serde_json::json!({ "sessionId": session_id })).unwrap();
+                let result = acp_send(acp::ExtRequest::new(method, payload.into()), &tx)
+                    .await.map(|_| ()).map_err(|error| error.to_string());
+                TaskResult::EdenView { session_id, result }
+            });
+        }
         Effect::EdenUi { agent_id, session_id, generation, mut request } => {
             let tx = acp_tx.clone();
             tasks.spawn(async move {

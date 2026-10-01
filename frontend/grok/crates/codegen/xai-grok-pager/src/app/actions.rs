@@ -54,6 +54,7 @@ impl ModelChoice {
 #[cfg_attr(test, derive(strum::AsRefStr))]
 #[allow(clippy::large_enum_variant)]
 pub enum Action {
+    EdenCancelLoad,
     EdenOpen(&'static str),
     EdenHistory {
         kind: &'static str,
@@ -1420,6 +1421,7 @@ pub enum AfterSessionDelete {
 /// The event loop spawns these into a `JoinSet`; completions come back through [`TaskResult`] as `Action::TaskComplete`.
 #[derive(Debug)]
 pub enum Effect {
+    EdenView { session_id: acp::SessionId, activate: bool },
     EdenUi {
         agent_id: AgentId,
         session_id: acp::SessionId,
@@ -2408,6 +2410,7 @@ pub enum WorkspaceWriteCompletion {
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum TaskResult {
+    EdenView { session_id: acp::SessionId, result: Result<(), String> },
     EdenUi {
         agent_id: AgentId,
         generation: u64,

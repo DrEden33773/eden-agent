@@ -178,7 +178,7 @@ fn dispatch_load_session_ungated(
         None
     };
     let mut effects = if crate::eden_services::enabled() {
-        vec![]
+        cancel_eden_load(app)
     } else {
         abandon_unused_empty_for_load(app, &session_id)
     };
@@ -312,7 +312,12 @@ fn dispatch_load_session_ungated(
         .slash_controller
         .registry_mut()
         .set_plugins_visible(!app.appearance.disable_plugins);
-    switch_to_agent(app, agent_id, SwitchCause::Load);
+    if crate::eden_services::enabled() && previous.is_some() {
+        app.eden_opening_agent = Some(agent_id);
+        app.show_toast("Loading session… Esc to cancel");
+    } else {
+        switch_to_agent(app, agent_id, SwitchCause::Load);
+    }
     effects.push(Effect::LoadSession {
         agent_id,
         session_id,
@@ -320,6 +325,15 @@ fn dispatch_load_session_ungated(
         chat_kind,
     });
     effects
+}
+/// Cancel one opening attempt; the current composer and its Session keep their ownership.
+pub(in crate::app::dispatch) fn cancel_eden_load(app: &mut AppView) -> Vec<Effect> {
+    let Some(agent_id) = app.eden_opening_agent.take() else { return vec![]; };
+    let Some(agent) = app.agents.shift_remove(&agent_id) else { return vec![]; };
+    let Some(session_id) = agent.session.session_id else { return vec![]; };
+    crate::eden_services::consumed(serde_json::json!({ "method": "session/load_cancelled", "session": session_id }));
+    app.show_toast("Session opening cancelled");
+    vec![Effect::EdenView { session_id, activate: false }]
 }
 /// Load the session selected in the session picker.
 pub(in crate::app::dispatch) fn dispatch_pick_session(
@@ -1256,6 +1270,12 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
     restore_degree: Option<xai_grok_workspace::session::git::RestoreDegree>,
     running_prompt_id: Option<String>,
 ) -> Vec<Effect> {
+    if crate::eden_services::enabled() && !app.agents.contains_key(&agent_id) {
+        crate::eden_services::consumed(serde_json::json!({ "method": "session/load_discarded", "session": session_id }));
+        return vec![];
+    }
+    let commit_opening = crate::eden_services::enabled() && app.eden_opening_agent == Some(agent_id);
+    if commit_opening { app.eden_opening_agent = None; }
     tracing::info!(
         "Session loaded for agent {:?} session {:?}",
         agent_id,
@@ -1424,6 +1444,13 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
             }
         }
 
+        if crate::eden_services::enabled() {
+            if commit_opening { switch_to_agent(app, agent_id, SwitchCause::Load); }
+            if let Some(session_id) = loaded_identity {
+                effects.push(Effect::EdenView { session_id, activate: true });
+            }
+        }
+
         crate::memory_release::release_retained_memory("session-load-replay");
         note_peek_page_flip(app, agent_id, page_flip_entry);
         identity_rebind.apply(app);
@@ -1439,14 +1466,22 @@ pub(in crate::app::dispatch) fn handle_session_load_failed(
 ) -> Vec<Effect> {
     tracing::error!(agent = ?agent_id, session = ?session_id, error = %error, "Session load failed");
     if crate::eden_services::enabled() {
+        if !app.agents.contains_key(&agent_id) {
+            crate::eden_services::consumed(serde_json::json!({ "method": "session/load_discarded", "session": session_id }));
+            return vec![];
+        }
         let previous = app
             .agents
             .get(&agent_id)
             .and_then(|agent| agent.eden_previous_agent);
         if let Some(previous) = previous {
             app.agents.shift_remove(&agent_id);
-            switch_to_agent(app, previous, SwitchCause::Load);
-            app.show_toast(&format!("Couldn't load session: {error}"));
+            if app.eden_opening_agent == Some(agent_id) {
+                app.eden_opening_agent = None;
+                if get_active_agent(app).is_some_and(|agent| agent.session.id == previous) {
+                    app.show_toast(&format!("Couldn't load session: {error}"));
+                }
+            }
             return vec![];
         }
     }

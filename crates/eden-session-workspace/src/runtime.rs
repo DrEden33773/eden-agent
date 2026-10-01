@@ -20,7 +20,12 @@ pub struct Lifecycle {
     pub state_dir: PathBuf,
     pub legacy_directories: Vec<PathBuf>,
     #[serde(skip)]
-    startup_cleanup: std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    ownership: std::sync::Arc<std::sync::Mutex<Ownership>>,
+}
+#[derive(Default, Debug)]
+struct Ownership {
+    cleanup: Vec<tokio::task::JoinHandle<Result<(), Fault>>>,
+    retired: std::collections::BTreeSet<(PathBuf, String)>,
 }
 /// Keep the history locator and host instance separate from persistent Session identity.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -165,7 +170,7 @@ pub fn report_start_failure(error: &(dyn std::error::Error + 'static)) {
 struct Startup {
     child: Option<tokio::process::Child>,
     endpoint: PathBuf,
-    cleanup: std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    cleanup: std::sync::Arc<std::sync::Mutex<Ownership>>,
 }
 impl Drop for Startup {
     fn drop(&mut self) {
@@ -173,17 +178,52 @@ impl Drop for Startup {
             let _ = child.start_kill();
             let endpoint = self.endpoint.clone();
             let task = tokio::spawn(async move {
-                let _ = child.wait().await;
+                child
+                    .wait()
+                    .await
+                    .map_err(|error| fault("CleanupFailure", error.to_string()))?;
                 let _ = tokio::fs::remove_file(endpoint).await;
+                Ok(())
             });
             self.cleanup
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
+                .cleanup
+                .push(task);
+        }
+    }
+}
+/// A published host remains owned while its first adapter is still awaiting I/O.
+pub(crate) struct PendingConsumer {
+    lifecycle: Lifecycle,
+    opened: Option<Opened>,
+}
+impl PendingConsumer {
+    pub(crate) fn disarm(&mut self) {
+        self.opened = None;
+    }
+}
+impl Drop for PendingConsumer {
+    fn drop(&mut self) {
+        if let Some(opened) = self.opened.take() {
+            let lifecycle = self.lifecycle.clone();
+            let task = tokio::spawn(async move { lifecycle.failed_consumer(&opened).await });
+            self.lifecycle
+                .ownership
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .cleanup
                 .push(task);
         }
     }
 }
 impl Lifecycle {
+    pub(crate) fn preparing_consumer(&self, opened: &Opened) -> PendingConsumer {
+        PendingConsumer {
+            lifecycle: self.clone(),
+            opened: Some(opened.clone()),
+        }
+    }
     /// Keep launch configuration serializable while cleanup ownership remains local to its consumer.
     pub fn new(
         executable: PathBuf,
@@ -198,23 +238,31 @@ impl Lifecycle {
             cwd,
             state_dir,
             legacy_directories,
-            startup_cleanup: Default::default(),
+            ownership: Default::default(),
         }
     }
     /// Frontend shutdown calls this after cancelling requests, before reporting cleanup complete.
-    pub async fn finish_startup_cleanup(&self) {
+    pub async fn finish_startup_cleanup(&self) -> Result<(), Fault> {
+        let mut failure = None;
         loop {
             let tasks = std::mem::take(
-                &mut *self
-                    .startup_cleanup
+                &mut self
+                    .ownership
                     .lock()
-                    .unwrap_or_else(|error| error.into_inner()),
+                    .unwrap_or_else(|error| error.into_inner())
+                    .cleanup,
             );
             if tasks.is_empty() {
-                return;
+                return failure.map_or(Ok(()), Err);
             }
             for task in tasks {
-                let _ = task.await;
+                let result = task
+                    .await
+                    .map_err(|error| fault("CleanupFailure", error.to_string()))
+                    .and_then(|result| result);
+                if let Err(error) = result {
+                    failure.get_or_insert(error);
+                }
             }
         }
     }
@@ -484,7 +532,7 @@ impl Lifecycle {
                     .map_err(|e| fault("StartFailed", e.to_string()))?,
             ),
             endpoint: endpoint.clone(),
-            cleanup: self.startup_cleanup.clone(),
+            cleanup: self.ownership.clone(),
         };
         let child = startup
             .child
@@ -524,8 +572,16 @@ impl Lifecycle {
         match ready {
             Ok(mut opened) => {
                 if let Some(mut child) = startup.child.take() {
+                    let ownership = self.ownership.clone();
+                    let identity = (opened.endpoint.clone(), opened.instance.clone());
                     tokio::spawn(async move {
-                        let _ = child.wait().await;
+                        if child.wait().await.is_ok() {
+                            ownership
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .retired
+                                .insert(identity);
+                        }
                     });
                 }
                 opened.outcome = if reading {
@@ -577,22 +633,11 @@ impl Lifecycle {
         if opened.outcome == OpenOutcome::Attached {
             return Ok(());
         }
-        let client = eden_tui_client::HostClient::for_instance(
-            &opened.endpoint,
-            opened.session_id,
-            &opened.instance,
-        )?;
-        let state = client.verify().await?;
-        if state.active_run.is_some()
-            || !state.shell_runs.is_empty()
-            || !state.command_runs.is_empty()
-        {
-            return Ok(());
-        }
-        if opened.cleanup == Cleanup::OwnedReader || opened.history.is_none() || state.draft {
+        if opened.cleanup == Cleanup::OwnedReader {
             self.close(opened).await
         } else {
-            self.stop_opened(opened).await
+            // The host decides publication, pending work and other consumers atomically.
+            self.release_draft(opened).await
         }
     }
     /// Explicit reader cleanup never depends on read-only capability inferred from a snapshot.
@@ -600,6 +645,15 @@ impl Lifecycle {
         self.close_reviewed(opened, None).await
     }
     pub(crate) async fn release_draft(&self, opened: &Opened) -> Result<(), Fault> {
+        if self
+            .ownership
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retired
+            .contains(&(opened.endpoint.clone(), opened.instance.clone()))
+        {
+            return Ok(());
+        }
         let client = eden_tui_client::HostClient::for_instance(
             &opened.endpoint,
             opened.session_id,
@@ -660,7 +714,13 @@ impl Lifecycle {
                 "StopPending",
                 "host cleanup has not retired its endpoint and writer",
             )
-        })
+        })?;
+        self.ownership
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retired
+            .insert((opened.endpoint.clone(), opened.instance.clone()));
+        Ok(())
     }
     pub(crate) fn catalog_directories(
         &self,
@@ -765,7 +825,7 @@ mod tests {
             cwd: directory.clone(),
             state_dir: directory.join("state"),
             legacy_directories: vec![],
-            startup_cleanup: Default::default(),
+            ownership: Default::default(),
         }
     }
     fn history(path: &Path, id: u64) {
@@ -832,6 +892,7 @@ while True: time.sleep(60)
         assert!(task.await.unwrap_err().is_cancelled());
         tokio::time::timeout(Duration::from_secs(10), service.finish_startup_cleanup())
             .await
+            .unwrap()
             .unwrap();
         assert!(!PathBuf::from(format!("/proc/{pid}")).exists());
         lock.try_lock().unwrap();

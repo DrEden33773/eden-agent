@@ -76,6 +76,7 @@ fn create(config: Value) -> Result<Package, Fault> {
     let provider_wrapper = config["provider_wrapper"].as_bool().unwrap_or(false);
     let manager_path = path.clone();
     let resolve_gate = config["resolve_gate"].as_str().map(PathBuf::from);
+    let catalog_gate = config["catalog_gate"].as_str().map(PathBuf::from);
     let address = config["wire_address"]
         .as_str()
         .unwrap_or("127.0.0.1:1")
@@ -104,12 +105,15 @@ fn create(config: Value) -> Result<Package, Fault> {
         .service(MODEL_CATALOG, move |request: CatalogRequest, cx| {
             let path = path.clone();
             let resolve_gate = resolve_gate.clone();
+            let catalog_gate = catalog_gate.clone();
             async move {
                 // Enabled after the terminal is ready; only work preflight crosses this gate.
-                if matches!(request, CatalogRequest::Resolve { .. })
-                    && cx.run_id() > 0
-                    && let Some(gate) = resolve_gate.filter(|path| path.is_file())
-                {
+                let gate = match &request {
+                    CatalogRequest::Resolve { .. } if cx.run_id() > 0 => resolve_gate,
+                    CatalogRequest::List => catalog_gate,
+                    _ => None,
+                };
+                if let Some(gate) = gate.filter(|path| path.is_file()) {
                     let address = std::fs::read_to_string(gate).map_err(fault)?;
                     let mut stream = TcpStream::connect(address.trim()).await.map_err(fault)?;
                     stream

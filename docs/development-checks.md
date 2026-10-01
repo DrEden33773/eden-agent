@@ -216,6 +216,8 @@ Download `scope-receipts`, `proof-receipts`, `static-receipts` or `native-receip
 
 The Grok-derived terminal is built with the root workspace and Cargo.lock; `python3 scripts/build-frontend.py` is a compatibility command for building `eden-cli`. The root formatter leaves imported source to its own conventions. Native preparation freezes the complete installed binary and libraries together. `scripts/verify-session-lifecycle.py` adds Linux PTY and process evidence for drafts, history management, native recovery, reader ownership, failed-load draft preservation, large history, crash recovery and accepted-work detach. Other platforms retain their native/SDK terminal gates; Linux PTY evidence does not claim fresh terminal acceptance there.
 
+Debug candidates built with `scripts/build-candidate.py` share the installed verifier's library, binary, example and RPC target selection. This keeps Cargo feature unification stable between acceptance and the final installation; the candidate receipt records the build command and checks each installed executable or library against its build output. The explicit release option retains the release workspace build.
+
 ### Imported source quality boundary
 
 `frontend/grok/` and `vendor/` contain fixed third-party sources. Their packages are excluded from Eden's root workspace membership and remain dependencies in its single Cargo.lock. `pnpm rust:check` and `pnpm rust:fmt` skip these trees; Markdown, Biome, Ruff and basedpyright use the same boundary. Preserve upstream formatting and keep source modifications explicit, with their original licenses and notices. Do not apply Eden's formatter across an imported tree or add repository-wide warning allowances to accommodate it.

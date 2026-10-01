@@ -37,6 +37,7 @@ def main():
         "command",
         "opening",
         "handoff",
+        "input-history",
     ):
         output = ROOT / "artifacts/session-lifecycle" / name
         run(

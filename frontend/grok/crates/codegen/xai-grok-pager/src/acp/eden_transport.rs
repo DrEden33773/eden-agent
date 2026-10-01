@@ -41,7 +41,10 @@ fn extension(request: &acp::ExtRequest) -> Result<Request, acp::Error> {
         "eden/session/cancel_load" => Request::CancelLoad { view: view.ok_or_else(|| error("missing view"))? },
         "eden/ui" => Request::Form(data),
         "x.ai/session/list" => Request::Catalog(data),
-        "x.ai/prompt_history" => selected(view, SessionOperation::PromptHistory),
+        "x.ai/prompt_history" => selected(
+            view.or_else(|| data["filter_session_id"].as_str().map(str::to_owned)),
+            SessionOperation::PromptHistory,
+        ),
         "x.ai/compact_conversation" => selected(view, SessionOperation::Compact),
         "x.ai/session/rename" => selected(
             view,

@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 
 from install import ROOT, build_target, install
-from verification import source_fingerprint
+from verification import HOST_TARGETS, source_fingerprint
 
 
 def main():
@@ -18,7 +18,7 @@ def main():
     args = parser.parse_args()
     before = source_fingerprint()
     profile = "release" if args.release else "debug"
-    command = ["cargo", "build", "--workspace", "--locked"]
+    command = ["cargo", "build", *(["--workspace"] if args.release else HOST_TARGETS), "--locked"]
     if args.release:
         command.append("--release")
     subprocess.run(command, cwd=ROOT, check=True)
@@ -43,6 +43,7 @@ def main():
         "frontend_reference": (ROOT / "frontend/grok/UPSTREAM_COMMIT").read_text().strip(),
         "frontend_source_rev": (ROOT / "frontend/grok/SOURCE_REV").read_text().strip(),
         "builds": {"root_workspace_with_terminal": "passed"},
+        "build_command": command,
         "tools": {
             "rust": subprocess.check_output(["rustc", "-vV"], cwd=ROOT, text=True).strip(),
         },

@@ -61,6 +61,10 @@ EXAMPLES = (
 )
 _RECEIPT: dict[str, Any] | None = None
 
+# A debug candidate must keep the same feature-unified host graph as its installed
+# verification. Switching back to only default targets can change every native library.
+HOST_TARGETS = ("--workspace", "--lib", "--bins", "--examples", "--test", "rpc")
+
 
 OUTPUT_MARKER = ".eden-verification-output"
 
@@ -349,12 +353,7 @@ def prepare(output: pathlib.Path | None = None) -> dict[str, Any]:
         [
             "cargo",
             "build",
-            "--workspace",
-            "--lib",
-            "--bins",
-            "--examples",
-            "--test",
-            "rpc",
+            *HOST_TARGETS,
             "--locked",
             "--message-format=json",
         ],

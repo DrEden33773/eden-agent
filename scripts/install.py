@@ -96,6 +96,19 @@ def install(
         build_target() / profile / ("eden-launch" + suffix),
         destination / "bin" / ("eden-launch" + suffix),
     )
+    frontend_target = pathlib.Path(
+        os.environ.get("EDEN_FRONTEND_TARGET_DIR", str(ROOT / "target/frontend"))
+    )
+    frontend = frontend_target / profile / ("xai-grok-pager" + suffix)
+    if not frontend.is_file():
+        raise FileNotFoundError(
+            "build the native frontend first: cargo build --manifest-path frontend/grok/Cargo.toml --locked -p xai-grok-pager-bin (CARGO_TARGET_DIR=target/frontend)"
+        )
+    shutil.copy2(frontend, destination / "bin" / ("eden-frontend" + suffix))
+    frontend_notices = destination / "frontend-notices"
+    frontend_notices.mkdir(exist_ok=True)
+    for name in ("LICENSE", "THIRD-PARTY-NOTICES", "SOURCE_REV"):
+        shutil.copy2(ROOT / "frontend/grok" / name, frontend_notices / name)
     ui_dir = destination / "ui"
     ui_dir.mkdir(exist_ok=True)
     editor = library("eden_terminal_editor")
@@ -259,7 +272,7 @@ def install(
         "files": {
             path.relative_to(destination).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
             for path in sorted(destination.rglob("*"))
-            if path.is_file() and path.name != "release.json"
+            if path.is_file() and path.name not in {"release.json", "CANDIDATE.json"}
         },
     }
     (destination / "release.json").write_text(

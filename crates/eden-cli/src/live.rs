@@ -27,6 +27,10 @@ struct Endpoint {
     address: String,
     token: String,
     session_id: u64,
+    #[serde(default)]
+    pid: u32,
+    #[serde(default)]
+    instance: String,
 }
 enum Submission {
     Running {
@@ -39,6 +43,7 @@ enum Submission {
     },
 }
 struct Shared {
+    instance: String,
     management: Management,
     session: Session,
     token: String,
@@ -179,13 +184,15 @@ async fn serve_session(
         address: listener.local_addr()?.to_string(),
         token: token()?,
         session_id: session.id(),
+        pid: std::process::id(),
+        instance: token()?,
     };
+    let _ = session.refresh_models_in_background().await;
     if let Err(error) = write_endpoint(endpoint_path, &endpoint) {
         session.shutdown().await?;
         return Err(Box::new(error));
     }
     let _registration = crate::tui::Registration::new(session, endpoint_path)?;
-    let _ = session.refresh_models_in_background().await;
     let (stop, mut stopped) = watch::channel(false);
     let shared = Arc::new(Shared {
         management: Management {
@@ -194,6 +201,7 @@ async fn serve_session(
         },
         session: session.clone(),
         token: endpoint.token,
+        instance: endpoint.instance,
         web_root: web_root.map(Path::to_owned),
         submissions: Mutex::new((HashMap::new(), VecDeque::new())),
         history: tokio::sync::Mutex::new(None),
@@ -471,7 +479,12 @@ async fn dispatch(
                 )
                 .await;
             }
-            Ok(json!({ "presentation": session.presentation_snapshot(), "state": session.state() }))
+            Ok(json!({
+                "presentation": session.presentation_snapshot(),
+                "state": session.state(),
+                "host_instance": shared.instance,
+                "history_path": session.history_path(),
+            }))
         }
         ("GET", "/tui/snapshot") => {
             if let Some(attachment) =
@@ -707,6 +720,9 @@ mod reading;
 use reading::read_document;
 
 struct StaticShared {
+    cwd: String,
+    instance: String,
+    history_path: Option<PathBuf>,
     reading: Option<eden_protocol::delivery::ReadingDocument>,
     diagnostic: Option<String>,
     history: Vec<eden_protocol::coding::Record>,
@@ -748,15 +764,26 @@ pub async fn run_read_host(
         address: listener.local_addr()?.to_string(),
         token: token()?,
         session_id,
+        pid: std::process::id(),
+        instance: token()?,
     };
     write_endpoint(endpoint_path, &endpoint)?;
     let (stop, mut stopped) = watch::channel(false);
     let shared = Arc::new(StaticShared {
+        cwd: document
+            .history
+            .iter()
+            .find(|record| record.kind == "session")
+            .and_then(|record| record.payload["cwd"].as_str())
+            .unwrap_or_default()
+            .into(),
+        history_path: Some(std::fs::canonicalize(history)?),
         reading: document.reading,
         diagnostic: document.diagnostic,
         history: document.history,
         snapshot,
         token: endpoint.token,
+        instance: endpoint.instance,
         web_root: web_root.map(Path::to_owned),
         stop,
     });
@@ -803,8 +830,11 @@ async fn dispatch_static(shared: &StaticShared, method: &str, path: &str) -> Res
                     "active_run": null,
                     "closed": true,
                     "read_only": true,
+                    "cwd": shared.cwd,
                 },
                 "history": shared.history,
+                "host_instance": shared.instance,
+                "history_path": shared.history_path,
                 "reading": shared.reading,
                 "diagnostic": shared.diagnostic,
                 "events": [],

@@ -294,9 +294,11 @@ fn acquire_lock(path: &std::path::Path) -> Result<File, Fault> {
         .open(lock_path)
         .map_err(io)?;
     lock.try_lock().map_err(|error| {
-        fault(format!(
-            "history already owned or lock unavailable: {error}"
-        ))
+        Fault::new(
+            "WriterConflict",
+            "local-history",
+            format!("history already owned or lock unavailable: {error}"),
+        )
     })?;
     Ok(lock)
 }
@@ -470,10 +472,7 @@ mod tests {
         let mut first = Store::default();
         first.handle(open()).unwrap();
         let mut second = Store::default();
-        assert_eq!(
-            second.handle(open()).unwrap_err().code,
-            "PersistenceFailure"
-        );
+        assert_eq!(second.handle(open()).unwrap_err().code, "WriterConflict");
         let receipt = first
             .handle(StoreRequest::Append {
                 run_id: 1,

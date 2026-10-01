@@ -21,6 +21,8 @@ struct Endpoint {
     address: String,
     token: String,
     session_id: u64,
+    #[serde(default)]
+    instance: String,
 }
 fn fault(code: &str, message: impl Into<String>) -> Fault {
     Fault::new(code, "live-client", message)
@@ -87,25 +89,122 @@ pub enum QueueMode {
     All,
 }
 /// A cloneable endpoint handle. Dropping it does not cancel or shut down its session.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct HostClient {
     endpoint: PathBuf,
     session_id: Option<u64>,
+    host: Option<(String, String)>,
+}
+impl std::fmt::Debug for HostClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostClient")
+            .field("endpoint", &self.endpoint)
+            .field("session_id", &self.session_id)
+            .finish_non_exhaustive()
+    }
 }
 impl HostClient {
+    /// Verify identity and availability without transferring the complete durable history.
+    pub async fn verify(&self) -> Result<State, Fault> {
+        let value = self.request("GET", "/snapshot", None).await?;
+        let state: State = decode(value["state"].clone())?;
+        if self.session_id.is_some_and(|id| {
+            state.session_id != id
+                || value["presentation"]["session_id"].as_u64().or_else(|| {
+                    value["presentation"]["session_id"]
+                        .as_str()
+                        .and_then(|id| id.parse().ok())
+                }) != Some(id)
+        }) {
+            return Err(fault(
+                "SessionMismatch",
+                "host response belongs to another Session",
+            ));
+        }
+        if state.closed && !state.read_only {
+            return Err(fault("OwnerUnavailable", "host has stopped"));
+        }
+        Ok(state)
+    }
+    /// Send additive host operations while pinning the same process and persistent identity.
+    pub async fn request(
+        &self,
+        method: &str,
+        route: &str,
+        body: Option<&Value>,
+    ) -> Result<Value, Fault> {
+        if self.session_id.is_some() && self.host.is_none() {
+            return Err(fault(
+                "OwnerUnavailable",
+                "the selected host metadata is unavailable",
+            ));
+        }
+        let mut body = body.cloned();
+        if method == "POST"
+            && let Some(id) = self.session_id
+        {
+            let value = body.get_or_insert_with(|| json!({}));
+            value["session_id"] = json!(id);
+        }
+        call_pinned(
+            &self.endpoint,
+            method,
+            route,
+            body.as_ref(),
+            Deadlines::default(),
+            self.host.as_ref(),
+        )
+        .await
+    }
+
     /// Opening does not attach; callers explicitly own their attachment lifetime.
     pub fn new(endpoint: impl Into<PathBuf>) -> Self {
         Self {
             endpoint: endpoint.into(),
             session_id: None,
+            host: None,
         }
     }
     /// Pin an explicitly attached Session. A replaced endpoint cannot redirect later mutations.
     pub fn for_session(endpoint: impl Into<PathBuf>, session_id: u64) -> Self {
+        let endpoint = endpoint.into();
+        let host = std::fs::read(&endpoint)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Endpoint>(&bytes).ok())
+            .map(|metadata| (metadata.address, metadata.token));
         Self {
-            endpoint: endpoint.into(),
+            endpoint,
             session_id: Some(session_id),
+            host,
         }
+    }
+    /// Bind shutdown to the instance that was validated when the target was opened.
+    pub fn for_instance(
+        endpoint: impl Into<PathBuf>,
+        session_id: u64,
+        instance: &str,
+    ) -> Result<Self, Fault> {
+        let endpoint = endpoint.into();
+        let metadata: Endpoint = serde_json::from_slice(
+            &std::fs::read(&endpoint).map_err(|e| fault("OwnerUnavailable", e.to_string()))?,
+        )
+        .map_err(|e| fault("IdentityMismatch", e.to_string()))?;
+        let actual = if metadata.instance.is_empty() {
+            &metadata.address
+        } else {
+            &metadata.instance
+        };
+        if metadata.session_id != session_id || actual != instance {
+            return Err(fault(
+                "HostMismatch",
+                "the selected host instance has changed",
+            ));
+        }
+        Ok(Self {
+            endpoint,
+            session_id: Some(session_id),
+            host: Some((metadata.address, metadata.token)),
+        })
     }
     async fn post<T: DeserializeOwned>(&self, route: &str, mut body: Value) -> Result<T, Fault> {
         if let Some(session_id) = self.session_id {
@@ -114,7 +213,7 @@ impl HostClient {
             }
             body["session_id"] = json!(session_id);
         }
-        decode(call(&self.endpoint, "POST", route, Some(&body)).await?)
+        decode(self.request("POST", route, Some(&body)).await?)
     }
     /// Attach activity ownership; detaching leaves accepted execution running.
     pub async fn attach(&self, frontend: &str) -> Result<u64, Fault> {
@@ -172,7 +271,7 @@ impl HostClient {
         route: &str,
         previous: Option<Snapshot>,
     ) -> Result<Snapshot, Fault> {
-        let mut raw = call(&self.endpoint, "GET", route, None).await?;
+        let mut raw = self.request("GET", route, None).await?;
         let unchanged = raw["history_unchanged"] == true;
         let reset = raw["events_reset"] != false;
         let first = raw["events_first"].as_u64();
@@ -494,12 +593,29 @@ async fn call_with_deadlines(
     body: Option<&Value>,
     deadlines: Deadlines,
 ) -> Result<Value, Fault> {
+    call_pinned(endpoint_path, method, route, body, deadlines, None).await
+}
+async fn call_pinned(
+    endpoint_path: &Path,
+    method: &str,
+    route: &str,
+    body: Option<&Value>,
+    deadlines: Deadlines,
+    host: Option<&(String, String)>,
+) -> Result<Value, Fault> {
     let endpoint_bytes = tokio::time::timeout(deadlines.connect, tokio::fs::read(endpoint_path))
         .await
         .map_err(|_| fault("Unavailable", "endpoint read deadline exceeded"))?
         .map_err(|error| fault("FileFailure", error.to_string()))?;
     let endpoint: Endpoint = serde_json::from_slice(&endpoint_bytes)
         .map_err(|error| fault("InvalidInput", error.to_string()))?;
+    if host.is_some_and(|(address, token)| *address != endpoint.address || *token != endpoint.token)
+    {
+        return Err(fault(
+            "HostMismatch",
+            "endpoint now identifies another host instance; attach explicitly",
+        ));
+    }
     let mut stream = tokio::time::timeout(deadlines.connect, TcpStream::connect(&endpoint.address))
         .await
         .map_err(|_| fault("Unavailable", "connection deadline exceeded"))?
@@ -683,6 +799,27 @@ mod tests {
 mod transport_tests {
     use super::*;
     use tokio::net::TcpListener;
+    #[tokio::test]
+    async fn replacement_host_with_same_session_cannot_receive_an_old_attachment_mutation() {
+        let path =
+            std::env::temp_dir().join(format!("eden-instance-pin-{}.json", std::process::id()));
+        tokio::fs::write(
+            &path,
+            json!({ "address": "127.0.0.1:1", "token": "first", "session_id": 1 }).to_string(),
+        )
+        .await
+        .unwrap();
+        let client = HostClient::for_session(&path, 1);
+        tokio::fs::write(
+            &path,
+            json!({ "address": "127.0.0.1:2", "token": "second", "session_id": 1 }).to_string(),
+        )
+        .await
+        .unwrap();
+        let error = client.attach("tui").await.unwrap_err();
+        assert_eq!(error.code, "HostMismatch");
+        tokio::fs::remove_file(path).await.unwrap();
+    }
 
     #[tokio::test]
     async fn incremental_reads_merge_events_and_rebuild_history_after_lag() {
@@ -695,6 +832,7 @@ mod transport_tests {
                 address: address.to_string(),
                 token: "fixture".into(),
                 session_id: 1,
+                instance: String::new(),
             })
             .unwrap(),
         )
@@ -792,6 +930,7 @@ mod transport_tests {
                 address: address.to_string(),
                 token: "test-token".into(),
                 session_id: 1,
+                instance: String::new(),
             })
             .unwrap(),
         )

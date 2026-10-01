@@ -114,11 +114,14 @@ async fn typed_transport_preserves_receipts_detach_and_real_events() {
             address: address.to_string(),
             token: "test-token".into(),
             session_id: session.id(),
+            pid: std::process::id(),
+            instance: "test-instance".into(),
         },
     )
     .unwrap();
     let (stop, _) = watch::channel(false);
     let shared = Arc::new(Shared {
+        instance: "test-instance".into(),
         management: Default::default(),
         session: session.clone(),
         token: "test-token".into(),
@@ -220,6 +223,9 @@ async fn typed_transport_preserves_receipts_detach_and_real_events() {
 async fn static_snapshot_keeps_committed_records_and_is_read_only() {
     let (stop, _) = watch::channel(false);
     let shared = StaticShared {
+        cwd: "/fixture".into(),
+        instance: "test-instance".into(),
+        history_path: None,
         reading: None,
         diagnostic: None,
         history: vec![],
@@ -328,6 +334,7 @@ async fn idle_snapshots_do_not_refresh_history_from_their_own_store_reads() {
     session.enable_shared_presentation();
     let (stop, _) = watch::channel(false);
     let shared = Arc::new(Shared {
+        instance: "test-instance".into(),
         management: Default::default(),
         session: session.clone(),
         token: "unused".into(),
@@ -377,6 +384,7 @@ async fn idle_poll_waits_and_expired_attachment_can_rejoin_same_session() {
     let session = session().await;
     let (stop, _) = watch::channel(false);
     let shared = Arc::new(Shared {
+        instance: "test-instance".into(),
         management: Default::default(),
         session: session.clone(),
         token: "unused".into(),
@@ -448,6 +456,7 @@ async fn management_catalog_preserves_receipts_and_busy_admission() {
     let session = session().await;
     let (stop, _) = watch::channel(false);
     let shared = Arc::new(Shared {
+        instance: "test-instance".into(),
         management: Default::default(),
         session: session.clone(),
         token: "fixture".into(),
@@ -495,6 +504,7 @@ async fn public_auth_route_refuses_secret_bodies_before_receipt_storage() {
     let session = session().await;
     let (stop, _) = watch::channel(false);
     let shared = Arc::new(Shared {
+        instance: "test-instance".into(),
         management: Default::default(),
         session: session.clone(),
         token: "fixture".into(),
@@ -557,6 +567,7 @@ async fn detaching_frontend_cancels_pending_preview_and_observes_cleanup() {
             .await;
     let (stop, _) = watch::channel(false);
     let shared = Arc::new(Shared {
+        instance: "test-instance".into(),
         management: Default::default(),
         session: session.clone(),
         token: "fixture".into(),
@@ -631,6 +642,7 @@ async fn detached_preview_receipt_does_not_retain_the_artifact() {
     .await;
     let (stop, _) = watch::channel(false);
     let shared = Arc::new(Shared {
+        instance: "test-instance".into(),
         management: Default::default(),
         session: session.clone(),
         token: "fixture".into(),
@@ -682,6 +694,7 @@ async fn lease_expiry_cleans_preview_before_reattachment_and_exit() {
             .await;
     let (stop, _) = watch::channel(false);
     let shared = Arc::new(Shared {
+        instance: "test-instance".into(),
         management: Default::default(),
         session: session.clone(),
         token: "fixture".into(),
@@ -748,6 +761,7 @@ async fn private_key_admission_waits_for_background_context_inspection() {
     let session = session().await;
     let (stop, _) = watch::channel(false);
     let shared = Arc::new(Shared {
+        instance: "test-instance".into(),
         session: session.clone(),
         token: "fixture".into(),
         web_root: None,

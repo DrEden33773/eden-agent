@@ -1,12 +1,22 @@
 # Interactive terminal
 
-Run the installed `bin/eden` in a terminal to start a new task. `eden tui` is the explicit equivalent. The terminal attaches to a separate local Session host, so closing the frontend leaves accepted work running. The exit message prints the exact endpoint to reconnect. `--print`, `--json`, piped input, explicit prompt runs and RPC keep their existing output and lifecycle.
+The installed `eden` entry starts the Grok-derived frontend by default. Build it with [the frontend build guide](../frontend/README.md). `/resume` presents histories in modification order, labels the current empty Session, and uses a saved name or recognizable content summary. Selecting an empty history explicitly displays its state. `/sessions` provides independent discovery, stop, read-only inspection and reviewed migration copies; it remains usable after stopping the current writer.
+
+All creation, owner validation, attachment and restoration use `eden-session-lifecycle`. The service validates the persistent ID, canonical history locator and host instance before attachment. Each load receives a separate local view identity. Loading failure returns to the previous view with its unsent draft; notifications for a previous view cannot change the new view. Binding incompatibility opens a plugin-free reader and reports why execution is unavailable. Migration writes an explicitly reviewed new copy and preserves its source.
+
+Exiting the terminal detaches from execution hosts; accepted work continues there. Explicit stop waits for host cleanup and writer release. A reader created by this frontend is closed during frontend cleanup, while an explicitly borrowed reader remains alive. No-target startup creates a new persistent Session immediately. Use `--session PATH` for an explicit resume, `eden tui --read PATH` for immutable reading, or `eden tui --endpoint PATH` to attach a selected host. `EDEN_LEGACY_SESSION_DIRS` may list additional directories using the platform path separator; discovery filters them by canonical project cwd and never moves or rewrites them.
+
+`eden tui --frontend native` selects the SDK terminal described below. An explicit `--editor` also selects it so independent UI authors continue to exercise their installed plugin. Its drafts and semantic presentation contract remain available alongside the default frontend.
+
+## SDK terminal entry
+
+Run the installed `bin/eden` with `tui --frontend native` in a terminal to start a new task. The terminal attaches to a separate local Session host, so closing the frontend leaves accepted work running. The exit message prints the exact endpoint to reconnect. `--print`, `--json`, piped input, explicit prompt runs and RPC keep their existing output and lifecycle.
 
 ```sh
-eden tui
-eden tui --endpoint /path/to/host.json
-eden --session /path/to/history.jsonl tui
-eden tui --read /path/to/history.jsonl
+eden tui --frontend native
+eden tui --frontend native --endpoint /path/to/host.json
+eden --session /path/to/history.jsonl tui --frontend native
+eden tui --frontend native --read /path/to/history.jsonl
 ```
 
 An endpoint selects an already live host. A history path restores a stopped session without running another turn. Read-only history loads committed public records without loading the saved business plugins. `--composition`, workspace trust, resource discovery, tool selection, model and thinking startup settings are passed to a newly created or restored host. They are not silently applied when attaching to someone else's host. Use `--tools=read` when a tool name also names an Eden command.

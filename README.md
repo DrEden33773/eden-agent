@@ -9,8 +9,7 @@ This development release executes coding tasks through native loop, context, pro
 Install Rust via rustup and Python 3. The repository selects Rust 1.98.1; Python is only used for installation assembly and verification.
 
 ```sh
-cargo build --workspace --locked
-python3 scripts/install.py artifacts/install
+python3 scripts/build-candidate.py artifacts/install
 artifacts/install/bin/eden --cwd /path/to/project --session /path/to/task.jsonl --print 'Inspect the project and run its tests.'
 artifacts/install/bin/eden --history /path/to/task.jsonl
 ```
@@ -25,7 +24,7 @@ Use `eden help`, `eden help models` or `eden help models select` to explore comm
 
 ## Interactive terminal
 
-Run `eden` without a prompt in a terminal, or use `eden tui`. New tasks, explicit live attachment, stopped-history restoration and read-only history are separate entries. See [terminal interaction, local drafts and UI plugins](docs/terminal.md).
+Run `eden` without a prompt in a terminal, or use `eden tui`. New tasks, explicit live attachment, stopped-history restoration and read-only history are separate entries. The default frontend uses the fixed Grok Build layout with native Eden Session services. See [frontend builds and provenance](frontend/README.md) and [terminal interaction, local drafts and UI plugins](docs/terminal.md).
 
 ## Rust embedding
 

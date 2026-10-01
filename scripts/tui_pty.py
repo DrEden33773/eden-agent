@@ -16,7 +16,7 @@ from pathlib import Path
 class Terminal:
     """Keep the slave open to verify the exact termios state after normal exit."""
 
-    def __init__(self, binary, endpoint, *, env=None, width=110, height=32):
+    def __init__(self, binary, endpoint, *, env=None, width=110, height=32, command=None):
         if os.name == "nt":
             raise RuntimeError("POSIX PTY unavailable; run native terminal checks separately")
         import pty
@@ -42,7 +42,7 @@ class Terminal:
         environment.pop("NO_COLOR", None)
         environment.update(env or {})
         self.process = subprocess.Popen(
-            [str(binary), "live-tui", "--endpoint", str(endpoint)],
+            command or [str(binary), "tui", "--frontend", "native", "--endpoint", str(endpoint)],
             cwd=Path(endpoint).parent,
             stdin=self.slave,
             stdout=self.slave,

@@ -1316,6 +1316,7 @@ dependencies = [
  "eden-kernel",
  "eden-plugin-sdk",
  "eden-protocol",
+ "eden-session-lifecycle",
  "eden-tui",
  "eden-tui-client",
  "getrandom 0.3.4",
@@ -1384,21 +1385,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "eden-github-share"
+name = "eden-frontend-session"
 version = "0.1.0"
 dependencies = [
- "eden-plugin-sdk",
- "reqwest",
+ "eden-agent",
+ "eden-protocol",
+ "eden-session-lifecycle",
+ "eden-tui-client",
  "serde_json",
  "tokio",
 ]
 
 [[package]]
-name = "eden-grok-adapter"
+name = "eden-github-share"
 version = "0.1.0"
 dependencies = [
- "eden-protocol",
- "eden-tui-client",
+ "eden-plugin-sdk",
+ "reqwest",
  "serde_json",
  "tokio",
 ]
@@ -1528,6 +1531,18 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tokio",
+]
+
+[[package]]
+name = "eden-session-lifecycle"
+version = "0.1.0"
+dependencies = [
+ "eden-agent",
+ "eden-protocol",
+ "eden-tui-client",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

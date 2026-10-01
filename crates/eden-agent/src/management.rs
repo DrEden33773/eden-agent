@@ -331,10 +331,26 @@ impl Session {
                 .to_string_lossy()
                 .into_owned();
         }
+        // A large installed binding must not block an embedding caller's I/O reactor.
+        let binding = if matches!(options.kind, CopyKind::Migrate | CopyKind::Upgrade)
+            && records
+                .iter()
+                .any(|record| record.kind == "composition_lock")
+        {
+            let selected = selected.clone();
+            let cwd = cwd.clone();
+            Some(
+                tokio::task::spawn_blocking(move || crate::composition::binding(&selected, &cwd))
+                    .await
+                    .map_err(|error| invalid(error.to_string()))??,
+            )
+        } else {
+            None
+        };
         for record in &mut records {
             if record.kind == "composition_lock" {
-                if matches!(options.kind, CopyKind::Migrate | CopyKind::Upgrade) {
-                    record.payload = crate::composition::binding(&selected, &cwd)?;
+                if let Some(binding) = &binding {
+                    record.payload = binding.clone();
                 } else {
                     record.payload["cwd"] = json!(cwd);
                 }

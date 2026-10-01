@@ -52,6 +52,8 @@ LEGACY_IMAGES = {
 # phase label `scripts/ci-run.mjs` records, and scripts/test_ci_cache.py checks
 # that these declarations still match the commands the workflow runs.
 PLATFORM_PACKAGES = (
+    "eden-session-lifecycle",
+    "eden-frontend-session",
     "eden-coding-tools",
     "eden-fmt",
     "eden-local-history",

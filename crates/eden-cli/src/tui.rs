@@ -1,121 +1,28 @@
-//! Start or explicitly attach a terminal without placing rendering inside the CLI.
+//! CLI consumers delegate Session ownership and discovery to the shared lifecycle service.
 use crate::cli::Cli;
+pub(crate) use eden_session_lifecycle::Registration;
+use eden_session_lifecycle::state_dir;
+use eden_session_lifecycle::{Cleanup, Lifecycle, Opened};
 use std::{
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    process::Command,
 };
 
-fn state_dir() -> PathBuf {
-    std::env::var_os("EDEN_TUI_STATE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let root = std::env::var_os("XDG_STATE_HOME")
-                .map(PathBuf::from)
-                .or_else(|| {
-                    std::env::var_os(if cfg!(windows) {
-                        "LOCALAPPDATA"
-                    } else {
-                        "HOME"
-                    })
-                    .map(|p| PathBuf::from(p).join(".local/state"))
-                })
-                .unwrap_or_else(std::env::temp_dir);
-            root.join("eden/tui")
-        })
-}
-/// Attach a local terminal. The endpoint's session identity owns the recovered draft.
-pub async fn attach(
-    endpoint: &Path,
-    editor: Option<&Path>,
-    frontend: &str,
-    no_color: bool,
-) -> Result<i32, Box<dyn std::error::Error>> {
-    let editor = editor
-        .map(Path::to_owned)
-        .or_else(|| std::env::var_os("EDEN_TUI_EDITOR").map(PathBuf::from))
-        .unwrap_or_else(|| {
-            let executable = std::env::current_exe().unwrap_or_default();
-            executable
-                .parent()
-                .and_then(Path::parent)
-                .unwrap_or(Path::new("."))
-                .join("ui")
-                .join(format!(
-                    "{}eden_terminal_editor{}",
-                    std::env::consts::DLL_PREFIX,
-                    std::env::consts::DLL_SUFFIX
-                ))
-        });
-    let identity = if frontend == "terminal" {
-        let source = std::env::var("WT_SESSION")
-            .or_else(|_| std::env::var("TERM_SESSION_ID"))
-            .ok()
-            .or_else(|| {
-                std::fs::read_link("/proc/self/fd/0")
-                    .ok()
-                    .map(|p| p.to_string_lossy().into_owned())
-            })
-            .unwrap_or_else(|| format!("process-{}", std::process::id()));
-        format!(
-            "terminal-{}",
-            source
-                .as_bytes()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-        )
-    } else {
-        frontend.to_owned()
-    };
-    eden_tui::run(eden_tui::Options {
-        endpoint: endpoint.into(),
-        editor,
-        state_dir: state_dir(),
-        frontend: identity,
-        no_color,
-    })
-    .await
-}
-/// Create a detached host for a new task, or restore only the explicitly selected saved history.
-pub async fn launch(
-    cli: &Cli,
-    endpoint: Option<&Path>,
-    read: Option<&Path>,
-    frontend: &str,
-    editor: Option<&Path>,
-) -> Result<i32, Box<dyn std::error::Error>> {
-    if let Some(endpoint) = endpoint {
-        return attach(endpoint, editor, frontend, monochrome(cli)).await;
-    }
-    let endpoint = start_host(cli, read)?;
-    attach(&endpoint, editor, frontend, monochrome(cli)).await
-}
-/// Start a detached host for an explicitly selected saved session or reading artifact.
-pub(crate) fn start_host(
-    cli: &Cli,
-    read: Option<&Path>,
-) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let directory = state_dir().join("hosts");
-    std::fs::create_dir_all(&directory)?;
-    let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let endpoint = directory.join(format!("{stamp}-{}.json", std::process::id()));
-    let log_path = endpoint.with_extension("log");
-    let log = std::fs::File::create(&log_path)?;
+/// Capture launch settings independently of any user Session.
+pub fn lifecycle(cli: &Cli) -> Result<Lifecycle, Box<dyn std::error::Error>> {
+    let invocation = std::env::current_dir()?;
     let mut command = Command::new(std::env::current_exe()?);
-    if read.is_none() {
+    {
         for (flag, path) in [
             ("--composition", cli.composition.as_ref()),
-            ("--cwd", cli.cwd.as_ref()),
             ("--global-dir", cli.global_dir.as_ref()),
-            ("--session", cli.session.as_ref()),
         ] {
             if let Some(path) = path {
-                command.arg(flag).arg(path);
+                command.arg(flag).arg(invocation.join(path));
             }
         }
         for path in &cli.env_file {
-            command.arg("--env-file").arg(path);
+            command.arg("--env-file").arg(invocation.join(path));
         }
         for (on, flag) in [
             (cli.trust_project, "--trust-project"),
@@ -155,53 +62,175 @@ pub(crate) fn start_host(
             }
         }
     }
-    if let Some(path) = read {
-        command.arg("read").arg(path);
-    } else if cli.session.as_ref().is_some_and(|path| path.exists()) {
-        command.arg("resume-live");
-    } else {
-        command.arg("live");
-    }
-    command
-        .arg("--endpoint")
-        .arg(&endpoint)
-        .stdin(Stdio::null())
-        .stdout(log.try_clone()?)
-        .stderr(log);
-    // A terminal detach must not send a shell hangup to the Session's host.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0200);
-    }
-    let mut child = command.spawn()?;
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        if endpoint.exists() {
-            break;
-        }
-        if let Some(status) = child.try_wait()? {
-            return Err(format!(
-                "Host exited {status}: {}",
-                std::fs::read_to_string(&log_path).unwrap_or_default()
-            )
-            .into());
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!("Host startup timed out; see {}", log_path.display()).into());
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    Ok(endpoint)
+
+    Ok(Lifecycle {
+        executable: std::env::current_exe()?,
+        arguments: command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect(),
+        cwd: std::fs::canonicalize(
+            cli.cwd
+                .as_ref()
+                .cloned()
+                .unwrap_or(std::env::current_dir()?),
+        )?,
+        state_dir: state_dir(),
+        legacy_directories: std::env::var_os("EDEN_LEGACY_SESSION_DIRS")
+            .map(|value| {
+                std::env::split_paths(&value)
+                    .map(|path| invocation.join(path))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
 }
 
+/// Launch the installed frontend after explicit lifecycle selection.
+pub async fn launch(
+    cli: &Cli,
+    endpoint: Option<&Path>,
+    read: Option<&Path>,
+    frontend: &str,
+    editor: Option<&Path>,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    let lifecycle = lifecycle(cli)?;
+    let opened = if let Some(endpoint) = endpoint {
+        lifecycle.attach(endpoint, None).await?
+    } else if let Some(path) = read {
+        lifecycle.open(path, true).await?
+    } else if let Some(path) = &cli.session {
+        lifecycle.open(path, cli.read_only).await?
+    } else {
+        lifecycle.create(!cli.no_session).await?
+    };
+    if editor.is_some() || frontend != "terminal" {
+        let result = attach_native(&opened.endpoint, editor, frontend, monochrome(cli)).await;
+        if opened.cleanup == Cleanup::OwnedReader {
+            lifecycle.close(&opened).await?;
+        }
+        return result;
+    }
+    run_frontend(&lifecycle, &opened, monochrome(cli)).await
+}
+/// Attach the installed frontend to an explicitly validated owner; it is always borrowed.
+pub async fn attach(
+    endpoint: &Path,
+    editor: Option<&Path>,
+    frontend: &str,
+    no_color: bool,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    if editor.is_some() || frontend != "terminal" {
+        return attach_native(endpoint, editor, frontend, no_color).await;
+    }
+    let args = vec![std::ffi::OsString::from("eden")];
+    let parsed = crate::cli::parse(&args, clap::ColorChoice::Never);
+    let lifecycle = lifecycle(&parsed.cli)?;
+    let opened = lifecycle.attach(endpoint, None).await?;
+    run_frontend(&lifecycle, &opened, no_color).await
+}
+async fn run_frontend(
+    lifecycle: &Lifecycle,
+    opened: &Opened,
+    no_color: bool,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    let pager = lifecycle
+        .executable
+        .parent()
+        .ok_or("invalid installation")?
+        .join(format!("eden-frontend{}", std::env::consts::EXE_SUFFIX));
+    let home = lifecycle.state_dir.join("frontend");
+    std::fs::create_dir_all(&home)?;
+    let mut command = tokio::process::Command::new(pager);
+    command
+        .arg("--no-leader")
+        .arg("--resume")
+        .arg(opened.view_key())
+        .current_dir(&lifecycle.cwd)
+        .env("EDEN_SESSION_LIFECYCLE", serde_json::to_string(lifecycle)?)
+        .env("EDEN_FRONTEND_ENDPOINT", &opened.endpoint)
+        .env("EDEN_FRONTEND_OPENED", serde_json::to_string(opened)?)
+        .env("GROK_HOME", home)
+        .env("GROK_AGENT_ID", "eden")
+        .env("GROK_TELEMETRY_ENABLED", "false")
+        .env("GROK_TELEMETRY_MIXPANEL_ENABLED", "false")
+        .env("GROK_TELEMETRY_TRACE_UPLOAD", "false")
+        .env("GROK_FEEDBACK_ENABLED", "false")
+        .env("GROK_TRACE_UPLOAD", "false")
+        .env("GROK_TURN_SUMMARY", "0")
+        .env("GROK_INSTRUMENTATION", "disabled")
+        .env("OTEL_SDK_DISABLED", "true")
+        .env("DISABLE_TELEMETRY", "1")
+        .env("DISABLE_FEEDBACK_COMMAND", "1")
+        .env("GROK_DISABLE_AUTOUPDATER", "1")
+        .env("GROK_AGENT_DASHBOARD", "false")
+        .env("GROK_PROMPT_SUGGESTIONS", "false");
+    if no_color {
+        command.env("NO_COLOR", "1");
+    }
+    let result = command.status().await;
+    if result.is_err() {
+        lifecycle.failed_consumer(opened).await?;
+    }
+    if opened.cleanup == Cleanup::OwnedReader {
+        let _ = lifecycle.close(opened).await;
+    }
+    let result = result?;
+    Ok(result.code().unwrap_or(1))
+}
+/// Attach a local terminal. The endpoint's session identity owns the recovered draft.
+async fn attach_native(
+    endpoint: &Path,
+    editor: Option<&Path>,
+    frontend: &str,
+    no_color: bool,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    let editor = editor
+        .map(Path::to_owned)
+        .or_else(|| std::env::var_os("EDEN_TUI_EDITOR").map(PathBuf::from))
+        .unwrap_or_else(|| {
+            let executable = std::env::current_exe().unwrap_or_default();
+            executable
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or(Path::new("."))
+                .join("ui")
+                .join(format!(
+                    "{}eden_terminal_editor{}",
+                    std::env::consts::DLL_PREFIX,
+                    std::env::consts::DLL_SUFFIX
+                ))
+        });
+    let identity = if frontend == "terminal" || frontend == "native" {
+        let source = std::env::var("WT_SESSION")
+            .or_else(|_| std::env::var("TERM_SESSION_ID"))
+            .ok()
+            .or_else(|| {
+                std::fs::read_link("/proc/self/fd/0")
+                    .ok()
+                    .map(|p| p.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| format!("process-{}", std::process::id()));
+        format!(
+            "terminal-{}",
+            source
+                .as_bytes()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        )
+    } else {
+        frontend.to_owned()
+    };
+    eden_tui::run(eden_tui::Options {
+        endpoint: endpoint.into(),
+        editor,
+        state_dir: state_dir(),
+        frontend: identity,
+        no_color,
+    })
+    .await
+}
 /// Explicit color selection takes precedence over the conventional environment override.
 pub fn monochrome(cli: &Cli) -> bool {
     cli.color == "never"
@@ -209,88 +238,16 @@ pub fn monochrome(cli: &Cli) -> bool {
             && std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty()))
 }
 
-/// A local registry records only explicit hosts; history selection still verifies the live identity.
-pub(crate) struct Registration(PathBuf);
-impl Registration {
-    pub(crate) fn new(
-        session: &eden_agent::Session,
-        endpoint: &Path,
-    ) -> Result<Option<Self>, Box<dyn std::error::Error>> {
-        let Some(history) = session.history_path() else {
-            return Ok(None);
-        };
-        let directory = state_dir().join("live");
-        std::fs::create_dir_all(&directory)?;
-        let path = directory.join(format!("{}.json", session.id()));
-        let value = serde_json::json!({
-            "history": std::fs::canonicalize(history)?,
-            "endpoint": std::fs::canonicalize(endpoint)?,
-            "session_id": session.id(),
-        });
-        std::fs::write(&path, serde_json::to_vec(&value)?)?;
-        Ok(Some(Self(path)))
-    }
-}
-impl Drop for Registration {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-/// Reuse a verified live owner only after the user explicitly selects that history.
-pub(crate) async fn selected_live_endpoint(history: &Path) -> Option<PathBuf> {
-    let history = history.to_owned();
-    let directory = state_dir().join("live");
-    let (endpoint, id) = tokio::task::spawn_blocking(move || registered_host(&history, &directory))
-        .await
-        .ok()??;
-    let frame = eden_tui_client::call(&endpoint, "GET", "/snapshot", None)
-        .await
-        .ok()?;
-    let state: eden_tui_client::State = serde_json::from_value(frame["state"].clone()).ok()?;
-    (state.session_id == id && !state.closed).then_some(endpoint)
-}
-fn registered_host(history: &Path, directory: &Path) -> Option<(PathBuf, u64)> {
-    let history = std::fs::canonicalize(history).ok()?;
-    for entry in std::fs::read_dir(directory).ok()?.flatten() {
-        let Ok(bytes) = std::fs::read(entry.path()) else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-            continue;
-        };
-        if value["history"].as_str() != history.to_str() {
-            continue;
-        }
-        return Some((
-            PathBuf::from(value["endpoint"].as_str()?),
-            value["session_id"].as_u64()?,
-        ));
-    }
-    None
-}
-
-#[cfg(test)]
-mod registry_tests {
-    use super::*;
-    #[test]
-    fn live_owner_lookup_does_not_require_a_quiescent_history_tail() {
-        let root = std::env::temp_dir().join(format!("eden-owner-{}", std::process::id()));
-        let registry = root.join("live");
-        std::fs::create_dir_all(&registry).unwrap();
-        let history = root.join("history.jsonl");
-        std::fs::write(&history, b"{pending append").unwrap();
-        let endpoint = root.join("endpoint.json");
-        std::fs::write(
-            registry.join("7.json"),
-            serde_json::to_vec(&serde_json::json!({
-                "history": std::fs::canonicalize(&history).unwrap(),
-                "endpoint": endpoint,
-                "session_id": 7,
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(registered_host(&history, &registry), Some((endpoint, 7)));
-        std::fs::remove_dir_all(root).unwrap();
-    }
+/// Compatibility callers share exactly the same owner verification policy.
+pub(crate) async fn selected_live_endpoint(
+    history: &Path,
+) -> Result<Option<PathBuf>, eden_protocol::Fault> {
+    let parsed = crate::cli::parse(&["eden".into()], clap::ColorChoice::Never);
+    let lifecycle = lifecycle(&parsed.cli).map_err(|e| {
+        eden_protocol::Fault::new("StartFailed", "session-lifecycle", e.to_string())
+    })?;
+    Ok(lifecycle
+        .owner(history)
+        .await?
+        .map(|opened| opened.endpoint))
 }

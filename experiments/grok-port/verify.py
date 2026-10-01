@@ -182,7 +182,25 @@ def main():
             )
             if args.ack_lifecycle:
                 os.environ["GROK_PROMPT_ACK_TIMEOUT_SECS"] = "5"
-            terminal = Terminal(HERE / "run.py", relay_file, width=110, height=40)
+            terminal = Terminal(
+                binary,
+                relay_file,
+                width=110,
+                height=40,
+                command=[
+                    str(binary),
+                    "--composition",
+                    str(composition),
+                    "--global-dir",
+                    str(root / "global"),
+                    "--cwd",
+                    str(root),
+                    "--offline-startup",
+                    "tui",
+                    "--endpoint",
+                    str(relay_file),
+                ],
+            )
 
             def capture(name):
                 assert terminal is not None
@@ -333,7 +351,25 @@ def main():
             checks["reopened_history"] = len(frame["history"])
             if args.ack_lifecycle:
                 os.environ["GROK_PROMPT_ACK_TIMEOUT_SECS"] = "5"
-            terminal = Terminal(HERE / "run.py", relay_file, width=110, height=40)
+            terminal = Terminal(
+                binary,
+                relay_file,
+                width=110,
+                height=40,
+                command=[
+                    str(binary),
+                    "--composition",
+                    str(composition),
+                    "--global-dir",
+                    str(root / "global"),
+                    "--cwd",
+                    str(root),
+                    "--offline-startup",
+                    "tui",
+                    "--endpoint",
+                    str(relay_file),
+                ],
+            )
             terminal.wait("audit-A", seconds=30)
             terminal.wait("TOOLS_FINISHED", seconds=20)
             if args.thinking:

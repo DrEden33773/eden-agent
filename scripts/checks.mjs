@@ -249,11 +249,13 @@ for dependency in config["dependency-groups"]["dev"]:
   // Each manifest owns its own tree: the root run leaves the independent
   // authors to the runs their own manifests get below.
   const owned = manifests(root).map((other) => dirname(other));
+  if (existsSync(join(root, "frontend/grok"))) owned.push("frontend/grok");
   const nested = (directory) =>
     owned
       .filter((other) => other !== directory)
       .filter((other) => other.startsWith(directory === "." ? "" : `${directory}/`))
       .flatMap((other) => ["--skip", other]);
+
   const failures = [];
   for (const manifest of selected) {
     if (kind === "test") {

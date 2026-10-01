@@ -124,7 +124,7 @@ pub(super) async fn management_read(
         "/manage/info" => {
             let path = managed_path(shared, body, "path")?;
             let mut info = json!(Session::describe_saved_session(path.clone()).await?);
-            info["owner"] = json!(crate::tui::selected_live_endpoint(&path).await);
+            info["owner"] = json!(crate::tui::selected_live_endpoint(&path).await?);
             info["status"] = json!(if info["owner"].is_null() {
                 "stopped; binding checked on open"
             } else {
@@ -165,7 +165,7 @@ pub(super) async fn management_submit(
                 .as_ref()
                 .ok_or_else(|| fault("Unavailable", "launch options unavailable"))?;
             let path = managed_path(shared, body, "path")?;
-            if let Some(endpoint) = crate::tui::selected_live_endpoint(&path).await {
+            if let Some(endpoint) = crate::tui::selected_live_endpoint(&path).await? {
                 let client = eden_tui_client::HostClient::new(&endpoint);
                 let snapshot = client.snapshot().await?;
                 if snapshot.state.session_id == shared.session.id() {
@@ -237,11 +237,10 @@ pub(super) async fn management_submit(
             }
             cli.cwd = Some(PathBuf::from(cwd));
             cli.no_session = body["management_only"] == true;
-            let endpoint = tokio::task::spawn_blocking(move || {
-                crate::tui::start_host(&cli, None).map_err(|e| fault("HostLaunch", e.to_string()))
-            })
-            .await
-            .map_err(|e| fault("HostLaunch", e.to_string()))??;
+            let lifecycle =
+                crate::tui::lifecycle(&cli).map_err(|e| fault("StartFailed", e.to_string()))?;
+            let opened = lifecycle.create(!cli.no_session).await?;
+            let endpoint = opened.endpoint;
             Ok(json!({ "endpoint": endpoint }))
         }
         "/manage/open" => {
@@ -265,16 +264,10 @@ pub(super) async fn management_submit(
             cli.model = None;
             cli.thinking = None;
             let reading = body["read_only"] == true;
-            if !reading && let Some(endpoint) = crate::tui::selected_live_endpoint(&path).await {
-                return Ok(json!({ "endpoint": endpoint, "attached_existing": true }));
-            }
-            let endpoint = tokio::task::spawn_blocking(move || {
-                crate::tui::start_host(&cli, reading.then_some(path.as_path()))
-                    .map_err(|e| fault("HostLaunch", e.to_string()))
-            })
-            .await
-            .map_err(|e| fault("HostLaunch", e.to_string()))??;
-            Ok(json!({ "endpoint": endpoint }))
+            let lifecycle =
+                crate::tui::lifecycle(&cli).map_err(|e| fault("StartFailed", e.to_string()))?;
+            let opened = lifecycle.open(&path, reading).await?;
+            Ok(json!(opened))
         }
         "/manage/copy/preview" => previews::prepare_copy(shared, body).await,
         "/manage/copy/apply" => previews::apply_copy(shared, body).await,
@@ -318,6 +311,7 @@ mod tests {
         let session = super::super::tests::session().await;
         let (stop, _) = watch::channel(false);
         let shared = Arc::new(Shared {
+            instance: "test-instance".into(),
             management: Default::default(),
             session: session.clone(),
             token: "fixture".into(),

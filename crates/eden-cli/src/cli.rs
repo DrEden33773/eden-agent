@@ -216,7 +216,7 @@ pub enum Family {
         /// Open committed history without loading saved plugins
         #[arg(long)]
         read: Option<PathBuf>,
-        /// Local draft identity; use distinct identities for concurrent terminals
+        /// terminal selects the default frontend; other draft identities select the SDK terminal
         #[arg(long, default_value = "terminal")]
         frontend: String,
         /// Explicit native editor replacement

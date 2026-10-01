@@ -14,8 +14,13 @@ pub struct SavedSession {
     pub name: String,
     pub tags: Vec<String>,
     pub modified: Option<u64>,
+    pub modified_ns: Option<u128>,
+    pub has_name: bool,
     pub diagnostic: Option<String>,
     pub records: usize,
+    pub messages: usize,
+    pub has_content: bool,
+    pub summary: Option<String>,
 }
 fn fault(error: impl std::fmt::Display) -> Fault {
     Fault::new("SessionDirectory", "session-directory", error.to_string())
@@ -30,8 +35,41 @@ fn describe_records(
         .ok()
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs());
+        .map(|d| (d.as_secs(), d.as_nanos()));
     let metadata = records.iter().rev().find(|r| r.kind == "session_metadata");
+    let messages = records
+        .iter()
+        .filter(|record| record.payload["type"] == "message")
+        .count();
+    let has_content = messages > 0
+        || records.iter().any(|record| {
+            record.kind == "user_shell" || record.payload["type"] == "tool_execution"
+        });
+    let summary = records
+        .iter()
+        .find_map(|record| {
+            if record.kind == "user_shell" {
+                record.payload["command"]
+                    .as_str()
+                    .map(|command| format!("!{command}"))
+            } else if record.payload["type"] == "message" && record.payload["role"] == "user" {
+                record.payload["content"].as_array().and_then(|blocks| {
+                    blocks
+                        .iter()
+                        .find_map(|block| block["text"].as_str().map(str::to_owned))
+                })
+            } else {
+                None
+            }
+        })
+        .map(|text| {
+            text.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(96)
+                .collect()
+        });
     SavedSession {
         session_id: records.first().map(|r| r.session_id),
         cwd: records
@@ -53,9 +91,16 @@ fn describe_records(
             .and_then(|r| serde_json::from_value(r.payload["tags"].clone()).ok())
             .unwrap_or_default(),
         path,
-        modified,
+        modified: modified.map(|(seconds, _)| seconds),
+        modified_ns: modified.map(|(_, nanos)| nanos),
+        has_name: metadata
+            .and_then(|record| record.payload["name"].as_str())
+            .is_some_and(|name| !name.is_empty()),
         diagnostic,
         records: records.len(),
+        messages,
+        has_content,
+        summary,
     }
 }
 impl Session {
@@ -95,8 +140,8 @@ impl Session {
             items.push(entry?);
         }
         items.sort_by(|a, b| {
-            b.modified
-                .cmp(&a.modified)
+            b.modified_ns
+                .cmp(&a.modified_ns)
                 .then_with(|| a.path.cmp(&b.path))
         });
         Ok(items)
@@ -248,6 +293,42 @@ fn describe_cancellable(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn initialization_records_are_not_messages_and_unnamed_content_has_a_summary() {
+        let record = |sequence, kind: &str, payload| Record {
+            schema_version: 2,
+            session_id: 17,
+            sequence,
+            run_id: 0,
+            branch: Default::default(),
+            parent_id: None,
+            kind: kind.into(),
+            payload,
+        };
+        let initial = vec![
+            record(1, "session", serde_json::json!({ "cwd": "/fixture" })),
+            record(2, "composition", serde_json::json!({})),
+        ];
+        let empty = serde_json::to_value(describe_records(
+            "empty.jsonl".into(),
+            initial.clone(),
+            None,
+        ))
+        .unwrap();
+        assert_eq!(empty["messages"], 0);
+        assert_eq!(empty["has_content"], false);
+        let mut history = initial;
+        history.push(record(
+            3,
+            "user_shell",
+            serde_json::json!({ "command": "printf OLD_NONEMPTY_MARKER" }),
+        ));
+        let full =
+            serde_json::to_value(describe_records("full.jsonl".into(), history, None)).unwrap();
+        assert_eq!(full["messages"], 0);
+        assert_eq!(full["has_content"], true);
+        assert_eq!(full["summary"], "!printf OLD_NONEMPTY_MARKER");
+    }
     #[tokio::test]
     async fn active_history_cannot_be_deleted_and_bad_history_stays_visible() {
         let directory = std::env::temp_dir().join(format!("eden-directory-{}", std::process::id()));

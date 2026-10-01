@@ -227,7 +227,7 @@ impl Session {
             && !composition::equivalent(&saved.payload, &desired)
         {
             return Err(Fault::new(
-                "Unavailable",
+                "BindingIncompatible",
                 "composition",
                 format!(
                     "saved package binding differs: {}; use an explicit session switch or migrate \

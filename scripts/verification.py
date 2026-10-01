@@ -12,6 +12,7 @@ import pathlib
 import re
 import shutil
 import subprocess
+import sys
 import time
 from collections.abc import Sequence
 from typing import Any
@@ -363,6 +364,10 @@ def prepare(output: pathlib.Path | None = None) -> dict[str, Any]:
     )
     rpc = rpc_executable(built.stdout)
     phases["host_build"] = time.monotonic() - phase
+    phase = time.monotonic()
+    print("Preparing: checked-in native frontend", flush=True)
+    run([sys.executable, ROOT / "scripts/build-frontend.py"], ROOT, timeout=None)
+    phases["frontend_build"] = time.monotonic() - phase
     phase = time.monotonic()
     for controlled in (False, True):
         install(

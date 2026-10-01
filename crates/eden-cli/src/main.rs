@@ -33,6 +33,7 @@ fn main() {
     match start(parsed, &shell) {
         Ok(code) => std::process::exit(code),
         Err(error) => {
+            eden_session_lifecycle::report_start_failure(error.as_ref());
             shell.error(error);
             std::process::exit(1);
         }
@@ -76,13 +77,7 @@ async fn run(parsed: Parsed, shell: &Shell) -> Result<i32, Box<dyn std::error::E
             .await
         }
         Some(Family::LiveTui { endpoint }) => {
-            eden_cli::tui::attach(
-                endpoint,
-                None,
-                "terminal",
-                eden_cli::tui::monochrome(&parsed.cli),
-            )
-            .await
+            eden_cli::tui::launch(&parsed.cli, Some(endpoint), None, "terminal", None).await
         }
         Some(Family::Read {
             path,

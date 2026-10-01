@@ -1,44 +1,47 @@
-"""Launcher storage regression; process boundaries are observed without spawning a UI."""
+"""Compatibility argv checks; native recovery is verified by the installed PTY driver."""
 
-import json
-import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import launch
 
 
-class LauncherTests(unittest.TestCase):
-    def test_new_launches_save_in_same_canonical_project_directory(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            project = root / "project with spaces"
-            project.mkdir()
-            alias = root / "alias"
-            alias.symlink_to(project, target_is_directory=True)
-            commands = []
+class Delegation(unittest.TestCase):
+    def test_resume_executes_formal_cli_with_explicit_history(self):
+        host = Path("/tmp/fixture-install/bin/eden").resolve()
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "launch.py",
+                    "--host",
+                    str(host),
+                    "--cwd",
+                    "/tmp/project",
+                    "--resume",
+                    "/tmp/history.jsonl",
+                ],
+            ),
+            patch.object(launch.os, "execv") as execute,
+        ):
+            launch.main()
+        execute.assert_called_once_with(
+            str(host), [str(host), "--cwd", "/tmp/project", "--session", "/tmp/history.jsonl"]
+        )
 
-            def start(command, **kwargs):
-                commands.append(command)
-                endpoint = Path(command[command.index("--endpoint") + 1])
-                endpoint.write_text(json.dumps({"session_id": 1}))
-                return Mock()
-
-            for cwd in (project, alias):
-                with (
-                    patch.object(launch, "ROOT", root),
-                    patch("sys.argv", ["launch.py", "--cwd", str(cwd)]),
-                    patch.object(launch.subprocess, "Popen", side_effect=start),
-                    patch.object(launch.subprocess, "call", return_value=0),
-                    self.assertRaises(SystemExit) as exit_status,
-                ):
-                    launch.main()
-                self.assertEqual(exit_status.exception.code, 0)
-            histories = [Path(cmd[cmd.index("--session") + 1]) for cmd in commands]
-            self.assertNotEqual(histories[0], histories[1])
-            for history in histories:
-                self.assertEqual(history.parent, project / ".eden/sessions")
+    def test_endpoint_executes_formal_cli_attachment(self):
+        host = Path("/tmp/fixture-install/bin/eden").resolve()
+        with (
+            patch(
+                "sys.argv", ["launch.py", "--host", str(host), "--endpoint", "/tmp/endpoint.json"]
+            ),
+            patch.object(launch.os, "execv") as execute,
+        ):
+            launch.main()
+        execute.assert_called_once_with(
+            str(host), [str(host), "tui", "--endpoint", "/tmp/endpoint.json"]
+        )
 
 
 if __name__ == "__main__":

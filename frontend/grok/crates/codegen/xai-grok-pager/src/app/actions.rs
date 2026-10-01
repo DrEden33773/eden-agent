@@ -55,7 +55,15 @@ impl ModelChoice {
 #[allow(clippy::large_enum_variant)]
 pub enum Action {
     EdenOpen(&'static str),
-    EdenRequest { generation: u64, request: crate::eden_panel::PrivateValue },
+    EdenHistory {
+        kind: &'static str,
+        reference: String,
+    },
+    EdenLoadAfterRemoval(String),
+    EdenRequest {
+        generation: u64,
+        request: crate::eden_panel::PrivateValue,
+    },
     /// Quit the application.
     Quit,
     /// Restart the binary to pick up a downloaded update.
@@ -1412,7 +1420,12 @@ pub enum AfterSessionDelete {
 /// The event loop spawns these into a `JoinSet`; completions come back through [`TaskResult`] as `Action::TaskComplete`.
 #[derive(Debug)]
 pub enum Effect {
-    EdenUi { agent_id: AgentId, session_id: acp::SessionId, generation: u64, request: crate::eden_panel::PrivateValue },
+    EdenUi {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        generation: u64,
+        request: crate::eden_panel::PrivateValue,
+    },
     /// Run a `command` status line.
     RunStatusLineCommand(StatusLineRun),
     /// Create a new ACP session.
@@ -1665,7 +1678,11 @@ pub enum Effect {
     },
     /// Persist preferred model (and effort if Some) to config.toml.
     /// Keep the originating Eden session across asynchronous default writes.
-    EdenPersistModel { agent_id: AgentId, session_id: acp::SessionId, model_id: acp::ModelId },
+    EdenPersistModel {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        model_id: acp::ModelId,
+    },
     PersistPreferredModel {
         model_id: acp::ModelId,
         reasoning_effort: Option<ReasoningEffort>,
@@ -2391,7 +2408,11 @@ pub enum WorkspaceWriteCompletion {
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum TaskResult {
-    EdenUi { agent_id: AgentId, generation: u64, result: Result<crate::eden_panel::PrivateValue, String> },
+    EdenUi {
+        agent_id: AgentId,
+        generation: u64,
+        result: Result<crate::eden_panel::PrivateValue, String>,
+    },
     /// Session lifecycle result paired with the memory mode pinned by the
     /// actor that produced it. The wrapper lets all lifecycle variants share
     /// one typed metadata path.
@@ -2618,6 +2639,8 @@ pub enum TaskResult {
     },
     /// Prompt response received (turn ended).
     PromptResponse {
+        /// Rejected before any work was accepted; safe to restore the exact input for retry.
+        not_accepted: bool,
         agent_id: AgentId,
         result: Result<acp::PromptResponse, String>,
         /// HTTP status code from the upstream API error, if available.
@@ -2663,7 +2686,10 @@ pub enum TaskResult {
         outcome: SubagentKillOutcome,
     },
     /// A result is applied only to the agent that initiated the operation.
-    EdenModelPersisted { agent_id: AgentId, result: Result<(), String> },
+    EdenModelPersisted {
+        agent_id: AgentId,
+        result: Result<(), String>,
+    },
     PreferredModelPersisted {
         result: Result<(), String>,
     },

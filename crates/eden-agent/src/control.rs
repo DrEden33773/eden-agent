@@ -1,6 +1,14 @@
 //! Shared headless control operations, independent of transport framing.
 use super::*;
 use serde::Serialize;
+/// Work identities reviewed before an explicit stop-and-remove operation.
+#[derive(Clone, Debug, serde::Deserialize, Serialize)]
+#[allow(missing_docs)]
+pub struct StopExpectation {
+    pub active_run: Option<u64>,
+    pub shell_runs: Vec<u64>,
+    pub command_runs: Vec<u64>,
+}
 /// Admission and lifecycle state; a cancellation acknowledgement is not a settled result.
 #[derive(Clone, Debug, Serialize)]
 #[allow(missing_docs)]
@@ -8,6 +16,8 @@ pub struct SessionState {
     pub session_id: u64,
     pub cwd: String,
     pub closed: bool,
+    pub draft: bool,
+    pub reviewed_stop: bool,
     pub active_run: Option<u64>,
     pub managing: bool,
     pub shell_runs: Vec<u64>,
@@ -15,6 +25,25 @@ pub struct SessionState {
     pub pending_inputs: usize,
 }
 impl Session {
+    /// Seal new admission under the same lock used by submit. A later run cannot be
+    /// silently cancelled using a confirmation that described an earlier workload.
+    pub fn prepare_stop(&self, expected: &StopExpectation) -> Result<(), Fault> {
+        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.active.as_ref().map(|(id, _)| *id) != expected.active_run
+            || state.shells.keys().copied().collect::<Vec<_>>() != expected.shell_runs
+            || state.commands.keys().copied().collect::<Vec<_>>() != expected.command_runs
+            || state.management
+            || state.pending_inputs != 0
+        {
+            return Err(Fault::new(
+                "StaleSelection",
+                "session",
+                "work changed after confirmation; review the session again",
+            ));
+        }
+        state.closed = true;
+        Ok(())
+    }
     /// Inspect or cancel the selected cache warmer through its ordinary scoped service.
     /// Cancelling waits for the plugin's job cleanup; it does not stop foreground inference.
     pub async fn cache_warmer(&self, cancel: bool) -> Result<serde_json::Value, Fault> {
@@ -39,6 +68,8 @@ impl Session {
             session_id: self.id(),
             cwd: self.cwd().into(),
             closed: state.closed,
+            draft: self.is_draft(),
+            reviewed_stop: true,
             active_run: state.active.as_ref().map(|(id, _)| *id),
             managing: state.management,
             shell_runs: state.shells.keys().copied().collect(),
@@ -264,23 +295,47 @@ impl Session {
             self.0.presentation.begin_run(id);
             (id, cancel)
         };
-        self.0.events.push(run_id, "accepted", accepted);
+        let durable_command = contract == eden_protocol::resources::COMMAND;
+        self.0.events.push(
+            run_id,
+            if durable_command {
+                "reserved"
+            } else {
+                "accepted"
+            },
+            accepted.clone(),
+        );
         let session = self.clone();
         tokio::spawn(async move {
-            let mut terminal = session
-                .0
-                .kernel
-                .invoke(
-                    Request {
-                        execution: None,
-                        session_id: session.id(),
+            let admission = if durable_command {
+                session
+                    .admit_work(
                         run_id,
-                        contract,
-                        payload,
-                    },
-                    cancel.clone(),
-                )
-                .await;
+                        serde_json::json!({ "kind": "command", "name": accepted["command"] }),
+                        &cancel,
+                    )
+                    .await
+            } else {
+                Ok(())
+            };
+            let mut terminal = if let Err(error) = admission {
+                Terminal::failed(error)
+            } else {
+                session
+                    .0
+                    .kernel
+                    .invoke(
+                        Request {
+                            execution: None,
+                            session_id: session.id(),
+                            run_id,
+                            contract,
+                            payload,
+                        },
+                        cancel.clone(),
+                    )
+                    .await
+            };
             session.0.presentation.drain_actions(run_id, &cancel).await;
             if let Outcome::Completed(value) = &mut terminal.outcome {
                 terminal.outcome = match project(std::mem::take(value)) {
@@ -299,6 +354,17 @@ impl Session {
                 terminal.cleanup_errors.push(error);
             }
             let mut state = session.0.state.lock().unwrap_or_else(|e| e.into_inner());
+            if durable_command && !state.admissions.contains_key(&run_id) {
+                let error = match &terminal.outcome {
+                    Outcome::Failed(error) => error.clone(),
+                    _ => Fault::new(
+                        "Cancelled",
+                        "session-admission",
+                        "command cancelled before admission",
+                    ),
+                };
+                state.admissions.insert(run_id, Err(error));
+            }
             state.commands.remove(&run_id);
             state.command_contracts.remove(&run_id);
             session.0.presentation.end_run(run_id);

@@ -1,3 +1,4 @@
+// Modified by Eden Agent for its terminal library; see frontend/grok/EDEN-FRONTEND.md.
 //! Prompt-acknowledgment watch: arming at the local drain, disarming on acknowledgment, and the fail-safe abort.
 
 use super::*;
@@ -254,6 +255,7 @@ fn late_prompt_response_after_the_fail_safe_leaves_the_pane_idle() {
         .expect("the expired watch fires");
     let stale = dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::Cancelled)
                 .meta(serde_json::json!({ "promptId": pid }).as_object().cloned())),

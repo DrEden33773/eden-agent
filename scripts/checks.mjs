@@ -250,6 +250,7 @@ for dependency in config["dependency-groups"]["dev"]:
   // authors to the runs their own manifests get below.
   const owned = manifests(root).map((other) => dirname(other));
   if (existsSync(join(root, "frontend/grok"))) owned.push("frontend/grok");
+  if (existsSync(join(root, "vendor"))) owned.push("vendor");
   const nested = (directory) =>
     owned
       .filter((other) => other !== directory)
@@ -291,6 +292,7 @@ for dependency in config["dependency-groups"]["dev"]:
             "--locked",
             ...(kind === "clippy-fix" ? ["--fix", ...extra] : []),
             "--",
+            "--no-deps",
             "-D",
             "warnings",
           ];

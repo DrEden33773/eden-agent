@@ -1,3 +1,4 @@
+// Modified by Eden Agent for its terminal library; see frontend/grok/EDEN-FRONTEND.md.
 //! Tests for prompt and bash submission, queueing, and interject shims.
 
 use super::*;
@@ -1302,6 +1303,7 @@ fn turn_end_drains_next_queued_prompt() {
     // The turn ends: PromptResponse runs `finish_turn`, clearing current_prompt_id, then the stashed adoption is applied (turn-start shim)
     let effects = dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
@@ -1349,6 +1351,7 @@ fn prompt_response_fifo_handoff_paints_multi_bubble_combined() {
     );
     dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
@@ -1384,6 +1387,7 @@ fn turn_end_with_empty_queue_stays_idle() {
 
     let effects = dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
@@ -1419,6 +1423,7 @@ fn multiple_queued_prompts_drain_one_per_turn() {
 
     let end_turn = || {
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: AgentId(0),
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
@@ -1465,6 +1470,7 @@ fn prompt_response_resets_turn_state() {
 
     let effects = dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
@@ -1502,6 +1508,7 @@ fn prompt_response_releases_retained_memory_once() {
     let before = test_support::calls();
     dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
@@ -1524,6 +1531,7 @@ fn turn_end_fetches_prompt_suggestion_when_enabled() {
 
     let effects = dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
@@ -1582,6 +1590,7 @@ fn cancelled_turn_does_not_fetch_prompt_suggestion() {
 
     let effects = dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::Cancelled)),
             http_status: None,
@@ -1620,6 +1629,7 @@ fn turn_end_with_draft_does_not_fetch_prompt_suggestion() {
 
     let effects = dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
@@ -1656,6 +1666,7 @@ fn reconnect_pending_turn_end_still_wipes_prompt_suggestion() {
 
     let effects = dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
@@ -1706,6 +1717,7 @@ fn turn_end_with_shared_queue_does_not_fetch_prompt_suggestion() {
 
     let effects = dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
@@ -1852,6 +1864,7 @@ fn prompt_response_context_overflow_suppresses_turn_failed_and_toast() {
         }
         dispatch(
             Action::TaskComplete(TaskResult::PromptResponse {
+                not_accepted: false,
                 agent_id: id,
                 result: Err("API error (status 500): the prompt is too long for this \
                                  model's context window"
@@ -1909,6 +1922,7 @@ fn prompt_response_request_failed_banner_suppresses_turn_failed_and_toast() {
         }
         dispatch(
             Action::TaskComplete(TaskResult::PromptResponse {
+                not_accepted: false,
                 agent_id: id,
                 result: Err("Server error (500): Something went wrong on our side.".to_string()),
                 http_status: Some(500),
@@ -1961,6 +1975,7 @@ fn prompt_response_formatted_401_suppresses_turn_failed_and_stashes_prompt() {
     }
     dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Err("Request failed (401): Invalid or expired credentials".to_string()),
             http_status: Some(401),
@@ -2002,6 +2017,7 @@ fn prompt_response_formatted_402_takes_credit_limit_path() {
     // http_status field absent (older shell): the status must be recovered from the formatted text
     dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Err("Request failed (402): Grok Build usage balance exhausted".to_string()),
             http_status: None,
@@ -2042,6 +2058,7 @@ fn credit_limit_402_does_not_overwrite_stash_when_in_flight_cleared() {
     }
     dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Err("Request failed (402): Grok Build usage balance exhausted".to_string()),
             http_status: Some(402),
@@ -2080,6 +2097,7 @@ fn prompt_response_disk_full_suppresses_turn_failed_and_toast() {
         }
         dispatch(
             Action::TaskComplete(TaskResult::PromptResponse {
+                not_accepted: false,
                 agent_id: id,
                 result: Err(xai_fast_worktree::ENOSPC_OS_MESSAGE.to_string()),
                 http_status: None,
@@ -2128,6 +2146,7 @@ fn prompt_response_routes_idle_title_through_frame_pipeline() {
 
     dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
@@ -2189,6 +2208,7 @@ fn turn_complete_notification_suppressed_when_queue_non_empty() {
     // First turn completes; a server prompt is about to start (pending adoption), so the TurnComplete notification must be suppressed
     let effects = dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
@@ -2215,6 +2235,7 @@ fn turn_complete_notification_suppressed_when_queue_non_empty() {
     // Second turn completes: queue is now empty, notification must fire
     dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
@@ -2460,6 +2481,7 @@ fn prompt_response_disarms_pending_reconcile() {
 
     let _ = dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::Cancelled).meta(
                 serde_json::json!({ "promptId": "pid-stuck" })
@@ -2492,6 +2514,7 @@ fn prompt_response_resets_cancelling_to_idle() {
 
     let effects = dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
@@ -2533,6 +2556,7 @@ fn cancel_with_queued_prompt_drains_on_completion() {
     // PromptResponse for cancelled first turn arrives.
     let effects = dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::Cancelled)),
             http_status: None,
@@ -2561,6 +2585,7 @@ fn cancel_with_empty_queue_stays_idle() {
 
     let effects = dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
@@ -2614,6 +2639,7 @@ fn cancel_with_multiple_queued_prompts_drains_only_front_prompt() {
     // PromptResponse arrives; it should send only the front queued prompt
     let effects = dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::Cancelled)),
             http_status: None,
@@ -2667,6 +2693,7 @@ fn cancel_drain_is_blocked_when_editing_front_prompt() {
 
     let effects = dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::Cancelled)),
             http_status: None,
@@ -2971,6 +2998,7 @@ fn prompt_response_keeps_a_post_turn_plan_review() {
 
     dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
@@ -3006,6 +3034,7 @@ fn prompt_response_opens_post_turn_review_after_a_successful_plan_turn() {
 
     dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
@@ -3037,6 +3066,7 @@ fn prompt_response_keeps_the_plan_file_after_a_failed_turn() {
 
     dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Err("plan turn failed".to_string()),
             http_status: None,
@@ -3065,6 +3095,7 @@ fn prompt_response_keeps_the_plan_file_after_a_failed_turn() {
     dispatch(Action::SendPrompt("retry".into()), &mut app);
     dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
@@ -3134,6 +3165,7 @@ fn failed_execute_plan_reopens_review() {
 
     dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Err("execute plan failed".to_owned()),
             http_status: None,
@@ -3204,6 +3236,7 @@ fn failed_execute_plan_after_default_confirm_forgets_the_keep() {
 
     dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Err("execute plan failed".to_owned()),
             http_status: None,
@@ -3445,6 +3478,7 @@ fn prompt_response_does_not_drain_during_reconnect() {
     app.reconnect_pending = true;
     let effects = dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
@@ -4257,6 +4291,7 @@ fn cancelled_prompt_response(id: AgentId, cancel_trigger: Option<&str>) -> Actio
         acp::PromptResponse::new(acp::StopReason::Cancelled).meta(Some(meta))
     };
     Action::TaskComplete(TaskResult::PromptResponse {
+        not_accepted: false,
         agent_id: id,
         result: Ok(pr),
         http_status: None,
@@ -4454,6 +4489,7 @@ fn cancelled_removed_from_queue(id: AgentId, prompt_id: &str) -> Action {
         crate::app::turn_completion::REMOVED_FROM_QUEUE_KIND.into(),
     );
     Action::TaskComplete(TaskResult::PromptResponse {
+        not_accepted: false,
         agent_id: id,
         result: Ok(acp::PromptResponse::new(acp::StopReason::Cancelled).meta(Some(meta))),
         http_status: None,
@@ -4533,6 +4569,7 @@ fn cancelled_response_during_newer_wake_still_shows_cancel_marker() {
     meta.insert("promptId".into(), prompt_id.clone().into());
     let _ = dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::Cancelled).meta(Some(meta))),
             http_status: None,
@@ -4828,6 +4865,7 @@ fn goal_send_now_painted_block_survives_removed_from_queue_response() {
     // The queued prompt's RPC resolves without becoming the running turn.
     dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn).meta(
                 serde_json::json!({ "promptId": painted_pid })

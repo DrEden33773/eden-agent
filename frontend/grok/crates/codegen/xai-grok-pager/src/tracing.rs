@@ -1,3 +1,4 @@
+// Modified by Eden Agent for its terminal library; see frontend/grok/EDEN-FRONTEND.md.
 //! Tracing capture and display for the pager's tracing pane.
 //!
 //! This module provides:
@@ -317,6 +318,18 @@ impl io::Write for TracingChannelWriter {
 pub struct TracingHandle {
     /// Receive log lines here. Each string is a pre-formatted ANSI line from `tracing-subscriber`'s `Full` formatter.
     pub rx: LogRx,
+}
+/// Capture local logs without installing vendor telemetry, upload or authentication layers.
+pub fn init_local_tracing() -> TracingHandle {
+    use tracing_subscriber::{Layer as _, layer::SubscriberExt as _, util::SubscriberInitExt as _};
+    let (writer, rx) = TracingChannelMakeWriter::new();
+    let layer = tracing_subscriber::fmt::layer()
+        .with_target(true)
+        .with_ansi(true)
+        .with_writer(writer)
+        .with_filter(tracing_subscriber::filter::LevelFilter::WARN);
+    let _ = tracing_subscriber::registry().with(layer).try_init();
+    TracingHandle { rx }
 }
 /// Initialize a `tracing-subscriber` that captures formatted log lines into a channel, ready for display in a
 /// [`TracingModel`]. This sets the global default subscriber. `Full` formatter (timestamp, level, target, message).

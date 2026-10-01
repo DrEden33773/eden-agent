@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from install import ROOT
-from verification import prepare, run
+from verification import author_artifact, prepare, run
 
 
 def main():
@@ -26,7 +26,7 @@ def main():
         return
     installation = Path(prepare()["seeds"]) / "default"
     results = {}
-    for name in ("recovery", "boundaries", "execution"):
+    for name in ("product", "catalog", "recovery", "boundaries", "execution", "admission"):
         output = ROOT / "artifacts/session-lifecycle" / name
         run(
             [
@@ -36,6 +36,7 @@ def main():
                 installation,
                 "--output",
                 output,
+                *(["--author", author_artifact("model-services")] if name == "admission" else []),
             ],
             ROOT,
             timeout=None,

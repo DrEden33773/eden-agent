@@ -1,3 +1,4 @@
+// Modified by Eden Agent for its terminal library; see frontend/grok/EDEN-FRONTEND.md.
 //! Tests for turn cancellation, subagent kills, and cancel preferences.
 
 use super::*;
@@ -73,6 +74,7 @@ fn queued_prompt_rpc_error_does_not_kill_running_turn() {
     // The queued prompt is removed; its parked RPC resolves Err.
     let effects = dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Err("Internal error: session failed to respond".to_string()),
             http_status: None,
@@ -104,6 +106,7 @@ fn queued_prompt_rpc_error_does_not_kill_running_turn() {
     // Sanity: an error for the ACTUAL running prompt is NOT discarded; it ends the turn and renders the failure
     let _ = dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Err("upstream boom".to_string()),
             http_status: None,
@@ -2086,6 +2089,7 @@ fn prompt_response_clears_cancel_turn_panel() {
 
     dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
@@ -2120,6 +2124,7 @@ fn cancel_after_first_activity_does_not_restore() {
     // PromptResponse arrives: the TurnCancelled banner is pushed
     dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::Cancelled)),
             http_status: None,

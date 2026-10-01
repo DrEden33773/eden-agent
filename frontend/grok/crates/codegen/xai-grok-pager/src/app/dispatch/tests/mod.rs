@@ -1,3 +1,4 @@
+// Modified by Eden Agent for its terminal library; see frontend/grok/EDEN-FRONTEND.md.
 //! Tests for the dispatch module tree: shared fixtures and per-domain test modules.
 mod auth;
 mod billing;
@@ -581,6 +582,7 @@ fn arm_reconcile_with_meta(
 }
 pub(super) fn end_turn() -> Action {
     Action::TaskComplete(TaskResult::PromptResponse {
+        not_accepted: false,
         agent_id: AgentId(0),
         result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
         http_status: None,
@@ -852,6 +854,7 @@ fn setup_reset_confirm_open(app: &mut AppView, key: crate::settings::SettingKey)
 }
 fn make_picker_entry(id: &str, cwd: &str) -> crate::app::app_view::SessionPickerEntry {
     crate::app::app_view::SessionPickerEntry {
+        tags: Vec::new(),
         id: id.into(),
         summary: id.into(),
         updated_at: chrono::Utc::now(),

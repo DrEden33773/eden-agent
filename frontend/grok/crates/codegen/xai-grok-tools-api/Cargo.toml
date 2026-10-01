@@ -1,3 +1,4 @@
+# Modified by Eden Agent for its terminal library; see frontend/grok/EDEN-FRONTEND.md.
 [package]
 license = "Apache-2.0"
 name = "xai-grok-tools-api"
@@ -14,9 +15,6 @@ tonic = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 xai-tool-protocol = { workspace = true }
-
-[build-dependencies]
-xai-proto-build = { workspace = true }
 
 [package.metadata.cargo-shear]
 ignored = ["serde", "tonic"]

@@ -45,6 +45,11 @@ impl Session {
     }
     /// Attach a named live frontend without transferring ownership of runs or dialogs.
     pub fn attach_presentation(&self, frontend: &str) -> Result<u64, Fault> {
+        // Serialize new consumers with draft retirement and new work admission.
+        let state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.closed {
+            return Err(Fault::new("Unavailable", "presentation", "session closed"));
+        }
         self.0.presentation.attach(frontend)
     }
     /// Keep the frontend lease live; a crashed frontend detaches after ten seconds.

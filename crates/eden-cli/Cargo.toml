@@ -6,7 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 [dependencies]
-eden-session-lifecycle.workspace = true
+eden-terminal.workspace = true
+eden-session-workspace.workspace = true
 eden-tui.workspace = true
 eden-tui-client.workspace = true
 clap.workspace = true

@@ -12,6 +12,7 @@
     "**/node_modules/**",
     "**/target/**",
     "artifacts/**",
-    "frontend/grok/**"
+    "frontend/grok/**",
+    "vendor/**"
   ]
 }

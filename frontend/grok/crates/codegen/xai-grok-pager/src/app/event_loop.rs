@@ -1,3 +1,4 @@
+// Modified by Eden Agent for its terminal library; see frontend/grok/EDEN-FRONTEND.md.
 //! Main event loop.
 //!
 //! A thin `tokio::select!` loop. All input routing, rendering, and state management is delegated to [`AppView`].
@@ -1055,11 +1056,14 @@ pub(crate) async fn run(
     xai_grok_telemetry::startup::enter(xai_grok_telemetry::startup::StartupPhase::AppInit);
     let mut app = {
         let _t = xai_grok_telemetry::instrumentation::timer("startup.app_init.app_view_new");
-        AppView::new(
+        AppView::new_at(
             connection.tx,
             connection.models,
             connection.available_commands,
             terminal.backend_mut().writer_mut().escape_writer(),
+            session_cwd
+                .clone()
+                .unwrap_or_else(|| std::path::PathBuf::from(".")),
         )
     };
     app.pending_startup = Some(pending_startup);
@@ -1940,7 +1944,11 @@ pub(crate) async fn run(
         }
         if let VoiceState::ColdStart { hold, target } = app.voice_state {
             if app.voice_cmd_tx.is_none() && app.voice_can_start_pipeline() {
-                let stt_routes = crate::voice::build_stt_routes(voice_auth_factory.clone());
+                let Some(factory) = voice_auth_factory.clone() else {
+                    app.show_toast("Voice is unavailable for this session");
+                    continue;
+                };
+                let stt_routes = crate::voice::build_stt_routes(factory);
                 app.voice_auth = Some(stt_routes.auth.clone());
                 let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(32);
                 let (event_tx, event_rx) = tokio::sync::mpsc::channel(128);

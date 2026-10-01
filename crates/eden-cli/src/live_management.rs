@@ -164,47 +164,21 @@ pub(super) async fn management_submit(
                 .launch
                 .as_ref()
                 .ok_or_else(|| fault("Unavailable", "launch options unavailable"))?;
-            let path = managed_path(shared, body, "path")?;
-            if let Some(endpoint) = crate::tui::selected_live_endpoint(&path).await? {
-                let client = eden_tui_client::HostClient::new(&endpoint);
-                let snapshot = client.snapshot().await?;
-                if snapshot.state.session_id == shared.session.id() {
-                    let _inspection = shared.management.inspection.lock().await;
-                    let run = if body["preserve_tags"] == true {
-                        shared.session.rename(field(body, "name")?)?
-                    } else {
-                        shared
-                            .session
-                            .set_metadata(field(body, "name")?, field(body, "tags")?)?
-                    };
-                    return shared.session.wait(run).await?.into_result();
-                }
-                let mut request = body.clone();
-                request["session_id"] = json!(snapshot.state.session_id);
-                let reply =
-                    super::call(&endpoint, "POST", "/manage/metadata", Some(&request)).await?;
-                return client.wait(field(&reply, "run_id")?).await?.into_result();
-            }
-            let session = Session::open_saved_with_workspace(
-                crate::composition(cli).map_err(|e| fault("InvalidInput", e.to_string()))?,
-                path,
-                None,
-                crate::workspace_options(cli),
-            )
-            .await?;
-            let result = async {
-                let run = if body["preserve_tags"] == true {
-                    session.rename(field(body, "name")?)?
-                } else {
-                    session.set_metadata(field(body, "name")?, field(body, "tags")?)?
-                };
-                session.wait(run).await?.into_result()
-            }
-            .await;
-            let stopped = session.shutdown().await;
-            let result = result?;
-            stopped?;
-            Ok(result)
+            let runtime =
+                crate::tui::lifecycle(cli).map_err(|e| fault("Unavailable", e.to_string()))?;
+            let tags = if body["preserve_tags"] == true {
+                None
+            } else {
+                Some(field(body, "tags")?)
+            };
+            runtime
+                .rename_history(
+                    &managed_path(shared, body, "path")?,
+                    field(body, "name")?,
+                    tags,
+                )
+                .await?;
+            Ok(json!("Session metadata saved."))
         }
         "/manage/delete" => {
             if body["confirmed"] != true {
@@ -213,12 +187,22 @@ pub(super) async fn management_submit(
                     "confirm the exact selected session before deletion",
                 ));
             }
-            Session::delete_saved_session(
-                managed_path(shared, body, "path")?,
-                field(body, "expected_session")?,
-            )
-            .await?;
-            Ok(json!({ "deleted": body["path"] }))
+            let cli = shared
+                .management
+                .launch
+                .as_ref()
+                .ok_or_else(|| fault("Unavailable", "launch options unavailable"))?;
+            let runtime =
+                crate::tui::lifecycle(cli).map_err(|e| fault("Unavailable", e.to_string()))?;
+            let plan = runtime
+                .plan_removal(&managed_path(shared, body, "path")?)
+                .await?;
+            if plan.history.session_id != Some(field::<u64>(body, "expected_session")?) {
+                return Err(fault("StaleSelection", "history identity changed"));
+            }
+            // Compatibility callers cannot infer permission to stop an executing owner.
+            let receipt = runtime.remove_history(plan, false).await?;
+            Ok(json!({ "deleted": body["path"], "trash": receipt }))
         }
         "/manage/new" => {
             let mut cli = shared

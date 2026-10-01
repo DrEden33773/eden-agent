@@ -8,7 +8,8 @@
       "!**/artifacts",
       "!**/dist",
       "!**/.venv",
-      "!**/frontend/grok"
+      "!**/frontend/grok",
+      "!**/vendor"
     ]
   },
   "formatter": {

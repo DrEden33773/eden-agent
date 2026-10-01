@@ -165,7 +165,7 @@ impl Session {
             self.cwd(),
             &self.0.workspace_options,
             &self.0.events,
-            self.0.history_path.as_deref(),
+            self.history_path(),
         )?;
         eden_kernel::preflight(&selected)?;
         if selected.roles.contains_key(c::LOOP) != self.0.coding {
@@ -234,16 +234,7 @@ impl Session {
             + 1;
         let setup = async {
             if self.0.coding {
-                let request = match &self.0.history_path {
-                    Some(path) => c::StoreRequest::Open {
-                        path: Some(path.to_string_lossy().into_owned()),
-                        session_id: self.id(),
-                    },
-                    None => c::StoreRequest::RestoreMemory {
-                        session_id: self.id(),
-                        records,
-                    },
-                };
+                let request = self.restore_store_request(records);
                 kernel
                     .invoke(
                         Request {

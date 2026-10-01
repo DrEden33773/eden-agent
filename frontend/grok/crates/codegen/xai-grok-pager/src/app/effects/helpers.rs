@@ -270,6 +270,7 @@ pub(super) async fn fetch_plugin_cta_mcps(
 /// Rate-limit errors render the free-usage paywall, else the server detail, else the auth-aware fallback (see [`format_rate_limited_user_message`]).
 /// The server detail is rewritten for API-key auth when the body pushes personal SuperGrok.
 pub(super) fn format_acp_error(err: &acp::Error, is_api_key_auth: bool) -> String {
+    if err.data.as_ref().is_some_and(|data| data["edenNotAccepted"] == true) { return err.message.clone(); }
     if i32::from(err.code) == RATE_LIMITED_ERROR_CODE {
         let detail = error_data_detail(err);
         return sanitize_user_error(

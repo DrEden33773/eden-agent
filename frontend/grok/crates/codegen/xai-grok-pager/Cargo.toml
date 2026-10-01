@@ -1,3 +1,4 @@
+# Modified by Eden Agent for its terminal library; see frontend/grok/EDEN-FRONTEND.md.
 [package]
 name = "xai-grok-pager"
 version = "1.0.45"
@@ -6,7 +7,7 @@ license = "Apache-2.0"
 authors = ["xAI"]
 
 [dependencies]
-eden-frontend-session = { path = "../../../../../crates/eden-frontend-session", version = "0.1.0" }
+eden-session-workspace = { path = "../../../../../crates/eden-session-workspace", version = "0.1.0" }
 # TTY safety — detach subprocesses from the controlling terminal
 dunce = { workspace = true }
 xai-tty-utils = { workspace = true }

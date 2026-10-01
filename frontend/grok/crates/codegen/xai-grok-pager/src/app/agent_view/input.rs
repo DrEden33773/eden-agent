@@ -344,9 +344,9 @@ impl AgentView {
         }
         // Private forms own editing; foreground Ctrl+C keeps its established priority.
         if let Some(crate::views::modal::ActiveModal::Eden { state }) = self.active_modal.as_mut() {
-            let (outcome, close) = state.input(ev);
-            if close { self.active_modal = None; }
-            return outcome;
+            // App dispatch restores the previous modal before sending the close request.
+            // Clearing here would discard the saved picker and its selection.
+            return state.input(ev).0;
         }
         if self.scrollback_drag_latched() {
             match ev {

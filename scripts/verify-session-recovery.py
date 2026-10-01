@@ -92,7 +92,9 @@ def main():
         terminal = start()
         terminal.command("!printf OLD_NONEMPTY_MARKER")
         terminal.wait("OLD_NONEMPTY_MARKER")
-        old = next((fixture.root / ".eden/sessions").glob("*.jsonl"))
+        old = wait_until(
+            lambda: next((fixture.root / ".eden/sessions").glob("*.jsonl"), None), terminal
+        )
         old_info = fixture.call("/manage/info", {"path": str(old)})
         old_endpoint_path = Path(old_info["owner"])
         old_endpoint = json.loads(old_endpoint_path.read_text())
@@ -105,23 +107,11 @@ def main():
         original_bytes = old.read_bytes()
         assert writer_held(old) and not process_gone(old_endpoint["pid"])
         terminal = start()
-        new = next(
-            path for path in (fixture.root / ".eden/sessions").glob("*.jsonl") if path != old
-        )
-        for registration in (fixture.root / "host-state/live").glob("*.json"):
-            fixture.children.append(
-                json.loads(Path(json.loads(registration.read_text())["endpoint"]).read_text())
-            )
+        assert list((fixture.root / ".eden/sessions").glob("*.jsonl")) == [old]
         terminal.command("/resume")
         terminal.wait("OLD_NONEMPTY_MARKER", seconds=30)
-        terminal.wait("Current empty session")
+        assert "Empty session" not in terminal.display
         capture("picker", terminal)
-        select(terminal, new)
-        terminal.wait("Empty session", seconds=30)
-        assert "OLD_NONEMPTY_MARKER" not in terminal.display
-        capture("empty", terminal)
-        terminal.command("/resume")
-        terminal.wait("OLD_NONEMPTY_MARKER")
         select(terminal, old)
         terminal.wait("Run (user)", seconds=30)
         terminal.wait("OLD_NONEMPTY_MARKER")
@@ -174,7 +164,7 @@ def main():
                 {
                     "ctrl_d_twice": True,
                     "no_rename": True,
-                    "native_empty_and_nonempty_selection": True,
+                    "new_draft_does_not_pollute_history": True,
                     "live_owner_identity": old_info["session_id"],
                     "stopped_new_host_same_identity": restored["session_id"],
                     "provider_requests": len(fixture.provider.requests),

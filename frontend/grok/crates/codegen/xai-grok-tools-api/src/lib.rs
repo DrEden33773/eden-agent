@@ -1,3 +1,4 @@
+// Modified by Eden Agent for its terminal library; see frontend/grok/EDEN-FRONTEND.md.
 //! Shared API definitions for Grok tools: protobuf types, config validation,
 //! and canonical slash-command wording.
 //!
@@ -9,7 +10,7 @@
 
 /// Generated protobuf types.
 pub mod pb {
-    include!(concat!(env!("OUT_DIR"), "/xai.grok.tools.v1.rs"));
+    include!("generated.rs");
 }
 
 pub mod config_validation;

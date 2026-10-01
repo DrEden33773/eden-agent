@@ -61,7 +61,12 @@ pub(super) fn read_session_list_response(raw: &str) -> Result<Value, String> {
 }
 /// `None` when the conversations lane completed (or was skipped); unknown reasons degrade to [`ConversationsPartial::Error`].
 pub(super) fn parse_session_list_partial(payload: &Value) -> Option<ConversationsPartial> {
-    if payload["_meta"]["edenDiagnostics"].as_array().is_some_and(|errors| !errors.is_empty()) { return Some(ConversationsPartial::LocalDirectory); }
+    if payload["_meta"]["edenDiagnostics"]
+        .as_array()
+        .is_some_and(|errors| !errors.is_empty())
+    {
+        return Some(ConversationsPartial::LocalDirectory);
+    }
     let partial = payload.get("_meta")?.get("x.ai/partial")?;
     if partial.get("conversations").and_then(Value::as_bool) != Some(true) {
         return None;
@@ -134,11 +139,16 @@ pub(crate) fn parse_session_picker_entries_with(
                 .and_then(Value::as_str)
                 == Some("chat");
             // Eden history timestamps are unix seconds from the host.
-            let parsed_updated: Option<chrono::DateTime<chrono::Utc>> = v.get("updatedAtUnix").and_then(Value::as_i64).and_then(|seconds| chrono::DateTime::<chrono::Utc>::from_timestamp(seconds, 0)).or_else(|| v
-                .get("updatedAt")
-                .or_else(|| v.get("updated_at"))
-                .and_then(Value::as_str)
-                .and_then(|s| s.parse().ok()));
+            let parsed_updated: Option<chrono::DateTime<chrono::Utc>> = v
+                .get("updatedAtUnix")
+                .and_then(Value::as_i64)
+                .and_then(|seconds| chrono::DateTime::<chrono::Utc>::from_timestamp(seconds, 0))
+                .or_else(|| {
+                    v.get("updatedAt")
+                        .or_else(|| v.get("updated_at"))
+                        .and_then(Value::as_str)
+                        .and_then(|s| s.parse().ok())
+                });
             let parsed_created: Option<chrono::DateTime<chrono::Utc>> = v
                 .get("createdAt")
                 .or_else(|| v.get("created_at"))
@@ -233,6 +243,13 @@ pub(crate) fn parse_session_picker_entries_with(
                 .map(String::from);
             let repo_name = repo_name_from_cwd(&cwd_str);
             Some(SessionPickerEntry {
+                tags: v["_meta"]["edenTags"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect(),
                 id,
                 summary: display,
                 updated_at,
@@ -269,7 +286,9 @@ pub(crate) fn parse_session_picker_entries_with(
             error
         })
     };
-    if crate::eden_services::enabled() { return Ok(parsed); }
+    if crate::eden_services::enabled() {
+        return Ok(parsed);
+    }
     match presence {
         LocalPresence::Relabel => {
             let remote_ids: Vec<&str> = parsed

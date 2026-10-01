@@ -1,3 +1,4 @@
+// Modified by Eden Agent for its terminal library; see frontend/grok/EDEN-FRONTEND.md.
 //! Tests for conversation rewind dispatchers and prompt-entry lookup.
 
 use super::*;
@@ -81,6 +82,7 @@ fn rewind_then_resubmit_drains_immediately_and_discards_orphan() {
     // It mismatches current_prompt_id (second_pid), so it is discarded; state for "second" is untouched
     dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::Cancelled).meta(
                 serde_json::json!({ "promptId": first_pid })
@@ -619,6 +621,7 @@ fn stacked_rewinds_each_get_their_own_pid_and_orphans_drop_independently() {
 
     let pr = |pid: &Option<String>| {
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::Cancelled)
                 .meta(serde_json::json!({ "promptId": pid }).as_object().cloned())),

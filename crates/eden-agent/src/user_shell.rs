@@ -13,7 +13,7 @@ impl Session {
         exclude_from_context: bool,
     ) -> Result<u64, Fault> {
         self.0.kernel.get()?;
-        if command.is_empty() || !["bash", "powershell"].contains(&shell.as_str()) {
+        if command.trim().is_empty() || !["bash", "powershell"].contains(&shell.as_str()) {
             return Err(Fault::new(
                 "InvalidInput",
                 "user-shell",
@@ -41,27 +41,50 @@ impl Session {
         };
         self.0
             .events
-            .push(run_id, "accepted", json!({ "user_shell": true }));
+            .push(run_id, "reserved", json!({ "user_shell": true }));
         let session = self.clone();
         tokio::spawn(async move {
-            let mut terminal = session
-                .0
-                .kernel
-                .invoke(
-                    Request {
-                        execution: None,
-                        session_id: session.id(),
-                        run_id,
-                        contract: USER_SHELL.into(),
-                        payload: json!(ShellRequest {
-                            cwd: session.cwd().into(),
-                            command: command.clone(),
-                            shell: shell.clone()
-                        }),
-                    },
-                    cancel,
+            let admitted = session
+                .admit_work(
+                    run_id,
+                    json!({
+                        "kind": "user_shell",
+                        "command": command,
+                        "shell": shell,
+                        "cwd": session.cwd(),
+                        "exclude_from_context": exclude_from_context,
+                    }),
+                    &cancel,
                 )
                 .await;
+            let mut terminal = if let Err(error) = admitted {
+                Terminal::failed(error)
+            } else if cancel.is_cancelled() {
+                Terminal {
+                    outcome: Outcome::Cancelled,
+                    cleanup_errors: vec![],
+                    partial_result: None,
+                }
+            } else {
+                session
+                    .0
+                    .kernel
+                    .invoke(
+                        Request {
+                            execution: None,
+                            session_id: session.id(),
+                            run_id,
+                            contract: USER_SHELL.into(),
+                            payload: json!(ShellRequest {
+                                cwd: session.cwd().into(),
+                                command: command.clone(),
+                                shell: shell.clone()
+                            }),
+                        },
+                        cancel,
+                    )
+                    .await
+            };
             // New model submissions are excluded while a shell owns a deferred history record.
             // The model run admitted before this shell remains the only possible predecessor.
             let active = session
@@ -122,6 +145,16 @@ impl Session {
                 }
             }
             let mut state = session.0.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.admissions.entry(run_id).or_insert_with(|| {
+                Err(match &terminal.outcome {
+                    Outcome::Failed(error) => error.clone(),
+                    _ => Fault::new(
+                        "Cancelled",
+                        "session-admission",
+                        "shell cancelled before admission",
+                    ),
+                })
+            });
             state.shells.remove(&run_id);
             state.terminals.insert(run_id, terminal.clone());
             session.0.events.push(run_id, "settled", json!(terminal));

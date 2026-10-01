@@ -92,6 +92,8 @@ SOFTWARE.
 
 `grok_render.rs` preserves the grapheme-safe line fitting implementation from `xai-grok-pager-render/src/render/line_utils.rs` at the same revision. The default dark foreground hierarchy adapts GrokNight; background remains terminal-controlled. GrokNight is xAI original and uses Tokyo Night accents attributed upstream to Folke Lemaitre and contributors (`tokyonight.nvim`, Apache-2.0), with original palette lineage from enkia's Tokyo Night VS Code theme (MIT). No upstream logos or TextMate theme assets are included.
 
-## Optional Grok-derived frontend candidate
+## Grok-derived terminal library
 
-`experiments/grok-port/build.py` builds the complete Grok Build frontend from fixed commit `2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8`, copyright 2023–2026 xAI, Apache-2.0. This optional frontend includes upstream assets and dependencies beyond the extracted components described above. Its candidate directory retains the source distribution's LICENSE and complete THIRD-PARTY-NOTICES. `prepare.py`, `eden_transport.rs` and `eden_services.rs` identify Eden's modifications; `crates/eden-grok-adapter` is Eden's native host adapter. The unchanged default Eden frontend and the optional Grok-derived candidate have separate build and verification boundaries.
+`frontend/grok/` contains the Grok Build frontend from fixed commit `2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8`, copyright 2023–2026 xAI, Apache-2.0. The default installed `eden` binary includes these frontend libraries, assets and their dependencies. Each installation retains the original LICENSE, complete THIRD-PARTY-NOTICES, upstream commit and internal SOURCE_REV. `EDEN-FRONTEND.md` and modification banners identify Eden's adaptations. `eden-terminal` composes the application, and `eden-session-workspace` owns Eden's Session operations. The root Cargo.lock and installed dependency license bundle cover the combined build.
+
+`vendor/ratatui-0.29/` preserves ratatui 0.29's MIT-licensed source with the dependency requirement adjustment documented in its `EDEN.md`. The original LICENSE and modification note are included in each installation.

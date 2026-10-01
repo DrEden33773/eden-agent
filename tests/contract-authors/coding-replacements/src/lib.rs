@@ -350,6 +350,7 @@ async fn tool(input: ToolRequest, _: CallContext) -> Result<ToolResult, Fault> {
 struct Storage {
     file: Option<File>,
     writer_lock: Option<File>,
+    draft_path: Option<std::path::PathBuf>,
     records: Vec<Record>,
     id: u64,
     open: bool,
@@ -359,6 +360,44 @@ struct Storage {
 impl Storage {
     fn request(&mut self, request: StoreRequest) -> Result<StoreReply, Fault> {
         match request {
+            StoreRequest::OpenDraft {
+                path,
+                session_id,
+                records,
+            } => {
+                let path = std::path::PathBuf::from(path);
+                let lock = lock_history(&path)?;
+                if path.exists() {
+                    return Err(fault("draft destination already exists"));
+                }
+                self.request(StoreRequest::RestoreMemory {
+                    session_id,
+                    records,
+                })?;
+                self.writer_lock = Some(lock);
+                self.draft_path = Some(path);
+            }
+            StoreRequest::AdmitBatch { run_id, entries } => {
+                let Some(path) = self.draft_path.clone() else {
+                    return self.request(StoreRequest::AppendBatch { run_id, entries });
+                };
+                let previous = self.records.clone();
+                self.append(run_id, entries)?;
+                let published = encode_transaction(&self.records)
+                    .and_then(|bytes| PreparedHistory::write(&path, &bytes))
+                    .and_then(|prepared| prepared.publish(&path));
+                match published {
+                    Ok(file) => {
+                        self.file = Some(file);
+                        self.draft_path = None;
+                    }
+                    Err(error) => {
+                        self.records = previous;
+                        self.failed = error.code == "PublicationUncertain";
+                        return Err(error);
+                    }
+                }
+            }
             StoreRequest::RestoreMemory {
                 session_id,
                 records,
@@ -430,12 +469,7 @@ impl Storage {
                 let bytes = encode_transaction(&records)?;
                 let path = std::path::Path::new(&path);
                 let lock = lock_history(path)?;
-                PreparedHistory::write(path, &bytes)?.publish(path)?;
-                let file = File::options()
-                    .read(true)
-                    .append(true)
-                    .open(path)
-                    .map_err(fault)?;
+                let file = PreparedHistory::write(path, &bytes)?.publish(path)?;
                 self.file = Some(file);
                 self.writer_lock = Some(lock);
                 self.records = records;
@@ -499,6 +533,7 @@ impl Storage {
             StoreRequest::Close => {
                 self.file.take();
                 self.writer_lock.take();
+                self.draft_path.take();
                 self.open = false;
             }
         }
@@ -583,6 +618,7 @@ impl Storage {
 /// Drop removes staging on write, publication, and caller failures.
 struct PreparedHistory {
     path: std::path::PathBuf,
+    file: Option<File>,
     cleanup: bool,
 }
 impl PreparedHistory {
@@ -593,38 +629,43 @@ impl PreparedHistory {
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| std::path::Path::new("."));
-        let (prepared, mut file) = loop {
+        let mut prepared = loop {
             let path = parent.join(format!(
                 ".eden-author-history-{}-{}.tmp",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
-            match File::options().create_new(true).write(true).open(&path) {
+            match File::options()
+                .create_new(true)
+                .read(true)
+                .append(true)
+                .open(&path)
+            {
                 Ok(file) => {
-                    break (
-                        Self {
-                            path,
-                            cleanup: true,
-                        },
-                        file,
-                    );
+                    break Self {
+                        path,
+                        file: Some(file),
+                        cleanup: true,
+                    };
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(fault(error)),
             }
         };
-        let result = file.write_all(bytes).and_then(|_| file.sync_all());
-        // Close before cleanup/publication so the same ownership works on Windows.
-        drop(file);
-        result.map_err(fault)?;
+        let file = prepared
+            .file
+            .as_mut()
+            .ok_or_else(|| fault("staging file missing"))?;
+        file.write_all(bytes)
+            .and_then(|_| file.sync_all())
+            .map_err(fault)?;
         Ok(prepared)
     }
-    fn publish(mut self, destination: &std::path::Path) -> Result<(), Fault> {
+    fn publish(mut self, destination: &std::path::Path) -> Result<File, Fault> {
         // A hard link exposes the complete synced bytes atomically and refuses
         // any competing destination; rename could silently replace that file.
         std::fs::hard_link(&self.path, destination).map_err(fault)?;
-        std::fs::remove_file(&self.path).map_err(fault)?;
-        self.cleanup = false;
+        self.cleanup = std::fs::remove_file(&self.path).is_err();
         #[cfg(unix)]
         {
             let parent = destination
@@ -633,13 +674,22 @@ impl PreparedHistory {
                 .unwrap_or_else(|| std::path::Path::new("."));
             File::open(parent)
                 .and_then(|directory| directory.sync_all())
-                .map_err(fault)?;
+                .map_err(|error| {
+                    Fault::new(
+                        "PublicationUncertain",
+                        "independent-store",
+                        error.to_string(),
+                    )
+                })?;
         }
-        Ok(())
+        self.file
+            .take()
+            .ok_or_else(|| fault("staging file missing"))
     }
 }
 impl Drop for PreparedHistory {
     fn drop(&mut self) {
+        self.file.take();
         if self.cleanup {
             let _ = std::fs::remove_file(&self.path);
         }
@@ -859,6 +909,63 @@ mod tests {
             .is_empty()
         );
     }
+    #[test]
+    fn draft_admission_is_independently_durable_and_never_overwrites_a_collision() {
+        let directory = std::env::temp_dir().join(format!(
+            "eden-author-draft-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("draft.jsonl");
+        let mut storage = Storage::default();
+        storage
+            .request(StoreRequest::OpenDraft {
+                path: path.to_string_lossy().into(),
+                session_id: 95,
+                records: vec![Record {
+                    schema_version: 2,
+                    session_id: 95,
+                    sequence: 1,
+                    run_id: 0,
+                    parent_id: None,
+                    branch: "main".into(),
+                    kind: "session".into(),
+                    payload: json!({ "cwd": "isolated" }),
+                }],
+            })
+            .unwrap();
+        assert!(!path.exists());
+        let admit = || StoreRequest::AdmitBatch {
+            run_id: 2,
+            entries: vec![RecordDraft {
+                kind: "work_admitted".into(),
+                payload: json!({ "intent": "first task" }),
+            }],
+        };
+        std::fs::write(&path, b"someone else's history").unwrap();
+        assert!(storage.request(admit()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"someone else's history");
+        assert_eq!(storage.request(StoreRequest::Read).unwrap().sequence, 1);
+        std::fs::remove_file(&path).unwrap();
+        storage.request(admit()).unwrap();
+        let saved = decode_records(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved[1].kind, "work_admitted");
+        assert!(lock_history(&path).is_err());
+        storage.request(StoreRequest::Close).unwrap();
+        assert_eq!(
+            decode_records(&std::fs::read(&path).unwrap())
+                .unwrap()
+                .len(),
+            2
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn create_publishes_complete_history_and_preserves_colliding_destination() {
         let directory = std::env::temp_dir().join(format!(

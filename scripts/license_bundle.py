@@ -3,6 +3,7 @@
 import argparse
 import json
 import pathlib
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -25,7 +26,31 @@ class Fallback:
     revision: str | None = None
 
 
+FRONTEND_GIT_SOURCES = {
+    "git+https://github.com/our-forks/async-openai.git?rev=95b52ebdedf42143083cf3d6f0e0be7c84e9c808#95b52ebdedf42143083cf3d6f0e0be7c84e9c808",
+    "git+https://github.com/helix-editor/nucleo.git?rev=5b74652#5b74652e482f7c07d827f18c6d21e7540c242c69",
+}
+
 FALLBACKS = {
+    ("debug_unsafe", "0.1.3"): Fallback(
+        ("third-party/debug_unsafe-0.1.3-LICENSE",),
+        "https://github.com/RoDmitry/debug_unsafe/blob/a06246d06e6cec80e7140e48b706811b87978958/LICENSE-MIT",
+    ),
+    ("rhai_codegen", "3.2.0"): Fallback(
+        ("third-party/rhai_codegen-3.2.0-LICENSE",),
+        "https://github.com/rhaiscript/rhai/blob/b247dd730de3f2c97fa1e46f138a17f9d844de67/LICENSE-MIT.txt",
+    ),
+    ("taffy", "0.12.2"): Fallback(
+        ("third-party/taffy-0.12.2-LICENSE",),
+        "https://github.com/DioxusLabs/taffy/blob/bb351fcc056c93dbb967292acc4242a5d1c46b3c/LICENSE",
+    ),
+    **dict.fromkeys(
+        ((name, "3.4.0") for name in ("rmcp", "rmcp-macros")),
+        Fallback(
+            ("third-party/rmcp-3.4.0-LICENSE",),
+            "https://github.com/modelcontextprotocol/rust-sdk/blob/fd7811fdaa9fefa1c8034534b4d7a31c97204f89/LICENSE",
+        ),
+    ),
     **{
         (name, version): Fallback(
             ("third-party/google-cloud-rust-LICENSE",),
@@ -173,7 +198,45 @@ def plan(root: pathlib.Path, packages: list[dict[str, Any]]) -> list[PackageLice
         try:
             entries.append(package_licenses(root, package))
         except (OSError, ValueError) as error:
-            failures.append(f"{package['name']} {package['version']}: {error}")
+            # The fixed frontend source includes complete per-package notices and shared
+            # license texts for packages whose published archives omit them. Match both
+            # version and declared license; an unrelated cache ancestor is never a fallback.
+            notice = root / "frontend/grok/THIRD-PARTY-NOTICES"
+            marker = f"\n{package['name']} {package['version']}\n"
+            text = notice.read_text(encoding="utf-8") if notice.is_file() else ""
+            section = (
+                text.split(marker, 1)[-1].split(
+                    "\n--------------------------------------------------------------------------------\n",
+                    1,
+                )[0]
+                if marker in text
+                else ""
+            )
+            license_line = re.search(r"^License: (.+)$", section, re.MULTILINE)
+            declared = (
+                re.search(r"upstream declares: ([^)]+)", license_line[1]) if license_line else None
+            )
+            expected = (
+                declared[1] if declared else license_line[1].strip() if license_line else None
+            )
+            omitted = "missing license text" in str(
+                error
+            ) or "license file escapes package directory" in str(error)
+            if (
+                omitted
+                and package["source"] in {REGISTRY, *FRONTEND_GIT_SOURCES}
+                and expected == package.get("license")
+            ):
+                entries.append(
+                    PackageLicenses(
+                        package,
+                        f"Grok Build {(root / 'frontend/grok/SOURCE_REV').read_text().strip()} bundled notices",
+                        {pathlib.Path("GROK-THIRD-PARTY-NOTICES"): notice},
+                        (),
+                    )
+                )
+            else:
+                failures.append(f"{package['name']} {package['version']}: {error}")
     if failures:
         raise RuntimeError("Dependency license validation failed:\n" + "\n".join(failures))
     return entries

@@ -39,6 +39,8 @@ pub struct State {
     window: ModalWindowState,
     hits: Vec<(Rect, usize)>,
     description_scroll: u16,
+    previous: Option<Box<ActiveModal>>,
+    previous_view: Option<ActiveView>,
 }
 impl State {
     fn loading(kind: &str) -> Self {
@@ -57,6 +59,8 @@ impl State {
             window: ModalWindowState::new(),
             hits: vec![],
             description_scroll: 0,
+            previous: None,
+            previous_view: None,
         }
     }
     fn receive(&mut self, page: Value) {
@@ -110,7 +114,8 @@ impl State {
         for field in &self.fields {
             let path = field.spec["path"].as_str().unwrap_or("");
             inputs[path] = if field.spec["control"] == "boolean" {
-                serde_json::from_str(field.editor.text()).map_err(|_| format!("Invalid boolean for {path}"))?
+                serde_json::from_str(field.editor.text())
+                    .map_err(|_| format!("Invalid boolean for {path}"))?
             } else {
                 json!(field.editor.text())
             };
@@ -500,6 +505,37 @@ pub fn open(app: &mut AppView, kind: &'static str) -> Vec<Effect> {
         ),
     }]
 }
+pub fn open_history(app: &mut AppView, kind: &'static str, reference: String) -> Vec<Effect> {
+    let previous_view = app.active_view;
+    let id = match previous_view {
+        ActiveView::Agent(id) => id,
+        _ => match app
+            .home_session_agent
+            .or_else(|| app.agents.keys().next().copied())
+        {
+            Some(id) => id,
+            None => return vec![],
+        },
+    };
+    app.active_view = ActiveView::Agent(id);
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    let previous = agent.active_modal.take();
+    let mut effects = open(app, kind);
+    if let Some(agent) = app.agents.get_mut(&id)
+        && let Some(ActiveModal::Eden { state }) = agent.active_modal.as_mut()
+    {
+        state.previous = previous.map(Box::new);
+        state.previous_view = (previous_view != ActiveView::Agent(id)).then_some(previous_view);
+    }
+    for effect in &mut effects {
+        if let Effect::EdenUi { request, .. } = effect {
+            request.0["reference"] = json!(reference);
+        }
+    }
+    effects
+}
 pub fn request(app: &mut AppView, generation: u64, request: PrivateValue) -> Vec<Effect> {
     let ActiveView::Agent(agent_id) = app.active_view else {
         return vec![];
@@ -511,6 +547,16 @@ pub fn request(app: &mut AppView, generation: u64, request: PrivateValue) -> Vec
     else {
         return vec![];
     };
+    if request.0["action"] == "close"
+        && let Some(agent) = app.agents.get_mut(&agent_id)
+        && matches!(agent.active_modal.as_ref(), Some(ActiveModal::Eden { state }) if state.generation == generation)
+        && let Some(ActiveModal::Eden { mut state }) = agent.active_modal.take()
+    {
+        agent.active_modal = state.previous.take().map(|modal| *modal);
+        if let Some(view) = state.previous_view {
+            app.active_view = view;
+        }
+    }
     vec![Effect::EdenUi {
         agent_id,
         session_id,
@@ -541,10 +587,25 @@ pub fn receive(
             if let Some(session) = page["loadSession"].as_str() {
                 let session = session.to_owned();
                 agent.active_modal = None;
-                return Some(Action::LoadSession(session, None, false));
+                return Some(if page["preserveDraft"] == true {
+                    Action::EdenLoadAfterRemoval(session)
+                } else {
+                    Action::LoadSession(session, None, false)
+                });
             }
             if page["closed"] == true {
-                agent.active_modal = None;
+                let previous = state.previous.take().map(|modal| *modal);
+                let previous_view = state.previous_view;
+                agent.active_modal = previous;
+                if let Some(view) = previous_view {
+                    app.active_view = view;
+                }
+                if let Some(notice) = page["notice"].as_str() {
+                    app.show_toast(notice);
+                }
+                if page["showSessions"] == true {
+                    return Some(Action::FetchSessionList);
+                }
             } else {
                 state.receive(page);
             }
@@ -602,11 +663,18 @@ mod tests {
     fn eden_confirmation_controls_submit_boolean_values() {
         let mut state = State::loading("sessions");
         state.receive(json!({ "formId": "stop", "revision": 0, "fields": [{ "path": "confirmed", "control": "boolean", "value": false, "writable": true }], "actions": [] }));
-        let Action::EdenRequest { request, .. } = state.request("stop").unwrap() else { panic!("expected request"); };
+        let Action::EdenRequest { request, .. } = state.request("stop").unwrap() else {
+            panic!("expected request");
+        };
         assert_eq!(request.0["inputs"]["confirmed"], false);
         state.busy = false;
-        state.input(&Event::Key(crossterm::event::KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
-        let Action::EdenRequest { request, .. } = state.request("stop").unwrap() else { panic!("expected request"); };
+        state.input(&Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char(' '),
+            KeyModifiers::NONE,
+        )));
+        let Action::EdenRequest { request, .. } = state.request("stop").unwrap() else {
+            panic!("expected request");
+        };
         assert_eq!(request.0["inputs"]["confirmed"], true);
     }
     #[test]

@@ -5,6 +5,47 @@ import { join } from "node:path";
 import test from "node:test";
 import { command, fixture, git, unchanged } from "./development-hooks-fixture.mjs";
 
+test("imported source keeps its lint policy while owned lints and dependency compilation still fail", (t) => {
+  const root = fixture(t);
+  const imported = join(root, "vendor", "upstream");
+  mkdirSync(join(imported, "src"), { recursive: true });
+  mkdirSync(join(root, "frontend", "grok", "src"), { recursive: true });
+  writeFileSync(
+    join(root, "Cargo.toml"),
+    '[package]\nname = "hooks-fixture"\nversion = "0.1.0"\nedition = "2024"\n[workspace]\nexclude = ["vendor/upstream", "frontend/grok"]\n[dependencies]\nupstream = { path = "vendor/upstream", version = "0.1.0" }\n',
+  );
+  writeFileSync(
+    join(imported, "Cargo.toml"),
+    '[package]\nname = "upstream"\nversion = "0.1.0"\nedition = "2024"\n[workspace]\n',
+  );
+  const importedBody =
+    "#![deny(clippy::unnecessary_literal_unwrap)]\npub fn value()->u32{Some(3).unwrap()}\n";
+  writeFileSync(join(imported, "src/lib.rs"), importedBody);
+  writeFileSync(join(root, "frontend/grok/src/lib.rs"), "pub fn upstream()->u32{1}\n");
+  const owned = "pub fn value() -> u32 {\n    upstream::value()\n}\n";
+  writeFileSync(join(root, "src/lib.rs"), owned);
+  let result = command(root, "cargo", ["generate-lockfile", "--offline"]);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  result = command(root, process.execPath, ["scripts/checks.mjs", "fmt"]);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(readFileSync(join(imported, "src/lib.rs"), "utf8"), importedBody);
+  result = command(root, process.execPath, ["scripts/checks.mjs", "clippy"]);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+
+  writeFileSync(
+    join(root, "src/lib.rs"),
+    "pub fn value() -> u32 {\n    let unused = 1;\n    upstream::value()\n}\n",
+  );
+  result = command(root, process.execPath, ["scripts/checks.mjs", "clippy"]);
+  assert.notEqual(result.status, 0, "owned warnings must still fail");
+  assert.match(result.stdout + result.stderr, /unused variable/);
+  writeFileSync(join(root, "src/lib.rs"), owned);
+  writeFileSync(join(imported, "src/lib.rs"), "pub fn value() -> u32 { missing_function() }\n");
+  result = command(root, process.execPath, ["scripts/checks.mjs", "clippy"]);
+  assert.notEqual(result.status, 0, "imported code must still compile");
+  assert.match(result.stdout + result.stderr, /cannot find function/);
+});
+
 test("pre-push rejects Clippy errors in a non-HEAD ref without changing the checkout", (t) => {
   const root = fixture(t);
   const remote = mkdtempSync(join(tmpdir(), "eden-hooks-remote-"));

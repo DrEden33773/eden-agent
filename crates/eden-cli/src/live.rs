@@ -111,8 +111,11 @@ pub async fn run_host(
     {
         options.history = Some(default_history(&options.cwd)?);
     }
-    let session =
-        Session::open_with_workspace(composition, options, crate::prompt_options(cli)).await?;
+    let session = if cli.draft_session {
+        Session::open_draft_with_workspace(composition, options, crate::prompt_options(cli)).await?
+    } else {
+        Session::open_with_workspace(composition, options, crate::prompt_options(cli)).await?
+    };
     host_session(cli, session, endpoint_path, web_root).await
 }
 /// Reopen an explicitly selected stopped history without resuming its model loop or queued inputs.
@@ -484,6 +487,7 @@ async fn dispatch(
                 "state": session.state(),
                 "host_instance": shared.instance,
                 "history_path": session.history_path(),
+                "history_destination": session.history_destination(),
             }))
         }
         ("GET", "/tui/snapshot") => {
@@ -708,7 +712,32 @@ async fn dispatch(
             session.cancel(field(&body, "run_id")?)?;
             Ok(json!({ "cancel_requested": true }))
         }
+        ("POST", "/discard-draft") => {
+            let closing = match session.prepare_draft_cleanup() {
+                eden_agent::DraftCleanup::Closed => {
+                    shared.stop.send_replace(true);
+                    true
+                }
+                eden_agent::DraftCleanup::Retained => false,
+                eden_agent::DraftCleanup::Pending => {
+                    let owner = shared.clone();
+                    tokio::spawn(async move {
+                        if owner.session.wait_draft_cleanup().await {
+                            owner.stop.send_replace(true);
+                        }
+                    });
+                    false
+                }
+            };
+            Ok(json!({ "closing": closing }))
+        }
         ("POST", "/shutdown") => {
+            if let Some(expected) = body.get("expected") {
+                session.prepare_stop(
+                    &serde_json::from_value(expected.clone())
+                        .map_err(|e| fault("InvalidInput", e.to_string()))?,
+                )?;
+            }
             shared.stop.send_replace(true);
             Ok(json!({ "stopping": true }))
         }
@@ -1091,7 +1120,9 @@ async fn perform_submission(shared: &Shared, route: &str, body: &Value) -> Resul
                     .check_reference_input(content.clone(), references.clone())
                     .await?;
             }
-            Ok(json!({ "run_id": session.submit_referenced(content, references)? }))
+            let run_id = session.submit_referenced(content, references)?;
+            session.wait_admission(run_id).await?;
+            Ok(json!({ "run_id": run_id }))
         }
         "/enqueue" => {
             let kind: String = field(body, "kind")?;
@@ -1113,16 +1144,20 @@ async fn perform_submission(shared: &Shared, route: &str, body: &Value) -> Resul
                     .await?
             ))
         }
-        "/shell" => Ok(json!({
-            "run_id": session.user_shell(
+        "/shell" => {
+            let run_id = session.user_shell(
                 field(body, "command")?,
                 field(body, "shell")?,
-                field(body, "exclude_from_context")?
-            )?,
-        })),
-        "/command" => Ok(json!({
-            "run_id": session.command(field(body, "name")?, field(body, "arguments")?)?,
-        })),
+                field(body, "exclude_from_context")?,
+            )?;
+            session.wait_admission(run_id).await?;
+            Ok(json!({ "run_id": run_id }))
+        }
+        "/command" => {
+            let run_id = session.command(field(body, "name")?, field(body, "arguments")?)?;
+            session.wait_admission(run_id).await?;
+            Ok(json!({ "run_id": run_id }))
+        }
         "/queue/configure" => Ok(json!({
             "run_id":
                 session.configure_queue(field(body, "steering")?, field(body, "follow_up")?)?,

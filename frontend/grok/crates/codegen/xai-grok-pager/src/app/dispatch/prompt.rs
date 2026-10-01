@@ -677,7 +677,9 @@ pub(super) fn dispatch_send_prompt_submission(
     // Eden keeps an ordinary busy draft until the shared queue workflow is connected.
     if crate::eden_services::enabled() && consume_input && !runs_locally {
         if let Some(agent) = app.agents.get_mut(&id) {
-            if agent.prompt_input_mode == crate::app::agent_view::PromptInputMode::Normal && agent.stoppable_activity_running() {
+            if agent.prompt_input_mode == crate::app::agent_view::PromptInputMode::Normal
+                && agent.stoppable_activity_running()
+            {
                 agent.show_toast("A run is active; your draft is kept. Wait or Ctrl+C to cancel.");
                 return prelude;
             }
@@ -1465,6 +1467,7 @@ pub(super) fn handle_prompt_response(
     result: Result<acp::PromptResponse, String>,
     http_status: Option<u16>,
     prompt_id: Option<String>,
+    not_accepted: bool,
 ) -> Vec<Effect> {
     // A server-authoritative queued prompt may have drained into the running slot while this turn was still finishing
     // The leader's `running_prompt_id` broadcast can arrive before this `PromptResponse`
@@ -1534,6 +1537,35 @@ pub(super) fn handle_prompt_response(
                 }
                 return vec![];
             }
+        }
+        if not_accepted {
+            let target = super::prompt_ack::restore_target(agent);
+            let restored = if let (Some(target), Some(id)) = (target, response_pid.as_deref()) {
+                if let Some(stashed) = agent.session.in_flight_prompt.take() {
+                    super::turn::rewind_in_flight_prompt(agent, stashed, id, target);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            agent.session.finish_turn(&mut agent.scrollback);
+            finish_turn_view(agent, TurnEnd::Aborted);
+            agent.scrollback.push_block(RenderBlock::system(format!(
+                "Request not accepted: {}",
+                result
+                    .as_ref()
+                    .err()
+                    .map(String::as_str)
+                    .unwrap_or("preflight failed")
+            )));
+            agent.show_toast(if restored {
+                "Input restored. Press Enter to retry."
+            } else {
+                "Request not accepted; your original input remains in the transcript."
+            });
+            return vec![];
         }
         let was_cancelling = agent.session.state.is_cancelling()
             || matches!(

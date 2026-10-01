@@ -1,3 +1,4 @@
+// Modified by Eden Agent for its terminal library; see frontend/grok/EDEN-FRONTEND.md.
 //! Tests for settings setters, toggles, resets, and rollback.
 use super::*;
 fn expect_agent(app: &AppView, id: AgentId) -> &AgentView {
@@ -225,6 +226,7 @@ fn cancel_before_first_activity_resets_state_and_discards_orphan_response() {
     assert!(expect_agent(&app, id).session.current_prompt_id.is_none());
     dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::Cancelled).meta(
                 serde_json::json!({ "promptId": cancelled_pid })

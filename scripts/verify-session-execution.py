@@ -27,11 +27,11 @@ def main():
     trace = args.output / "wire.jsonl"
     with Fixture(args.installation, args.output) as fixture:
         terminal = fixture.start(trace=trace)
-        history = next((fixture.root / ".eden/sessions").glob("*.jsonl"))
-        endpoint_path, endpoint = owner(fixture, history)
         fixture.provider.allow.clear()
         terminal.command("WORK_AFTER_DETACH")
         assert fixture.provider.started.wait(timeout=10)
+        history = next((fixture.root / ".eden/sessions").glob("*.jsonl"))
+        endpoint_path, endpoint = owner(fixture, history)
         active = probe.streaming.live.call(endpoint, "/tui/snapshot")["state"]["active_run"]
         assert active is not None
         exited(terminal)
@@ -48,8 +48,19 @@ def main():
         before_restore = history.read_bytes()
         assert len(fixture.provider.requests) == 1
         terminal = fixture.start(trace=trace)
-        empty = next(
-            path for path in (fixture.root / ".eden/sessions").glob("*.jsonl") if path != history
+        # A second saved task is created through the real composer before testing view isolation.
+        terminal.command("!printf SECOND_VIEW_TASK")
+        terminal.wait("SECOND_VIEW_TASK")
+        empty = wait_until(
+            lambda: next(
+                (
+                    path
+                    for path in (fixture.root / ".eden/sessions").glob("*.jsonl")
+                    if path != history
+                ),
+                None,
+            ),
+            terminal,
         )
         terminal.command("/resume")
         select(terminal, history, trace)
@@ -67,7 +78,7 @@ def main():
         ]
         terminal.send(b"\x12")
         selected_load = select(terminal, empty, trace)
-        terminal.wait("Empty session")
+        terminal.wait("SECOND_VIEW_TASK")
         terminal.send(b"NEW_TARGET_DRAFT")
         offset = len(trace.read_text().splitlines())
         fixture.provider.allow.set()
@@ -92,8 +103,8 @@ def main():
         outgoing = [
             row
             for row in trace_rows(trace)[offset:]
-            if row.get("direction") == "out"
-            and row.get("method") == "session/update"
+            if row.get("direction") == "event"
+            and row.get("kind") == "Update"
             and row.get("update") == "agent_message_chunk"
             and row.get("session") == consumed["session"]
             and row.get("run") == active_previous

@@ -1,3 +1,4 @@
+// Modified by Eden Agent for its terminal library; see frontend/grok/EDEN-FRONTEND.md.
 //! Shared session picker helpers.
 //!
 //! Centralises data types, entry building, and index-mapping logic used by both the welcome-screen session picker
@@ -209,6 +210,13 @@ pub enum SourceFilter {
 }
 impl SourceFilter {
     pub fn label(self) -> &'static str {
+        if crate::eden_services::enabled() {
+            return match self {
+                Self::Grok => "Recent",
+                Self::Headless => "Trash",
+                _ => "All saved",
+            };
+        }
         match self {
             Self::Grok => "Grok",
             Self::Headless => "Headless",
@@ -219,6 +227,13 @@ impl SourceFilter {
         }
     }
     pub fn next(self) -> Self {
+        if crate::eden_services::enabled() {
+            return match self {
+                Self::Grok => Self::All,
+                Self::All => Self::Headless,
+                _ => Self::Grok,
+            };
+        }
         match self {
             Self::Grok => Self::Headless,
             Self::Headless => Self::External,
@@ -235,12 +250,15 @@ impl SourceFilter {
     /// Whether the deep content search is unavailable on this page: foreign stores are not FTS-indexed.
     /// The Headless page searches like every native page; the server filters hits by the page's headless policy.
     pub fn is_content_search_disabled(self) -> bool {
-        self == Self::External
+        crate::eden_services::enabled() || self == Self::External
     }
     /// The server-side headless policy a fetch or content search for this page must carry.
     /// `Only` on the Headless page, `Exclude` everywhere else (foreign rows are never headless, so External keeps the default).
     pub fn headless_policy(self) -> xai_grok_shell::session::unified_list::HeadlessPolicy {
         use xai_grok_shell::session::unified_list::HeadlessPolicy;
+        if crate::eden_services::enabled() && self == Self::All {
+            return HeadlessPolicy::Include;
+        }
         if self == Self::Headless {
             HeadlessPolicy::Only
         } else {
@@ -251,6 +269,13 @@ impl SourceFilter {
     /// Foreign sources (`claude` / `codex` / `cursor`) only pass `External` and `All`. Headless rows
     /// pass only `Headless`; every other page excludes them, mirroring the server-side fetch policy.
     pub fn matches(self, source: &str, session_kind: Option<&str>) -> bool {
+        if crate::eden_services::enabled() {
+            return match self {
+                Self::Headless => session_kind == Some("trash"),
+                Self::Grok => !matches!(session_kind, Some("empty" | "trash")),
+                _ => session_kind != Some("trash"),
+            };
+        }
         let is_headless = session_kind == Some("headless");
         match self {
             Self::Grok => !crate::app::is_foreign_picker_source(source) && !is_headless,
@@ -422,7 +447,13 @@ pub(crate) fn filter_session_entries(
             source_filter.matches(&e.source, e.session_kind.as_deref())
                 && (query.is_empty()
                     || fuzzy_matches_session(&e.id, &q)
-                    || fuzzy_matches_session(&e.summary, &q))
+                    || fuzzy_matches_session(&e.summary, &q)
+                    || (crate::eden_services::enabled()
+                        && (e
+                            .last_turn_summary
+                            .as_deref()
+                            .is_some_and(|preview| fuzzy_matches_session(preview, &q))
+                            || e.tags.iter().any(|tag| fuzzy_matches_session(tag, &q)))))
         })
         .map(|(i, _)| i)
         .collect()
@@ -468,6 +499,9 @@ pub(crate) fn expand_all_mapped_session_items(
     entry_map: &[Option<PickerItem>],
 ) {
     state.expanded.clear();
+    if crate::eden_services::enabled() {
+        return;
+    }
     if state.query().is_empty() {
         return;
     }
@@ -730,8 +764,33 @@ pub(crate) fn build_session_entry_data(
                 is_selected,
                 is_expanded,
                 field_data,
-                snippet_preview: None,
-                badge: crate::app::badge_for_picker_source(&entry.source),
+                snippet_preview: if crate::eden_services::enabled() && !is_expanded {
+                    let preview = [
+                        entry.model_id.as_deref(),
+                        entry.last_turn_summary.as_deref(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .filter(|part| !part.trim().is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                    (!preview.is_empty())
+                        .then(|| truncate_str(&preview, content_width.saturating_sub(6) as usize))
+                } else {
+                    None
+                },
+                badge: if crate::eden_services::enabled() {
+                    match entry.session_kind.as_deref() {
+                        Some("trash") => "trash",
+                        Some("current") => "current",
+                        Some("damaged") => "attention",
+                        Some("copy") => "copy",
+                        Some("empty") => "empty",
+                        _ => "",
+                    }
+                } else {
+                    crate::app::badge_for_picker_source(&entry.source)
+                },
                 collapsible,
             }
         })
@@ -745,6 +804,7 @@ pub(crate) fn build_grouped_picker_entries<'a>(
     filtered_indices: &[usize],
     built: &'a [SessionEntryData],
     fields_vecs: &'a [Vec<PickerField<'a>>],
+    previews: &'a [Vec<&'a str>],
     state: &PickerState,
     current_repo: Option<&str>,
 ) -> (Vec<PickerEntry<'a>>, Vec<bool>) {
@@ -779,7 +839,7 @@ pub(crate) fn build_grouped_picker_entries<'a>(
                 expanded: b.is_expanded,
                 fields,
                 description_lines: &[],
-                summary_lines: &[],
+                summary_lines: previews.get(fi).map(Vec::as_slice).unwrap_or(&[]),
                 dimmed: false,
                 indent: 1,
                 badge: b.badge,
@@ -1005,6 +1065,7 @@ mod tests {
     }
     fn make_entry(id: &str, repo: &str) -> SessionPickerEntry {
         SessionPickerEntry {
+            tags: Vec::new(),
             id: id.into(),
             summary: id.into(),
             updated_at: chrono::Utc::now(),

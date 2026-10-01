@@ -1,3 +1,4 @@
+// Modified by Eden Agent for its terminal library; see frontend/grok/EDEN-FRONTEND.md.
 //! Tests for session create, exit, trust, startup actions, worktree creation, and cloud lifecycle.
 use super::*;
 fn expect_agent(app: &AppView, id: AgentId) -> &AgentView {
@@ -3579,6 +3580,7 @@ mod welcome_workspace_mode {
         app.active_view = ActiveView::Welcome;
         app.welcome_workspace_mode = WelcomeWorkspaceMode::LocalWorkspace;
         app.session_picker_entries = Some(vec![crate::app::app_view::SessionPickerEntry {
+            tags: Vec::new(),
             id: "conv-1".into(),
             summary: "hello".into(),
             updated_at: chrono::Utc::now(),
@@ -3627,6 +3629,7 @@ mod welcome_workspace_mode {
         app.welcome_workspace_mode = WelcomeWorkspaceMode::Sandbox;
         let sess_dir = super::super::super::plant_local_build_session(tmp.path(), "build-1");
         app.session_picker_entries = Some(vec![crate::app::app_view::SessionPickerEntry {
+            tags: Vec::new(),
             id: "build-1".into(),
             summary: "local work".into(),
             updated_at: chrono::Utc::now(),
@@ -3689,6 +3692,7 @@ mod welcome_workspace_mode {
         app.cwd_has_git_ancestor = true;
         app.welcome_workspace_mode = WelcomeWorkspaceMode::Sandbox;
         app.session_picker_entries = Some(vec![crate::app::app_view::SessionPickerEntry {
+            tags: Vec::new(),
             id: "build-wt".into(),
             summary: "local work".into(),
             updated_at: chrono::Utc::now(),
@@ -3729,6 +3733,7 @@ mod welcome_workspace_mode {
         app.cwd_has_git_ancestor = true;
         app.welcome_workspace_mode = WelcomeWorkspaceMode::LocalWorkspace;
         app.session_picker_entries = Some(vec![crate::app::app_view::SessionPickerEntry {
+            tags: Vec::new(),
             id: "build-wt".into(),
             summary: "local work".into(),
             updated_at: chrono::Utc::now(),
@@ -3776,6 +3781,7 @@ mod welcome_workspace_mode {
         app.cwd_has_git_ancestor = false;
         app.welcome_workspace_mode = WelcomeWorkspaceMode::Sandbox;
         app.session_picker_entries = Some(vec![crate::app::app_view::SessionPickerEntry {
+            tags: Vec::new(),
             id: "build-wt".into(),
             summary: "local work".into(),
             updated_at: chrono::Utc::now(),
@@ -3822,6 +3828,7 @@ mod welcome_workspace_mode {
         app.welcome_workspace_mode = WelcomeWorkspaceMode::Sandbox;
         let sess_dir = super::super::super::plant_local_build_session(tmp.path(), "build-lock");
         app.session_picker_entries = Some(vec![crate::app::app_view::SessionPickerEntry {
+            tags: Vec::new(),
             id: "build-lock".into(),
             summary: "local work".into(),
             updated_at: chrono::Utc::now(),
@@ -3871,6 +3878,7 @@ mod welcome_workspace_mode {
         app.active_view = ActiveView::Welcome;
         app.welcome_workspace_mode = WelcomeWorkspaceMode::Sandbox;
         app.session_picker_entries = Some(vec![crate::app::app_view::SessionPickerEntry {
+            tags: Vec::new(),
             id: "missing-build".into(),
             summary: "gone".into(),
             updated_at: chrono::Utc::now(),
@@ -3947,6 +3955,7 @@ mod welcome_workspace_mode {
         app.local_workspace_startup_locked = true;
         app.welcome_workspace_mode = WelcomeWorkspaceMode::Sandbox;
         app.session_picker_entries = Some(vec![crate::app::app_view::SessionPickerEntry {
+            tags: Vec::new(),
             id: "conv-lock".into(),
             summary: "hello".into(),
             updated_at: chrono::Utc::now(),
@@ -4023,6 +4032,7 @@ mod welcome_workspace_mode {
         app.active_view = ActiveView::Welcome;
         app.welcome_workspace_mode = WelcomeWorkspaceMode::Sandbox;
         app.session_picker_entries = Some(vec![crate::app::app_view::SessionPickerEntry {
+            tags: Vec::new(),
             id: "remote-1".into(),
             summary: "remote row".into(),
             updated_at: chrono::Utc::now(),

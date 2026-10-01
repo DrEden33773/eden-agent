@@ -939,7 +939,9 @@ impl PagerArgs {
     /// Listing failures and ambiguity are hard errors here, reported before the sandbox (fail closed).
     pub fn pin_local_resume_target(&mut self) -> anyhow::Result<()> {
         // Eden endpoint identity is checked by the adapter.
-        if std::env::var_os("EDEN_FRONTEND_ENDPOINT").is_some() { return Ok(()); }
+        if crate::eden_services::enabled() {
+            return Ok(());
+        }
         let cwd_buf = std::env::current_dir().ok();
         let cwd_str = cwd_buf.as_deref().map(|p| p.to_string_lossy());
         self.pin_local_resume_target_for_cwd(cwd_str.as_deref())

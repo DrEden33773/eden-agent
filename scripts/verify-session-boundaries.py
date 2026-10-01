@@ -16,12 +16,29 @@ from session_fixture import (
     owner,
     probe,
     process_gone,
+    ready_view,
     records,
     select,
     trace_rows,
     wait_until,
     writer_held,
 )
+
+
+def completed_directory_scans(rows):
+    """A cancelled scan has no completion; pair finished scans by picker identity and time."""
+    starts = [row for row in rows if row.get("phase") == "directory" and row.get("edge") == "start"]
+    completed = []
+    for end in rows:
+        if end.get("phase") != "directory" or end.get("edge") != "end":
+            continue
+        start = next(
+            row
+            for row in reversed(starts)
+            if row.get("picker") == end.get("picker") and row["time_ns"] <= end["time_ns"]
+        )
+        completed.append((start, end))
+    return completed
 
 
 def main():
@@ -37,7 +54,9 @@ def main():
         bad_directory.write_text("fixture")
         terminal = fixture.start(trace=trace, env={"EDEN_LEGACY_SESSION_DIRS": str(bad_directory)})
         terminal.command("!printf ORIGINAL_VIEW_MARKER")
-        current = next((fixture.root / ".eden/sessions").glob("*.jsonl"))
+        current = wait_until(
+            lambda: next((fixture.root / ".eden/sessions").glob("*.jsonl"), None), terminal
+        )
         current_endpoint_path, current_endpoint = owner(fixture, current)
         committed(current_endpoint, "ORIGINAL_VIEW_MARKER")
         terminal.wait("Run (user)")
@@ -79,7 +98,10 @@ def main():
         fixture.capture("crash-stale-registry-recovered")
         checks["crashed_owner_and_stale_registry_restore_same_history_without_replay"] = True
         terminal.command("/sessions")
-        fixture.click(current.stem[:18])
+        terminal.send(b"/" + current.stem.encode())
+        terminal.send(b"\x1b[B")
+        terminal.send(b"e")
+        terminal.wait("Session details")
         fixture.click("Stop live host")
         fixture.click("Stop confirmed host")
         terminal.wait("Confirm the selected host before stopping")
@@ -94,11 +116,21 @@ def main():
         fixture.capture("explicit-stop-cleanup")
         # Management remains usable after stopping the originally selected host.
         terminal.send(b"\x1b")
+        terminal.wait("Resume session")
+        terminal.send(b"\x1b")
+        terminal.wait("/ to search")
+        terminal.send(b"\x1b")
+        wait_until(lambda: "Resume session" not in terminal.display, terminal)
         terminal.command("/sessions")
-        terminal.wait("Eden sessions")
+        terminal.wait("Resume session")
         existing = set((fixture.root / ".eden/sessions").glob("*.jsonl"))
+        terminal.send(b"\x1b")
         offset = len(trace_rows(trace))
-        fixture.click("New Session in this cwd")
+        terminal.command("/new")
+        new_frame = ready_view(terminal, trace, offset)
+        terminal.wait("New session")
+        assert "use /dashboard" not in terminal.display
+        terminal.command("!printf POST_STOP_INPUT_USABLE")
         created_path = wait_until(
             lambda: next(
                 (
@@ -110,12 +142,11 @@ def main():
             ),
             terminal,
         )
-        completed_load(terminal, created_path, trace, offset)
-        terminal.command("!printf POST_STOP_INPUT_USABLE")
         _, created_endpoint = owner(fixture, created_path)
         committed(created_endpoint, "POST_STOP_INPUT_USABLE")
         terminal.wait("POST_STOP_INPUT_USABLE")
         checks["native_explicit_stop_waits_cleanup_and_management_survives"] = True
+        checks["new_draft_binds_view_before_resource_projection"] = new_frame
         exited(terminal)
         large = current.with_name("large-history.jsonl")
         source_records = records(current)
@@ -182,17 +213,8 @@ def main():
                 (end["time_ns"] - start["time_ns"]) / 1e9
                 for start, end in zip(starts, ends, strict=True)
             )
-        list_starts = [
-            row
-            for row in trace_rows(trace)
-            if row.get("phase") == "directory" and row.get("edge") == "start"
-        ]
-        list_ends = [
-            row
-            for row in trace_rows(trace)
-            if row.get("phase") == "directory" and row.get("edge") == "end"
-        ]
-        timings["directory_seconds"] = (list_ends[-1]["time_ns"] - list_starts[-1]["time_ns"]) / 1e9
+        list_start, list_end = completed_directory_scans(trace_rows(trace))[-1]
+        timings["directory_seconds"] = (list_end["time_ns"] - list_start["time_ns"]) / 1e9
         request = next(
             row
             for row in trace_rows(trace)
@@ -246,6 +268,8 @@ def main():
         incompatible_before = incompatible.read_bytes()
         terminal = fixture.start(trace=trace)
         terminal.command("/resume")
+        terminal.send(b"f")
+        terminal.wait("All saved")
         select(terminal, incompatible, trace)
         terminal.wait("Read-only history", seconds=30)
         terminal.wait("saved package binding differs")
@@ -261,8 +285,13 @@ def main():
         fixture.capture("binding-readonly")
         assert incompatible.read_bytes() == incompatible_before and not writer_held(incompatible)
         terminal.command("/sessions")
-        fixture.click(incompatible.stem)
-        fixture.click("Preview migrated copy")
+        terminal.send(b"f")
+        terminal.wait("All saved")
+        terminal.send(b"/" + incompatible.stem.encode())
+        terminal.send(b"\x1b[B")
+        terminal.send(b"e")
+        terminal.wait("Session details")
+        fixture.click("Migrate a copy")
         destination = fixture.root / "migrated-copy.jsonl"
         fixture.click("New copy path")
         terminal.send(b"\x15" + str(destination).encode())
@@ -271,7 +300,7 @@ def main():
         assert not destination.exists()
         fixture.capture("migration-preview")
         fixture.click("Create this copy and open it")
-        terminal.wait("Empty session", seconds=30)
+        completed_load(terminal, destination, trace)
         terminal.command("!printf MIGRATED_INPUT_USABLE")
         migrated_path, migrated = owner(fixture, destination)
         committed(migrated, "MIGRATED_INPUT_USABLE")
@@ -311,6 +340,7 @@ def main():
                 borrowed.wait()
         nested = fixture.root / "nested-project"
         nested.mkdir()
+        startup_offset = len(trace_rows(trace))
         terminal = probe.Terminal(
             fixture.installation / "bin/eden",
             fixture.endpoint_file,
@@ -328,33 +358,33 @@ def main():
                 "--no-trust-project",
                 "--offline-startup",
             ],
-            env={"EDEN_TUI_STATE_DIR": str(fixture.state), "EDEN_FRONTEND_TRACE": str(trace)},
+            env={
+                "EDEN_TUI_STATE_DIR": str(fixture.state),
+                "EDEN_FRONTEND_TRACE": str(trace.resolve()),
+            },
         )
         fixture.terminal = terminal
         terminal.wait("workflow", seconds=30)
+        ready_view(terminal, trace, startup_offset)
         assert not list((nested / ".eden/sessions").glob("*.jsonl"))
-        terminal.command("/sessions")
-        fixture.click("New Session in this cwd")
-        terminal.wait("Empty session", seconds=30)
-        assert len(list((nested / ".eden/sessions").glob("*.jsonl"))) == 1
+        offset = len(trace_rows(trace))
+        terminal.command("/new")
+        ready_view(terminal, trace, offset)
+        terminal.wait("New session", seconds=30)
+        assert not list((nested / ".eden/sessions").glob("*.jsonl"))
+        terminal.command("!printf NEW_PERSISTENT_TASK")
+        terminal.wait("NEW_PERSISTENT_TASK")
+        wait_until(lambda: len(list((nested / ".eden/sessions").glob("*.jsonl"))) == 1, terminal)
         checks["relative_launch_configuration_survives_frontend_cwd_change"] = True
-        checks["no_session_start_and_explicit_persistent_new_are_distinct"] = True
+        checks["no_session_start_and_new_draft_first_work_are_distinct"] = True
         exited(terminal)
         assert len(fixture.provider.requests) == 0
         assert not fixture.business.calls, fixture.business.calls
         checks["grok_business_http_calls"] = 0
         observed = trace_rows(trace)
-        directory_starts = [
-            row
-            for row in observed
-            if row.get("phase") == "directory" and row.get("edge") == "start"
-        ]
-        directory_ends = [
-            row for row in observed if row.get("phase") == "directory" and row.get("edge") == "end"
-        ]
         early_frames = [
             frame
-            for start, end in zip(directory_starts, directory_ends, strict=True)
+            for start, end in completed_directory_scans(observed)
             for frame in observed
             if frame.get("direction") == "frame"
             and frame.get("method") == "directory/accepted"

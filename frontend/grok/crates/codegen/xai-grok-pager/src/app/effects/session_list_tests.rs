@@ -1,3 +1,4 @@
+// Modified by Eden Agent for its terminal library; see frontend/grok/EDEN-FRONTEND.md.
 use super::*;
 /// For payloads with no `remote` rows: reaching the resolver is a test failure.
 fn parse(payload: Value) -> Vec<SessionPickerEntry> {
@@ -403,6 +404,7 @@ fn relabel_presence_keeps_shell_labels_when_resolution_fails() {
 fn session_picker_entry_maps_to_dormant_roster_row() {
     let updated = chrono::Utc::now();
     let entry = SessionPickerEntry {
+        tags: Vec::new(),
         id: "sess-1".to_string(),
         summary: "Wire up dashboard".to_string(),
         updated_at: updated,

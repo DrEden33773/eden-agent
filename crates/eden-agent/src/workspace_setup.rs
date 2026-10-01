@@ -107,7 +107,7 @@ pub(crate) fn register(
     composition: &eden_protocol::Composition,
     pending: bool,
 ) -> Result<(), Fault> {
-    if let Some(history) = &session.0.history_path {
+    if let Some(history) = session.history_path() {
         let workspace = eden_workspace::Workspace::discover(
             Path::new(session.cwd()),
             &session.0.workspace_options,

@@ -8,6 +8,9 @@ use std::ffi::OsString;
 use std::io::{IsTerminal, Read};
 
 fn main() {
+    if let Some(code) = eden_terminal::render_worker() {
+        std::process::exit(code);
+    }
     let args: Vec<OsString> = std::env::args_os().collect();
     let startup = match eden_cli::cli::probe(&args) {
         Ok(startup) => startup,
@@ -33,7 +36,7 @@ fn main() {
     match start(parsed, &shell) {
         Ok(code) => std::process::exit(code),
         Err(error) => {
-            eden_session_lifecycle::report_start_failure(error.as_ref());
+            eden_session_workspace::report_start_failure(error.as_ref());
             shell.error(error);
             std::process::exit(1);
         }

@@ -297,6 +297,20 @@ pub enum StoreRequest {
         path: Option<String>,
         session_id: u64,
     },
+    /// Reserve a new writer without publishing history. Ordinary appends remain in memory
+    /// until AdmitBatch atomically publishes the initialized state and accepted work.
+    OpenDraft {
+        path: String,
+        session_id: u64,
+        #[serde(default)]
+        records: Vec<Record>,
+    },
+    /// Record work before executing it. A draft publishes its complete history exactly once;
+    /// durable and explicitly memory-only stores retain their existing persistence policy.
+    AdmitBatch {
+        run_id: u64,
+        entries: Vec<RecordDraft>,
+    },
     Append {
         run_id: u64,
         kind: String,

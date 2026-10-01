@@ -103,6 +103,9 @@ pub struct Cli {
     /// Keep the run in memory and write no session file
     #[arg(long, conflicts_with = "session")]
     pub no_session: bool,
+    /// Internal draft host: publish the selected destination only after work admission.
+    #[arg(long, hide = true, requires = "session", conflicts_with = "no_session")]
+    pub draft_session: bool,
     /// Print the records of a history file instead of running a prompt
     #[arg(long, value_name = "PATH")]
     pub history: Option<PathBuf>,

@@ -124,7 +124,7 @@ pub struct AcpConnection {
     /// `AuthManager` for pager-side authenticated channels (voice STT and TTS).
     /// In-process mode shares the agent's instance (single token cache); leader mode builds a dedicated one off the same local `auth.json`.
     /// Either way it resolves a fresh bearer per request via the refresh chain.
-    pub auth_manager: std::sync::Arc<xai_grok_login::AuthManager>,
+    pub auth_manager: Option<std::sync::Arc<xai_grok_login::AuthManager>>,
 }
 /// CLI flags that affect agent configuration, threaded from PagerArgs.
 #[derive(Debug, Clone, Default)]
@@ -176,9 +176,6 @@ pub struct ConnectFlags {
 }
 /// Connect to an agent: spawn, initialize, authenticate.
 pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<AcpConnection> {
-    if std::env::var_os("EDEN_FRONTEND_ENDPOINT").is_some() {
-        return eden_transport::connect(cancel, flags).await;
-    }
     startup::enter(StartupPhase::ConfigLoad);
     let raw_config = {
         let _t = xai_grok_telemetry::instrumentation::timer("startup.config_load.merge_layers");
@@ -278,7 +275,7 @@ pub(in crate::acp) async fn initialize_connection(
         cancel_rewind_enabled: agent.cancel_rewind_enabled,
         session_recap_available: agent.session_recap_available,
         feedback_trace_offer: agent.feedback_trace_offer,
-        auth_manager,
+        auth_manager: Some(auth_manager),
     })
 }
 /// Connect to a leader process and return an `AcpConnection`. The leader provides the ACP transport via IPC (raw
@@ -1076,4 +1073,4 @@ mod tests {
     }
 }
 
-mod eden_transport;
+pub(crate) mod eden_transport;

@@ -109,6 +109,7 @@ def suite_order() -> list[str]:
     if sys.platform == "win32":
         return [
             "workspace",
+            "session-lifecycle",
             "context",
             "shared-context",
             "shared-context-tui",
@@ -130,6 +131,7 @@ def suite_order() -> list[str]:
     if sys.platform == "darwin":
         return [
             "workspace",
+            "session-lifecycle",
             "presentation",
             "tui",
             "product-workflows",
@@ -150,6 +152,7 @@ def suite_order() -> list[str]:
         ]
     return [
         "workspace",
+        "session-lifecycle",
         "presentation",
         "tui",
         "product-workflows",

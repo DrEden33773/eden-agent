@@ -1,8 +1,8 @@
 //! CLI consumers delegate Session ownership and discovery to the shared lifecycle service.
 use crate::cli::Cli;
-pub(crate) use eden_session_lifecycle::Registration;
-use eden_session_lifecycle::state_dir;
-use eden_session_lifecycle::{Cleanup, Lifecycle, Opened};
+pub(crate) use eden_session_workspace::Registration;
+use eden_session_workspace::state_dir;
+use eden_session_workspace::{Cleanup, Lifecycle};
 use std::{
     path::{Path, PathBuf},
     process::Command,
@@ -95,6 +95,28 @@ pub async fn launch(
     editor: Option<&Path>,
 ) -> Result<i32, Box<dyn std::error::Error>> {
     let lifecycle = lifecycle(cli)?;
+    if editor.is_none() && frontend == "terminal" {
+        let target = if let Some(endpoint) = endpoint {
+            eden_session_workspace::OpenTarget::Endpoint(endpoint.to_owned())
+        } else if let Some(path) = read {
+            eden_session_workspace::OpenTarget::History {
+                path: path.to_owned(),
+                reading: true,
+            }
+        } else if let Some(path) = &cli.session {
+            eden_session_workspace::OpenTarget::History {
+                path: path.clone(),
+                reading: cli.read_only,
+            }
+        } else {
+            eden_session_workspace::OpenTarget::New {
+                persist: !cli.no_session,
+            }
+        };
+        return eden_terminal::run(lifecycle, target, monochrome(cli))
+            .await
+            .map_err(|error| format!("{error:#}").into());
+    }
     let opened = if let Some(endpoint) = endpoint {
         lifecycle.attach(endpoint, None).await?
     } else if let Some(path) = read {
@@ -111,7 +133,7 @@ pub async fn launch(
         }
         return result;
     }
-    run_frontend(&lifecycle, &opened, monochrome(cli)).await
+    unreachable!("terminal library path handled above")
 }
 /// Attach the installed frontend to an explicitly validated owner; it is always borrowed.
 pub async fn attach(
@@ -126,57 +148,13 @@ pub async fn attach(
     let args = vec![std::ffi::OsString::from("eden")];
     let parsed = crate::cli::parse(&args, clap::ColorChoice::Never);
     let lifecycle = lifecycle(&parsed.cli)?;
-    let opened = lifecycle.attach(endpoint, None).await?;
-    run_frontend(&lifecycle, &opened, no_color).await
-}
-async fn run_frontend(
-    lifecycle: &Lifecycle,
-    opened: &Opened,
-    no_color: bool,
-) -> Result<i32, Box<dyn std::error::Error>> {
-    let pager = lifecycle
-        .executable
-        .parent()
-        .ok_or("invalid installation")?
-        .join(format!("eden-frontend{}", std::env::consts::EXE_SUFFIX));
-    let home = lifecycle.state_dir.join("frontend");
-    std::fs::create_dir_all(&home)?;
-    let mut command = tokio::process::Command::new(pager);
-    command
-        .arg("--no-leader")
-        .arg("--resume")
-        .arg(opened.view_key())
-        .current_dir(&lifecycle.cwd)
-        .env("EDEN_SESSION_LIFECYCLE", serde_json::to_string(lifecycle)?)
-        .env("EDEN_FRONTEND_ENDPOINT", &opened.endpoint)
-        .env("EDEN_FRONTEND_OPENED", serde_json::to_string(opened)?)
-        .env("GROK_HOME", home)
-        .env("GROK_AGENT_ID", "eden")
-        .env("GROK_TELEMETRY_ENABLED", "false")
-        .env("GROK_TELEMETRY_MIXPANEL_ENABLED", "false")
-        .env("GROK_TELEMETRY_TRACE_UPLOAD", "false")
-        .env("GROK_FEEDBACK_ENABLED", "false")
-        .env("GROK_TRACE_UPLOAD", "false")
-        .env("GROK_TURN_SUMMARY", "0")
-        .env("GROK_INSTRUMENTATION", "disabled")
-        .env("OTEL_SDK_DISABLED", "true")
-        .env("DISABLE_TELEMETRY", "1")
-        .env("DISABLE_FEEDBACK_COMMAND", "1")
-        .env("GROK_DISABLE_AUTOUPDATER", "1")
-        .env("GROK_AGENT_DASHBOARD", "false")
-        .env("GROK_PROMPT_SUGGESTIONS", "false");
-    if no_color {
-        command.env("NO_COLOR", "1");
-    }
-    let result = command.status().await;
-    if result.is_err() {
-        lifecycle.failed_consumer(opened).await?;
-    }
-    if opened.cleanup == Cleanup::OwnedReader {
-        let _ = lifecycle.close(opened).await;
-    }
-    let result = result?;
-    Ok(result.code().unwrap_or(1))
+    eden_terminal::run(
+        lifecycle,
+        eden_session_workspace::OpenTarget::Endpoint(endpoint.to_owned()),
+        no_color,
+    )
+    .await
+    .map_err(|error| format!("{error:#}").into())
 }
 /// Attach a local terminal. The endpoint's session identity owns the recovered draft.
 async fn attach_native(

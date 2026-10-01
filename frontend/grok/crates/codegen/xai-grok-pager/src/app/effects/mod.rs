@@ -750,6 +750,7 @@ pub(crate) fn execute(
                         }
                     }
                     if crate::eden_services::enabled() {
+                        params["catalogView"] = serde_json::json!(match headless_policy.as_wire_str() { "only" => "trash", "include" => "all", _ => "recent" });
                         params["_meta"]["edenPicker"] = serde_json::json!({ "host": format!("{host:?}"), "generation": generation, "seq": seq, "query": query });
                     }
                     let request = acp::ExtRequest::new(
@@ -1328,6 +1329,7 @@ pub(crate) fn execute(
                         .err()
                         .and_then(http_status_from_error);
                     TaskResult::PromptResponse {
+                        not_accepted: result.as_ref().err().is_some_and(|error| error.data.as_ref().is_some_and(|data| data["edenNotAccepted"] == true)),
                         agent_id,
                         result: result
                             .map_err(|e| format_acp_error(&e, is_api_key_auth)),
@@ -1380,6 +1382,7 @@ pub(crate) fn execute(
                         .err()
                         .and_then(http_status_from_error);
                     TaskResult::PromptResponse {
+                        not_accepted: result.as_ref().err().is_some_and(|error| error.data.as_ref().is_some_and(|data| data["edenNotAccepted"] == true)),
                         agent_id,
                         result: result
                             .map_err(|e| format_acp_error(&e, is_api_key_auth)),
@@ -1444,6 +1447,7 @@ pub(crate) fn execute(
                         .err()
                         .and_then(http_status_from_error);
                     TaskResult::PromptResponse {
+                        not_accepted: result.as_ref().err().is_some_and(|error| error.data.as_ref().is_some_and(|data| data["edenNotAccepted"] == true)),
                         agent_id,
                         result: result
                             .map_err(|e| format_acp_error(&e, is_api_key_auth)),
@@ -1506,6 +1510,7 @@ pub(crate) fn execute(
                         .err()
                         .and_then(http_status_from_error);
                     TaskResult::PromptResponse {
+                        not_accepted: result.as_ref().err().is_some_and(|error| error.data.as_ref().is_some_and(|data| data["edenNotAccepted"] == true)),
                         agent_id,
                         result: result
                             .map_err(|e| format_acp_error(&e, is_api_key_auth)),
@@ -1758,6 +1763,7 @@ pub(crate) fn execute(
                         .err()
                         .and_then(http_status_from_error);
                     TaskResult::PromptResponse {
+                        not_accepted: result.as_ref().err().is_some_and(|error| error.data.as_ref().is_some_and(|data| data["edenNotAccepted"] == true)),
                         agent_id,
                         result: result
                             .map_err(|e| format_acp_error(&e, is_api_key_auth)),

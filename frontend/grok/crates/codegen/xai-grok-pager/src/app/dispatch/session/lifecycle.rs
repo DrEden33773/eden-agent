@@ -1,3 +1,4 @@
+// Modified by Eden Agent for its terminal library; see frontend/grok/EDEN-FRONTEND.md.
 //! New, exit, cloud, and worktree session dispatchers plus trust and startup actions.
 use super::fork::{dispatch_startup_fork_session, worktree_persist_options};
 use super::load::dispatch_load_session;
@@ -133,6 +134,9 @@ pub(crate) fn apply_deferred_switch_outcome(
 /// The persisted `Always` / `Never` modes therefore still take effect.
 pub(in crate::app::dispatch) fn dispatch_new_session(app: &mut AppView) -> Vec<Effect> {
     use crate::app::app_view::WorktreeMode;
+    if crate::eden_services::enabled() {
+        return dispatch_new_session_from_tab(app);
+    }
     if !app.session_startup_allowed() {
         app.deferred_startup.new_session = true;
         return vec![];
@@ -910,6 +914,9 @@ fn unused_husk_delete_effect(
     session_id: &acp::SessionId,
     cwd: String,
 ) -> Option<Effect> {
+    if crate::eden_services::enabled() {
+        return None;
+    }
     if live_prompt_images_reference_session(app, session_id) {
         return None;
     }
@@ -1388,6 +1395,24 @@ pub(in crate::app::dispatch) fn handle_session_created(
 ) -> Vec<Effect> {
     let identity_rebind = super::super::dashboard::WorkspaceIdentityRebind::capture(app);
     crate::app::workspace_sync::allow_loaded_session(app, session_id.0.as_ref());
+    if crate::eden_services::enabled() {
+        let Some(agent) = app.agents.get_mut(&agent_id) else {
+            return vec![];
+        };
+        agent.bind_session_id(session_id.clone());
+        agent.display_name = Some("New session".into());
+        agent.session.loading_replay = true;
+        agent.begin_replay_window();
+        agent.scrollback.begin_batch();
+        let effect = Effect::LoadSession {
+            agent_id,
+            session_id: session_id.to_string(),
+            session_cwd: Some(agent.session.cwd.clone()),
+            chat_kind: false,
+        };
+        identity_rebind.apply(app);
+        return vec![effect];
+    }
     let agent_count = app.agents.len();
     let switch_hint =
         crate::views::dashboard::session_switch_hint_command(app.screen_mode.is_minimal());

@@ -1,3 +1,4 @@
+// Modified by Eden Agent for its terminal library; see frontend/grok/EDEN-FRONTEND.md.
 //! Tests for login, logout, account switching, and auth-code dispatchers.
 
 use super::*;
@@ -420,6 +421,7 @@ fn e2e_compact_auth_failure_holds_prompt_and_resubmits_after_login() {
 
     dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Err("Unauthorized (401)".to_string()),
             http_status: Some(401),
@@ -480,6 +482,7 @@ fn pre_fix_compact_start_without_hold_cannot_stash_for_reauth() {
     }
     dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Err("Unauthorized (401)".to_string()),
             http_status: Some(401),
@@ -518,6 +521,7 @@ fn second_auth_failure_does_not_clobber_reauth_stash() {
 
     dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Err("Unauthorized (401)".to_string()),
             http_status: Some(401),

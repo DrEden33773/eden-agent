@@ -1,4 +1,6 @@
 //! Shared persistent and memory session API for the CLI and Rust consumers.
+mod admission;
+pub use admission::DraftCleanup;
 pub use eden_kernel::history;
 use eden_kernel::{Events, Kernel};
 mod attempts;
@@ -12,7 +14,7 @@ mod presentation;
 mod references;
 mod startup;
 mod user_shell;
-pub use control::SessionState;
+pub use control::{SessionState, StopExpectation};
 mod composition;
 pub mod configuration;
 mod configuration_metadata;
@@ -38,6 +40,7 @@ struct State {
     closed: bool,
     next: u64,
     active: Option<(u64, Cancellation)>,
+    admissions: BTreeMap<u64, Result<(), Fault>>,
     shells: BTreeMap<u64, Cancellation>,
     commands: BTreeMap<u64, Cancellation>,
     command_contracts: BTreeMap<u64, String>,
@@ -53,7 +56,8 @@ struct Inner {
     id: u64,
     kernel: generation::Generation,
     workspace_options: WorkspaceOptions,
-    history_path: Option<std::path::PathBuf>,
+    history_path: std::sync::OnceLock<std::path::PathBuf>,
+    draft_path: Option<std::path::PathBuf>,
     offline_records: Mutex<Vec<c::Record>>,
     events: Arc<Events>,
     interactions: Arc<interaction::Interactions>,
@@ -99,7 +103,47 @@ impl Session {
         options: SessionOptions,
         workspace: WorkspaceOptions,
     ) -> Result<Self, Fault> {
-        Self::open_with_policy(composition.as_ref().to_owned(), options, workspace, false).await
+        Self::open_with_policy(
+            composition.as_ref().to_owned(),
+            options,
+            workspace,
+            false,
+            false,
+        )
+        .await
+    }
+    /// Initialize a new draft without publishing history. First accepted work is durably
+    /// recorded before its execution; explicit memory-only sessions keep their own contract.
+    pub async fn open_draft_with_workspace(
+        composition: impl AsRef<Path>,
+        options: SessionOptions,
+        workspace: WorkspaceOptions,
+    ) -> Result<Self, Fault> {
+        let path = options.history.as_ref().ok_or_else(|| {
+            Fault::new(
+                "InvalidInput",
+                "session",
+                "a draft needs a future history destination",
+            )
+        })?;
+        if path
+            .try_exists()
+            .map_err(|e| Fault::new("PersistenceFailure", "session", e.to_string()))?
+        {
+            return Err(Fault::new(
+                "InvalidInput",
+                "session",
+                "a draft cannot replace existing history",
+            ));
+        }
+        Self::open_with_policy(
+            composition.as_ref().to_owned(),
+            options,
+            workspace,
+            false,
+            true,
+        )
+        .await
     }
     /// Explicitly bind saved history to a different installed composition without running it.
     pub async fn open_rebound(
@@ -107,17 +151,26 @@ impl Session {
         options: SessionOptions,
         workspace: WorkspaceOptions,
     ) -> Result<Self, Fault> {
-        Self::open_with_policy(composition.as_ref().to_owned(), options, workspace, true).await
+        Self::open_with_policy(
+            composition.as_ref().to_owned(),
+            options,
+            workspace,
+            true,
+            false,
+        )
+        .await
     }
     async fn open_with_policy(
         composition: std::path::PathBuf,
         options: SessionOptions,
         workspace: WorkspaceOptions,
         rebind: bool,
+        draft: bool,
     ) -> Result<Self, Fault> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            let result = Self::open_owned(composition, options, workspace, rebind, None).await;
+            let result =
+                Self::open_owned(composition, options, workspace, rebind, draft, None).await;
             let _ = sender.send(SessionDelivery(Some(result)));
         });
         let mut delivery = receiver
@@ -133,6 +186,7 @@ impl Session {
         options: SessionOptions,
         workspace_options: WorkspaceOptions,
         rebind: bool,
+        draft: bool,
         embedded: Option<embedded::Embedded>,
     ) -> Result<Self, Fault> {
         let cwd = std::fs::canonicalize(&options.cwd)
@@ -265,7 +319,16 @@ impl Session {
             id,
             kernel: generation::Generation::new(kernel),
             workspace_options,
-            history_path: options.history.clone(),
+            history_path: if draft {
+                Default::default()
+            } else {
+                options
+                    .history
+                    .clone()
+                    .map(std::sync::OnceLock::from)
+                    .unwrap_or_default()
+            },
+            draft_path: draft.then(|| options.history.clone()).flatten(),
             offline_records: Mutex::new(previous.clone()),
             events,
             interactions,
@@ -275,6 +338,7 @@ impl Session {
                 closed: false,
                 next,
                 active: None,
+                admissions: BTreeMap::new(),
                 shells: BTreeMap::new(),
                 commands: BTreeMap::new(),
                 command_contracts: BTreeMap::new(),
@@ -294,9 +358,28 @@ impl Session {
                     .service(
                         0,
                         c::STORE,
-                        &c::StoreRequest::Open {
-                            path: options.history.map(|p| p.to_string_lossy().into_owned()),
-                            session_id: id,
+                        &if draft {
+                            c::StoreRequest::OpenDraft {
+                                path: options
+                                    .history
+                                    .as_ref()
+                                    .ok_or_else(|| {
+                                        Fault::new(
+                                            "InvalidInput",
+                                            "session",
+                                            "draft destination missing",
+                                        )
+                                    })?
+                                    .to_string_lossy()
+                                    .into_owned(),
+                                session_id: id,
+                                records: vec![],
+                            }
+                        } else {
+                            c::StoreRequest::Open {
+                                path: options.history.map(|p| p.to_string_lossy().into_owned()),
+                                session_id: id,
+                            }
                         },
                     )
                     .await?;
@@ -426,6 +509,21 @@ impl Session {
         references: Vec<eden_protocol::session_reference::Reference>,
     ) -> Result<u64, Fault> {
         self.0.kernel.get()?;
+        if !resume
+            && references.is_empty()
+            && !content.iter().any(|block| match block {
+                c::Block::Text { text } => !text.trim().is_empty(),
+                _ => true,
+            })
+        {
+            return Err(Fault::new(
+                "InvalidInput",
+                "session-admission",
+                "enter a message or attach content",
+            ));
+        }
+        let check_content = content.clone();
+        let check_references = references.clone();
         let mut payload = if self.0.coding {
             serde_json::json!(c::RunInput {
                 references,
@@ -447,11 +545,29 @@ impl Session {
         };
         let role = if self.0.coding { c::LOOP } else { AGENT_LOOP };
         self.start(false, move |session, run_id, cancel| async move {
+            if !resume
+                && session.has_role(eden_protocol::context_edit::SERVICE)
+                && let Err(error) = session
+                    .check_reference_input(check_content, check_references)
+                    .await
+            {
+                return Terminal::failed(error);
+            }
             if session.0.coding {
                 match session.freeze_model(run_id).await {
                     Ok(target) => payload["target"] = serde_json::json!(target),
                     Err(error) => return Terminal::failed(error),
                 }
+            }
+            if let Err(error) = session.admit_work(run_id, payload.clone(), &cancel).await {
+                return Terminal::failed(error);
+            }
+            if cancel.is_cancelled() {
+                return Terminal {
+                    outcome: Outcome::Cancelled,
+                    cleanup_errors: vec![],
+                    partial_result: None,
+                };
             }
             session
                 .0
@@ -514,7 +630,7 @@ impl Session {
         state.management = management;
         self.0.events.push(
             run_id,
-            "accepted",
+            if management { "accepted" } else { "reserved" },
             serde_json::json!({ "management": management }),
         );
         let session = self.clone();
@@ -572,6 +688,17 @@ impl Session {
                 session.0.events.settle_streaming(run_id).await;
             }
             let mut state = session.0.state.lock().unwrap_or_else(|e| e.into_inner());
+            if !management && !state.admissions.contains_key(&run_id) {
+                let error = match &terminal.outcome {
+                    Outcome::Failed(error) => error.clone(),
+                    _ => Fault::new(
+                        "Cancelled",
+                        "session-admission",
+                        "work was cancelled before admission",
+                    ),
+                };
+                state.admissions.insert(run_id, Err(error));
+            }
             state.terminals.insert(run_id, terminal.clone());
             session.0.events.push(
                 run_id,
@@ -827,7 +954,7 @@ impl Session {
             .get()
             .is_ok_and(|kernel| kernel.role_running(c::STORE))
         {
-            return match &self.0.history_path {
+            return match self.0.history_path.get() {
                 Some(path) => eden_kernel::history::read(path),
                 None => Ok(self
                     .0
@@ -857,6 +984,19 @@ impl Session {
         content: Vec<c::Block>,
         references: Vec<eden_protocol::session_reference::Reference>,
     ) -> Result<c::QueueEntry, Fault> {
+        if !["steering", "follow_up"].contains(&kind)
+            || (references.is_empty()
+                && !content.iter().any(|block| match block {
+                    c::Block::Text { text } => !text.trim().is_empty(),
+                    _ => true,
+                }))
+        {
+            return Err(Fault::new(
+                "InvalidInput",
+                "queue",
+                "choose steering or follow_up and provide content",
+            ));
+        }
         let run_id = {
             let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
             if state.closed || state.management {
@@ -877,6 +1017,25 @@ impl Session {
         tokio::spawn(async move {
             let _owner = owner;
             session.0.events.settle_auxiliary().await;
+            if session.is_draft() {
+                if session.has_role(eden_protocol::context_edit::SERVICE) {
+                    session
+                        .check_reference_input(content.clone(), references.clone())
+                        .await?;
+                }
+                session
+                    .save_intent(
+                        run_id,
+                        serde_json::json!({
+                            "kind": "queue",
+                            "queue_kind": kind,
+                            "content": content,
+                            "references": references,
+                        }),
+                        &session.0.input_cancel,
+                    )
+                    .await?;
+            }
             let mut entries: Vec<c::QueueEntry> = session
                 .service_input(
                     run_id,

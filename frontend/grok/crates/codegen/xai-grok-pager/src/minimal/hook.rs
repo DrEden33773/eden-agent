@@ -1,9 +1,10 @@
+// Modified by Eden Agent for its terminal library; see frontend/grok/EDEN-FRONTEND.md.
 //! Function-pointer hooks for the optional minimal (scrollback-native) render mode.
 //!
 //! A dependency on `xai-grok-pager-minimal` would be a cargo cycle: that crate reads this crate's `AppView`, `views::*` widgets, and `scrollback`.
 //! The minimal crate instead registers its entry points here via [`install`], and this crate calls them through the stored function pointers.
 //!
-//! The `xai-grok-pager-bin` binary calls `xai_grok_pager_minimal::install()` once at startup.
+//! The `eden-terminal` composition root calls `xai_grok_pager_minimal::install()` once at startup.
 //! With no hooks installed, the pager's `ScreenMode::Minimal` branches are inert: `draw` is a no-op and `/transcript` falls back to the empty case.
 //! The default full-screen and inline render paths never touch this module.
 

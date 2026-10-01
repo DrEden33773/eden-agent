@@ -1,97 +1,254 @@
-//! In-process presentation transport. The shared lifecycle library alone opens hosts.
-use anyhow::{Context, Result};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, simplex};
+// Modified by Eden Agent for its terminal library; see frontend/grok/EDEN-FRONTEND.md.
+//! Direct typed presentation channel. Eden owns lifecycle; no local JSON-RPC transport exists.
+use agent_client_protocol as acp;
+use anyhow::Result;
+use eden_session_workspace::{
+    Request, SessionOperation, SessionWorkspace, ViewEvent, ViewEventKind,
+};
+use serde_json::{Value, json};
+use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tokio_util::sync::CancellationToken;
-use xai_acp_lib::{AcpGatewayReceiver, AcpGatewaySender, LineBufferedRead, acp_channels};
+use xai_acp_lib::{AcpAgentMessage, acp_channels, acp_send};
 
-pub(super) async fn connect(
-    cancel: &CancellationToken,
-    flags: super::ConnectFlags,
-) -> Result<super::AcpConnection> {
-    let endpoint = std::env::var_os("EDEN_FRONTEND_ENDPOINT")
-        .context("missing selected endpoint")?
-        .into();
-    let lifecycle = serde_json::from_str(&std::env::var("EDEN_SESSION_LIFECYCLE")?)?;
-    let opened = serde_json::from_str(&std::env::var("EDEN_FRONTEND_OPENED")?)?;
-    let (client_channel, agent_channel) = acp_channels();
+fn error(error: impl std::fmt::Display) -> acp::Error {
+    acp::Error::new(-32603, error.to_string())
+}
+fn fault_error(fault: eden_session_workspace::Fault) -> acp::Error {
+    if fault.code == "NotAccepted" {
+        acp::Error::new(-32603, fault.message).data(json!({"edenNotAccepted": true}))
+    } else {
+        error(&fault)
+    }
+}
+fn selected(view: Option<String>, operation: SessionOperation) -> Request {
+    Request::View { view, operation }
+}
+fn meta_text(meta: &Option<acp::Meta>, key: &str) -> Option<String> {
+    meta.as_ref()
+        .and_then(|meta| meta.get(key))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+fn extension(request: &acp::ExtRequest) -> Result<Request, acp::Error> {
+    let data: Value = serde_json::from_str(request.params.get()).map_err(error)?;
+    let view = data["sessionId"]
+        .as_str()
+        .or_else(|| data["session_id"].as_str())
+        .map(str::to_owned);
+    Ok(match request.method.trim_start_matches('_') {
+        "eden/ui" => Request::Form(data),
+        "x.ai/session/list" => Request::Catalog(data),
+        "x.ai/prompt_history" => selected(view, SessionOperation::PromptHistory),
+        "x.ai/compact_conversation" => selected(view, SessionOperation::Compact),
+        "x.ai/session/rename" => selected(
+            view,
+            SessionOperation::Rename {
+                title: data["title"]
+                    .as_str()
+                    .ok_or_else(|| error("missing title"))?
+                    .into(),
+            },
+        ),
+        "eden/model/default" => selected(
+            view,
+            SessionOperation::DefaultModel {
+                model_id: data["modelId"]
+                    .as_str()
+                    .ok_or_else(|| error("missing model"))?
+                    .into(),
+                effort: data["_meta"]["reasoningEffort"].as_str().map(str::to_owned),
+            },
+        ),
+        method => return Err(error(format!("Unsupported presentation action: {method}"))),
+    })
+}
+
+pub(crate) async fn connect(
+    workspace: Arc<SessionWorkspace>,
+    mut events: mpsc::UnboundedReceiver<ViewEvent>,
+    cancel: CancellationToken,
+) -> Result<(super::AcpConnection, tokio::task::JoinHandle<Result<()>>)> {
+    let initialized = workspace
+        .request(selected(None, SessionOperation::Initialize))
+        .await?;
+    let models = serde_json::from_value::<acp::SessionModelState>(
+        initialized["_meta"]["modelState"].clone(),
+    )?;
+    let commands = serde_json::from_value(initialized["_meta"]["availableCommands"].clone())?;
+    let (client, mut agent) = acp_channels();
     let stop = cancel.clone();
-    let thread = std::thread::Builder::new()
-        .name("eden-presentation".into())
-        .spawn(move || -> Result<()> {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?;
-            let local = tokio::task::LocalSet::new();
-            local.block_on(&runtime, async move {
-                let (request_tx, request_rx) = mpsc::unbounded_channel();
-                let (output_tx, mut output_rx) = mpsc::unbounded_channel();
-                let (incoming_read, mut incoming_write) = simplex(8 * 1024 * 1024);
-                let (outgoing_read, outgoing_write) = simplex(8 * 1024 * 1024);
-                let server = tokio::task::spawn_local(eden_frontend_session::serve(
-                    endpoint, lifecycle, opened, request_rx, output_tx,
-                ));
-                let writer = tokio::task::spawn_local(async move {
-                    let mut lines = BufReader::new(outgoing_read).lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        let Ok(request) = serde_json::from_str(&line) else {
-                            break;
-                        };
-                        if request_tx.send(request).is_err() {
-                            break;
+    let task = tokio::spawn(async move {
+        let tx = agent.tx.clone();
+        let notifications = tokio::spawn(async move {
+            while let Some(event) = events.recv().await {
+                match event {
+                    ViewEvent::Barrier(done) => {
+                        let _ = done.send(());
+                    }
+                    ViewEvent::Notification { kind, data } => match kind {
+                        ViewEventKind::Update => {
+                            let update: acp::SessionNotification = serde_json::from_value(data)?;
+                            acp_send(update, &tx)
+                                .await
+                                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                        }
+                        kind => {
+                            let method = match kind {
+                                ViewEventKind::Title => "eden/session/title",
+                                ViewEventKind::Context => "eden/context/state",
+                                ViewEventKind::Models => "eden/model/state",
+                                ViewEventKind::PromptComplete => "x.ai/session/prompt_complete",
+                                ViewEventKind::Queue => "x.ai/queue/changed",
+                                ViewEventKind::CatalogProgress => "eden/session/list_progress",
+                                ViewEventKind::Update => unreachable!(),
+                            };
+                            let notification = acp::ExtNotification::new(
+                                method,
+                                serde_json::value::to_raw_value(&data)?.into(),
+                            );
+                            acp_send(notification, &tx)
+                                .await
+                                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                        }
+                    },
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        });
+        let mut requests = tokio::task::JoinSet::new();
+        loop {
+            let message = tokio::select! {
+                _ = stop.cancelled() => break,
+                message = agent.rx.recv() => match message { Some(message) => message, None => break },
+            };
+            let workspace = workspace.clone();
+            requests.spawn(async move {
+                macro_rules! respond {
+                    ($args:expr, $request:expr) => {{
+                        let result = workspace
+                            .request($request)
+                            .await
+                            .map_err(fault_error)
+                            .and_then(|value| serde_json::from_value(value).map_err(error));
+                        let _ = $args.response_tx.send(result);
+                    }};
+                }
+                match message {
+                    AcpAgentMessage::Initialize(args) => {
+                        respond!(args, selected(None, SessionOperation::Initialize))
+                    }
+                    AcpAgentMessage::Authenticate(args) => {
+                        respond!(args, selected(None, SessionOperation::Authenticate))
+                    }
+                    AcpAgentMessage::LoadSession(args) => respond!(
+                        args,
+                        selected(
+                            Some(args.request.session_id.to_string()),
+                            SessionOperation::Load
+                        )
+                    ),
+                    AcpAgentMessage::NewSession(args) => respond!(args, Request::New),
+                    AcpAgentMessage::Prompt(args) => {
+                        let input = &args.request;
+                        let blocks = input
+                            .prompt
+                            .iter()
+                            .map(serde_json::to_value)
+                            .collect::<Result<Vec<_>, _>>();
+                        match blocks {
+                            Ok(blocks) => respond!(
+                                args,
+                                selected(
+                                    Some(input.session_id.to_string()),
+                                    SessionOperation::Prompt {
+                                        blocks,
+                                        prompt_id: meta_text(&input.meta, "promptId")
+                                    }
+                                )
+                            ),
+                            Err(e) => {
+                                let _ = args.response_tx.send(Err(error(e)));
+                            }
                         }
                     }
-                });
-                let reader = tokio::task::spawn_local(async move {
-                    while let Some(value) = output_rx.recv().await {
-                        let mut bytes = serde_json::to_vec(&value)?;
-                        bytes.push(b'\n');
-                        incoming_write.write_all(&bytes).await?;
+                    AcpAgentMessage::Cancel(args) => {
+                        let result = workspace
+                            .request(selected(
+                                Some(args.request.session_id.to_string()),
+                                SessionOperation::Cancel {
+                                    prompt_id: meta_text(&args.request.meta, "promptId"),
+                                },
+                            ))
+                            .await
+                            .map(|_| ())
+                            .map_err(error);
+                        let _ = args.response_tx.send(result);
                     }
-                    Ok::<_, anyhow::Error>(())
-                });
-                let gateway = AcpGatewaySender::new(agent_channel.tx).with_tracing(false);
-                let incoming = LineBufferedRead::spawn_local(incoming_read.compat());
-                let (connection, io) = agent_client_protocol::ClientSideConnection::new(
-                    gateway,
-                    outgoing_write.compat_write(),
-                    incoming,
-                    |future| {
-                        tokio::task::spawn_local(future);
-                    },
-                );
-                tokio::task::spawn_local(io);
-                tokio::task::spawn_local(
-                    AcpGatewayReceiver::new(agent_channel.rx, connection)
-                        .with_tracing(false)
-                        .run(),
-                );
-                stop.cancelled().await;
-                // Dropping the only request sender starts the server's attachment/reader barrier.
-                writer.abort();
-                let _ = writer.await;
-                let result = server.await?;
-                reader.abort();
-                result.map_err(anyhow::Error::from)
-            })
-        })?;
-    // This inert local object remains a display dependency; it has no refresher or cloud transport.
-    let home = std::env::var_os("GROK_HOME").context("missing frontend preferences directory")?;
-    let auth = std::sync::Arc::new(xai_grok_login::AuthManager::new_with_proxy_base_url(
-        std::path::Path::new(&home),
-        Default::default(),
-        "http://127.0.0.1:9".into(),
-    ));
-    super::initialize_connection(
-        super::AgentEndpoint {
-            tx: client_channel.tx,
-            rx: client_channel.rx,
-            cancel: cancel.clone(),
-            location: super::AgentLocation::Thread(thread),
+                    AcpAgentMessage::SetSessionModel(args) => respond!(
+                        args,
+                        selected(
+                            Some(args.request.session_id.to_string()),
+                            SessionOperation::SelectModel {
+                                model_id: args.request.model_id.to_string(),
+                                effort: meta_text(&args.request.meta, "reasoningEffort")
+                            }
+                        )
+                    ),
+                    AcpAgentMessage::ExtMethod(args) => {
+                        let result = match extension(&args.request) {
+                            Ok(request) => workspace
+                                .request(request)
+                                .await
+                                .map_err(error)
+                                .and_then(|value| {
+                                    serde_json::value::to_raw_value(&value)
+                                        .map(|raw| acp::ExtResponse::new(raw.into()))
+                                        .map_err(error)
+                                }),
+                            Err(e) => Err(e),
+                        };
+                        let _ = args.response_tx.send(result);
+                    }
+                    AcpAgentMessage::SetSessionMode(args) => {
+                        let _ = args
+                            .response_tx
+                            .send(Err(error("Use Eden configuration for session modes")));
+                    }
+                    AcpAgentMessage::ExtNotification(args) => {
+                        let _ = args.response_tx.send(Ok(()));
+                    }
+                }
+            });
+            while requests.try_join_next().is_some() {}
+        }
+        requests.shutdown().await;
+        let result = workspace.close().await;
+        notifications.abort();
+        let _ = notifications.await;
+        result.map_err(Into::into)
+    });
+    Ok((
+        super::AcpConnection {
+            tx: client.tx,
+            rx: client.rx,
+            models: Some(models).into(),
+            available_commands: commands,
+            is_grok_shell: false,
+            auth_methods: vec![],
+            cancel,
+            agent_thread: None,
+            needs_login: false,
+            login_label: None,
+            login_method_id: None,
+            auth_start_mode: super::AuthStartMode::Pending,
+            auth_meta: None,
+            leader_status_rx: None,
+            cancel_rewind_enabled: false,
+            session_recap_available: false,
+            feedback_trace_offer: false,
+            auth_manager: None,
         },
-        &flags,
-        auth,
-    )
-    .await
+        task,
+    ))
 }

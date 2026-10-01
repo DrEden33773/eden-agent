@@ -31,6 +31,8 @@ test("associated inputs select hooks only for tooling and configuration", () => 
       "native",
     ]);
     assert.deepEqual(selected(["crates/eden-fmt/src/lib.rs"], event), ["rust", "native", "hooks"]);
+    for (const path of ["frontend/grok/crates/pager/src/lib.rs", "vendor/upstream/src/lib.rs"])
+      assert.deepEqual(selected([path], event), ["rust", "native"]);
   }
   for (const path of [
     "Cargo.lock",

@@ -1443,6 +1443,8 @@ pub struct AgentView {
     /// handler so the placeholder doesn't linger on screen when the loaded session has no replay content.
     pub(crate) loading_placeholder_id: Option<EntryId>,
     /// A failed explicit load returns to this intact local view and draft.
+    /// A removed history transfers its unsent composer only once the new draft is ready.
+    pub(crate) eden_take_previous_draft: bool,
     pub(crate) eden_previous_agent: Option<crate::app::agent::AgentId>,
     /// Entry ID of the in-flight manual `/recap` loading block (rendered with the animated "running" sidebar). Set when `/recap` is dispatched and taken by the `SessionRecap` handler, which fills the block with the summary and stops the animation. `None` when no manual recap is pending (auto recaps never show a loading block).
     pub(crate) pending_recap_entry: Option<EntryId>,

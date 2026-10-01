@@ -1,3 +1,4 @@
+// Modified by Eden Agent for its terminal library; see frontend/grok/EDEN-FRONTEND.md.
 //! Home-directory resolution generally: USERPROFILE-first `home_dir`, plus
 //! grok-home (`$GROK_HOME` or `<home>/.grok`). Shared by `xai-grok-config`
 //! and `xai-fast-worktree`.
@@ -18,12 +19,28 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+static GROK_HOME: OnceLock<PathBuf> = OnceLock::new();
+
+/// Configure this embedded frontend before its first preference read, without changing process environment.
+pub fn configure_home(path: PathBuf) -> std::io::Result<()> {
+    std::fs::create_dir_all(&path)?;
+    if let Err(path) = GROK_HOME.set(path)
+        && GROK_HOME.get() != Some(&path)
+    {
+        return Err(std::io::Error::other(
+            "frontend preferences already initialized at another path",
+        ));
+    }
+    Ok(())
+}
 
 /// Where a resolved grok home came from, so "why did grok pick this
 /// directory?" is answerable in diagnostics without re-reading the
 /// environment at the asking site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrokHomeSource {
+    /// Explicit library construction, independent of environment variables.
+    Explicit,
     /// A non-empty `$GROK_HOME` override.
     EnvOverride,
     /// `<home>/.grok` derived from the home directory.
@@ -65,6 +82,9 @@ pub fn resolve_grok_home() -> Option<PathBuf> {
 
 /// [`resolve_grok_home`] plus the [`GrokHomeSource`] the path came from.
 pub fn resolve_grok_home_with_source() -> Option<(PathBuf, GrokHomeSource)> {
+    if let Some(path) = GROK_HOME.get() {
+        return Some((path.clone(), GrokHomeSource::Explicit));
+    }
     resolve_grok_home_from(
         std::env::var_os("GROK_HOME").as_deref(),
         home_dir().as_deref(),
@@ -79,7 +99,6 @@ pub fn default_grok_home() -> PathBuf {
 /// The grok home, created if missing and cached for the process; falls back to
 /// [`default_grok_home`] when neither `$GROK_HOME` nor a home resolves.
 pub fn grok_home() -> PathBuf {
-    static GROK_HOME: OnceLock<PathBuf> = OnceLock::new();
     GROK_HOME
         .get_or_init(|| {
             let home = resolve_grok_home().unwrap_or_else(default_grok_home);

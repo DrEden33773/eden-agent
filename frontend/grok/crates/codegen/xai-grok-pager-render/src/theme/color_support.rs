@@ -1,3 +1,4 @@
+// Modified by Eden Agent for its terminal library; see frontend/grok/EDEN-FRONTEND.md.
 //! Detects the terminal's color capabilities (truecolor / 256 / 16 / none).
 //! [`quantize_color`] downgrades a [`ratatui::style::Color`] to the highest level the terminal supports.
 //!
@@ -52,6 +53,11 @@ impl std::fmt::Display for ColorLevel {
 // ── Global singleton ─────────────────────────────────────────────────────
 
 static COLOR_LEVEL: OnceLock<ColorLevel> = OnceLock::new();
+static DISABLE_COLOR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Explicit application policy avoids changing process environment after worker startup.
+pub fn disable_color() {
+    DISABLE_COLOR.store(true, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Test override before the write-once `OnceLock`. Ambient `NO_COLOR` would otherwise win by scheduling luck. `u8::MAX` means unset.
 #[cfg(any(test, feature = "test-support"))]
@@ -81,6 +87,9 @@ fn test_level_override() -> Option<ColorLevel> {
 /// `NO_COLOR` forces [`ColorLevel::None`]. Non-TTY without it defaults to TrueColor (a TUI always runs in a terminal).
 /// Capped at [`ColorLevel::Basic`] while the terminal-native lock is engaged.
 pub fn detect() -> ColorLevel {
+    if DISABLE_COLOR.load(std::sync::atomic::Ordering::Relaxed) {
+        return ColorLevel::None;
+    }
     let raw = detect_raw();
     if crate::theme::cache::terminal_native_locked() {
         return raw.min(ColorLevel::Basic);

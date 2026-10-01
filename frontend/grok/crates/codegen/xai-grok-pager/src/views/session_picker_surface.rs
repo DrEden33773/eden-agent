@@ -1,3 +1,4 @@
+// Modified by Eden Agent for native host integration; see the accompanying EDEN-FRONTEND.md.
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
@@ -244,6 +245,10 @@ fn render_simple_session_picker_modal(
         ctx.state,
         content.width,
     );
+    let previews: Vec<Vec<&str>> = built
+        .iter()
+        .map(|entry| entry.snippet_preview.as_deref().into_iter().collect())
+        .collect();
     let fields: Vec<Vec<PickerField<'_>>> = built
         .iter()
         .map(|entry| {
@@ -260,6 +265,7 @@ fn render_simple_session_picker_modal(
         &filtered,
         &built,
         &fields,
+        &previews,
         ctx.state,
         Some(current_repo.as_str()),
     );

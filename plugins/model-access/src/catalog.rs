@@ -13,6 +13,7 @@ use tokio::sync::Mutex;
 
 const BUNDLED: &str = include_str!("../data/pi-models.json");
 const BUNDLED_SOURCE: &str = include_str!("../data/pi-models-source.json");
+const REFRESH_CONCURRENCY: usize = 8;
 fn bundled_generated_at() -> u64 {
     serde_json::from_str::<Value>(BUNDLED_SOURCE)
         .ok()
@@ -831,7 +832,7 @@ impl Catalog {
                     (provider, result)
                 }
             }))
-            .buffer_unordered(8);
+            .buffer_unordered(REFRESH_CONCURRENCY);
             let mut failed = false;
             while let Some((provider, result)) = results.next().await {
                 match result {

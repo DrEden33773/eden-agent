@@ -26,6 +26,12 @@ pub async fn run(cli: &Cli, shell: &Shell) -> Result<i32> {
     match action {
         SessionAction::Info { path } => return info(cli, path, shell),
         SessionAction::Tree { path } => return tree(path, shell),
+        SessionAction::Metadata { path, name, tag } => {
+            crate::tui::lifecycle(cli)?
+                .rename_history(path, name.clone(), Some(tag.clone()))
+                .await?;
+            return Ok(0);
+        }
         _ => {}
     }
     if let Some((kind, arguments, target, public_only)) = copy_action(action) {

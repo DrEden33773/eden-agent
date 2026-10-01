@@ -982,8 +982,14 @@ async fn resolve_existing_session(
     cwd: &str,
 ) -> anyhow::Result<ResolvedExisting> {
     // Eden owns session persistence.
-    if std::env::var_os("EDEN_FRONTEND_ENDPOINT").is_some() {
-        return Ok(ResolvedExisting { id: session_id.into(), original_cwd: None, title: None, deferred_local_miss: false, suppress_code_restore: true });
+    if crate::eden_services::enabled() {
+        return Ok(ResolvedExisting {
+            id: session_id.into(),
+            original_cwd: None,
+            title: None,
+            deferred_local_miss: false,
+            suppress_code_restore: true,
+        });
     }
     if let Some(local_id) = xai_grok_shell::session::resolve_local_session(session_id, cwd) {
         tracing::info!(session_id = %session_id, local_id = %local_id, "Session found locally");

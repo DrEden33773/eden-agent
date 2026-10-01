@@ -1011,9 +1011,16 @@ impl AgentView {
                     filter_label: (!chat_mode).then(|| source_filter.label()),
                     filter_key_hint: (!chat_mode).then_some("f"),
                     filter_active: !chat_mode && source_filter.is_active(),
-                    header_note: None,
+                    header_note: crate::eden_services::enabled()
+                        .then_some("Search titles, previews and tags"),
                     action_keys: if chat_mode || focused_is_foreign {
                         &[]
+                    } else if crate::eden_services::enabled() {
+                        if *source_filter == crate::views::session_picker::SourceFilter::Headless {
+                            &[('r', "restore")]
+                        } else {
+                            &[('r', "rename"), ('d', "trash")]
+                        }
                     } else {
                         &[('d', "delete")]
                     },
@@ -1070,6 +1077,17 @@ impl AgentView {
                     PickerOutcome::Selected(i) => {
                         match entry_map.get(i).and_then(|e| e.as_ref()) {
                             Some(PickerItem::Fuzzy { original_index }) => {
+                                if crate::eden_services::enabled()
+                                    && let Some(entry) = entries
+                                        .as_ref()
+                                        .and_then(|entries| entries.get(*original_index))
+                                    && entry.session_kind.as_deref() == Some("trash")
+                                {
+                                    return InputOutcome::Action(Action::EdenHistory {
+                                        kind: "history-restore",
+                                        reference: entry.id.clone(),
+                                    });
+                                }
                                 // Don't clear active_modal here; dispatch_pick_session reads entries from it before clearing
                                 InputOutcome::Action(Action::PickSession(*original_index))
                             }
@@ -1209,6 +1227,30 @@ impl AgentView {
                     }
                     PickerOutcome::FilterCycled => {
                         InputOutcome::Action(Action::CycleSessionSourceFilter)
+                    }
+                    PickerOutcome::Action(key @ ('d' | 'r')) if crate::eden_services::enabled() => {
+                        let Some(crate::views::session_picker::PickerItem::Fuzzy {
+                            original_index,
+                        }) = entry_map.get(state.selected).and_then(|item| item.as_ref())
+                        else {
+                            return InputOutcome::Changed;
+                        };
+                        let Some(entry) = entries
+                            .as_ref()
+                            .and_then(|entries| entries.get(*original_index))
+                        else {
+                            return InputOutcome::Changed;
+                        };
+                        InputOutcome::Action(Action::EdenHistory {
+                            kind: if entry.session_kind.as_deref() == Some("trash") {
+                                "history-restore"
+                            } else if key == 'r' {
+                                "history-rename"
+                            } else {
+                                "history-remove"
+                            },
+                            reference: entry.id.clone(),
+                        })
                     }
                     PickerOutcome::Action('d') => {
                         *pending_delete =
@@ -1889,7 +1931,22 @@ impl AgentView {
                 // Otherwise show the normal hints plus the `d delete` action
                 // Chat mode drops the deep-search / filter / delete hints (local-disk-row actions)
                 let chat_mode = self.app_chat_mode;
-                let session_shortcuts: Vec<Shortcut> = if pending_delete.is_some() {
+                let session_shortcuts: Vec<Shortcut> = if crate::eden_services::enabled() {
+                    let labels: &[&str] =
+                        if *source_filter == crate::views::session_picker::SourceFilter::Headless {
+                            &["↑↓", "e info", "/ find", "f view", "r restore"]
+                        } else {
+                            &["↑↓", "e info", "/ find", "f view", "r name", "d trash"]
+                        };
+                    labels
+                        .iter()
+                        .map(|label| Shortcut {
+                            label,
+                            clickable: false,
+                            id: 0,
+                        })
+                        .collect()
+                } else if pending_delete.is_some() {
                     vec![
                         Shortcut {
                             label: "y confirm delete",
@@ -2013,6 +2070,10 @@ impl AgentView {
                         state,
                         content_area.width,
                     );
+                    let previews: Vec<Vec<&str>> = built
+                        .iter()
+                        .map(|entry| entry.snippet_preview.as_deref().into_iter().collect())
+                        .collect();
                     let fields_vecs: Vec<Vec<PickerField>> = built
                         .iter()
                         .map(|b| {
@@ -2031,6 +2092,7 @@ impl AgentView {
                             &filtered_indices,
                             &built,
                             &fields_vecs,
+                            &previews,
                             state,
                             Some(current_repo.as_str()),
                         );
@@ -2128,9 +2190,18 @@ impl AgentView {
                             .height
                             .saturating_sub(entries_start_y.saturating_sub(content_area.y)),
                     };
-                    if let Some(notice) = lanes.local_notice.as_deref() && entries_area.height > 0 {
-                        buf.set_stringn(entries_area.x, entries_area.y, notice, entries_area.width as usize,
-                            ratatui::style::Style::default().fg(theme.gray_dim).bg(theme.bg_base));
+                    if let Some(notice) = lanes.local_notice.as_deref()
+                        && entries_area.height > 0
+                    {
+                        buf.set_stringn(
+                            entries_area.x,
+                            entries_area.y,
+                            notice,
+                            entries_area.width as usize,
+                            ratatui::style::Style::default()
+                                .fg(theme.gray_dim)
+                                .bg(theme.bg_base),
+                        );
                         entries_area.y += 1;
                         entries_area.height -= 1;
                     }
@@ -2427,6 +2498,7 @@ mod session_picker_delete_tests {
 
     fn entry(id: &str) -> SessionPickerEntry {
         SessionPickerEntry {
+            tags: Vec::new(),
             id: id.into(),
             summary: id.into(),
             updated_at: chrono::Utc::now(),

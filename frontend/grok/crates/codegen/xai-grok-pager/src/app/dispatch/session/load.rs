@@ -192,7 +192,9 @@ fn dispatch_load_session_ungated(
     app.next_agent_id += 1;
     let mut scrollback = ScrollbackState::new();
     scrollback.set_appearance(app.appearance.clone());
-    let loading_msg = if matches!(app.restore_code, Some(true)) {
+    let loading_msg = if crate::eden_services::enabled() {
+        "Loading session…".to_owned()
+    } else if matches!(app.restore_code, Some(true)) {
         format!("Restoring code for session {}...", &session_id)
     } else {
         format!("Loading session {}...", &session_id)
@@ -702,7 +704,9 @@ fn advance_session_source_filter(
     state.selected = 0;
     state.scroll_offset = None;
     *pending_delete = None;
-    previous == SourceFilter::Headless || *source_filter == SourceFilter::Headless
+    crate::eden_services::enabled()
+        || previous == SourceFilter::Headless
+        || *source_filter == SourceFilter::Headless
 }
 /// Drop natives cached under the previous Headless policy.
 /// Keep `Some([])` on an active filter so `show_picker` stays up while the refetch loads.
@@ -1393,9 +1397,25 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
             cwd: agent.session.cwd.display().to_string(),
         });
         notify_session_ready(&app.notification_service, agent);
-        crate::eden_services::consumed(serde_json::json!({ "method": "session/loaded", "session": agent.session.session_id.as_ref().map(|id| id.0.as_ref()) }));
+        crate::eden_services::consumed(
+            serde_json::json!({ "method": "session/loaded", "session": agent.session.session_id.as_ref().map(|id| id.0.as_ref()) }),
+        );
         let loaded_identity = agent.session.session_id.clone();
         let previous = agent.eden_previous_agent.take();
+        let transfer = std::mem::take(&mut agent.eden_take_previous_draft);
+        let draft = if transfer {
+            previous
+                .and_then(|id| app.agents.get_mut(&id))
+                .map(|old| (old.prompt.stash(), old.prompt_input_mode))
+        } else {
+            None
+        };
+        if let Some((draft, mode)) = draft
+            && let Some(new) = app.agents.get_mut(&agent_id)
+        {
+            new.prompt.restore(draft);
+            new.prompt_input_mode = mode;
+        }
         if let Some(previous) = previous {
             if let Some(old) = app.agents.get_mut(&previous) {
                 if old.session.session_id == loaded_identity {
@@ -1717,6 +1737,17 @@ pub(in crate::app::dispatch) fn dispatch_show_session_picker(app: &mut AppView) 
 /// The welcome fields survive the close, so their in-flight fetches must be invalidated here.
 pub(in crate::app::dispatch) fn dispatch_session_picker_closed(app: &mut AppView) -> Vec<Effect> {
     invalidate_picker_fetch_on_dismiss(app);
+    if crate::eden_services::enabled()
+        && let Some(agent) = app.active_agent()
+        && let Some(session_id) = agent.session.session_id.clone()
+    {
+        return vec![Effect::EdenUi {
+            agent_id: agent.session.id,
+            session_id,
+            generation: 0,
+            request: crate::eden_panel::PrivateValue(serde_json::json!({"catalogCancel": true})),
+        }];
+    }
     vec![]
 }
 /// Fetch invalidation shared by every picker-dismissal path.

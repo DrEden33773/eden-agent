@@ -508,7 +508,7 @@ impl Session {
                 self.cwd(),
                 &self.0.workspace_options,
                 &self.0.events,
-                self.0.history_path.as_deref(),
+                self.history_path(),
             )?;
             let replacement = selected
                 .packages
@@ -1074,16 +1074,7 @@ impl Session {
             return Ok(());
         }
         if kernel.affected_by_contract(c::STORE, affected)? {
-            let request = match &self.0.history_path {
-                Some(path) => c::StoreRequest::Open {
-                    path: Some(path.to_string_lossy().into_owned()),
-                    session_id: self.id(),
-                },
-                None => c::StoreRequest::RestoreMemory {
-                    session_id: self.id(),
-                    records: records.to_vec(),
-                },
-            };
+            let request = self.restore_store_request(records.to_vec());
             self.configuration_host_service::<_, c::StoreReply>(c::STORE, &request)
                 .await?;
         }

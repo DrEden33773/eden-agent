@@ -1,3 +1,4 @@
+// Modified by Eden Agent for its terminal library; see frontend/grok/EDEN-FRONTEND.md.
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
 use crate::acp::model_state::ModelState;
@@ -544,6 +545,7 @@ pub(super) fn prompt_response(app: &mut AppView, prompt_id: &str) {
     use crate::app::actions::{Action, TaskResult};
     crate::app::dispatch::dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+        not_accepted: false,
             agent_id: AgentId(0),
             result: Ok(
                 acp::PromptResponse::new(acp::StopReason::EndTurn)

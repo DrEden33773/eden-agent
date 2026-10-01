@@ -18,6 +18,7 @@ struct Store {
     opened: bool,
     file: Option<File>,
     writer_lock: Option<File>,
+    draft_path: Option<std::path::PathBuf>,
     records: Vec<Record>,
     id: u64,
     failed: bool,
@@ -25,6 +26,64 @@ struct Store {
 impl Store {
     fn handle(&mut self, request: StoreRequest) -> Result<StoreReply, Fault> {
         match request {
+            StoreRequest::OpenDraft {
+                path,
+                session_id,
+                records,
+            } => {
+                if self.opened {
+                    return Err(fault("already open"));
+                }
+                validate_records(&records)?;
+                if records
+                    .iter()
+                    .any(|record| record.schema_version != 2 || record.session_id != session_id)
+                {
+                    return Err(fault("draft history must retain its v2 identity"));
+                }
+                let path = std::path::Path::new(&path);
+                let parent = path
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(std::path::Path::new("."));
+                let path = std::fs::canonicalize(parent).map_err(io)?.join(
+                    path.file_name()
+                        .ok_or_else(|| fault("history destination needs a filename"))?,
+                );
+                let writer_lock = acquire_lock(&path)?;
+                if path.try_exists().map_err(io)? {
+                    return Err(fault("draft destination already exists"));
+                }
+                self.writer_lock = Some(writer_lock);
+                self.draft_path = Some(path);
+                self.records = records;
+                self.id = session_id;
+                self.failed = false;
+                self.opened = true;
+            }
+            StoreRequest::AdmitBatch { run_id, entries } => {
+                self.available()?;
+                let pending = self.prepare(run_id, entries, None)?;
+                if let Some(path) = &self.draft_path {
+                    let mut next = self.records.clone();
+                    next.extend(pending);
+                    validate_records(&next)?;
+                    let file = match publish_open(path, &encode_transaction(&next)?) {
+                        Ok(file) => file,
+                        Err(error) => {
+                            if error.code == "PublicationUncertain" {
+                                self.failed = true;
+                            }
+                            return Err(error);
+                        }
+                    };
+                    self.file = Some(file);
+                    self.records = next;
+                    self.draft_path = None;
+                } else {
+                    self.commit(pending)?;
+                }
+            }
             StoreRequest::RestoreMemory {
                 session_id,
                 records,
@@ -205,6 +264,7 @@ impl Store {
             StoreRequest::Close => {
                 self.file.take();
                 self.writer_lock.take();
+                self.draft_path.take();
                 self.opened = false;
             }
         }
@@ -235,6 +295,16 @@ impl Store {
         entries: Vec<RecordDraft>,
         new_branch: Option<String>,
     ) -> Result<(), Fault> {
+        let pending = self.prepare(run_id, entries, new_branch)?;
+        self.commit(pending)
+    }
+
+    fn prepare(
+        &self,
+        run_id: u64,
+        entries: Vec<RecordDraft>,
+        new_branch: Option<String>,
+    ) -> Result<Vec<Record>, Fault> {
         self.available()?;
         let (mut parent_id, branch) = branch_state(&self.records)?;
         let branch = new_branch.unwrap_or(branch);
@@ -256,7 +326,7 @@ impl Store {
             });
             parent_id = Some(sequence);
         }
-        self.commit(pending)
+        Ok(pending)
     }
 
     fn commit(&mut self, pending: Vec<Record>) -> Result<(), Fault> {
@@ -309,6 +379,7 @@ fn acquire_lock(path: &std::path::Path) -> Result<File, Fault> {
 /// an unwinding panic, so a failed create cannot leave private temporary
 /// history beside the public file.
 struct PreparedHistory {
+    file: Option<File>,
     path: std::path::PathBuf,
     cleanup: bool,
 }
@@ -325,10 +396,16 @@ impl PreparedHistory {
                 std::process::id(),
                 NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
             ));
-            match OpenOptions::new().create_new(true).write(true).open(&path) {
+            match OpenOptions::new()
+                .create_new(true)
+                .read(true)
+                .write(true)
+                .open(&path)
+            {
                 Ok(file) => {
                     break (
                         Self {
+                            file: None,
                             path,
                             cleanup: true,
                         },
@@ -340,17 +417,22 @@ impl PreparedHistory {
             }
         };
         let write = file.write_all(bytes).and_then(|_| file.sync_all());
-        drop(file);
         write.map_err(io)?;
+        let mut prepared = prepared;
+        prepared.file = Some(file);
         Ok(prepared)
     }
-    fn publish(mut self, destination: &std::path::Path) -> Result<(), Fault> {
+    fn publish(mut self, destination: &std::path::Path) -> Result<File, Fault> {
         // A hard link exposes the complete synced bytes atomically and refuses
         // an existing destination, which create must never replace.
         std::fs::hard_link(&self.path, destination).map_err(io)?;
-        std::fs::remove_file(&self.path).map_err(io)?;
-        self.cleanup = false;
-        Ok(())
+        if std::fs::remove_file(&self.path).is_ok() {
+            self.cleanup = false;
+        }
+        Ok(self
+            .file
+            .take()
+            .expect("prepared history owns its synced file"))
     }
 }
 impl Drop for PreparedHistory {
@@ -362,7 +444,10 @@ impl Drop for PreparedHistory {
 }
 
 fn publish_new(path: &std::path::Path, bytes: &[u8]) -> Result<(), Fault> {
-    PreparedHistory::write(path, bytes)?.publish(path)?;
+    publish_open(path, bytes).map(|_| ())
+}
+fn publish_open(path: &std::path::Path, bytes: &[u8]) -> Result<File, Fault> {
+    let file = PreparedHistory::write(path, bytes)?.publish(path)?;
     // Persist the new directory entry where directory sync is available.
     #[cfg(unix)]
     {
@@ -371,9 +456,18 @@ fn publish_new(path: &std::path::Path, bytes: &[u8]) -> Result<(), Fault> {
             .ok_or_else(|| fault("destination parent unavailable"))?;
         File::open(parent)
             .and_then(|directory| directory.sync_all())
-            .map_err(io)?;
+            .map_err(|error| {
+                Fault::new(
+                    "PublicationUncertain",
+                    "local-history",
+                    format!(
+                        "history was published but directory sync failed; reopen it before \
+                         continuing: {error}"
+                    ),
+                )
+            })?;
     }
-    Ok(())
+    Ok(file)
 }
 
 fn fault(message: impl Into<String>) -> Fault {
@@ -406,6 +500,122 @@ eden_plugin_sdk::export_plugin!(descriptor, create);
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn draft_admission_publishes_initial_state_and_work_as_one_history() {
+        let path =
+            std::env::temp_dir().join(format!("eden-draft-admit-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut store = Store::default();
+        store
+            .handle(
+                serde_json::from_value(json!({
+                    "operation": "open_draft",
+                    "path": path,
+                    "session_id": 71,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        for kind in ["session", "composition_lock", "model_selection"] {
+            store
+                .handle(StoreRequest::Append {
+                    run_id: 0,
+                    kind: kind.into(),
+                    payload: json!({}),
+                })
+                .unwrap();
+        }
+        assert!(
+            !path.exists(),
+            "configuration alone must not create saved history"
+        );
+        assert_eq!(
+            Store::default()
+                .handle(StoreRequest::Open {
+                    path: Some(path.to_string_lossy().into()),
+                    session_id: 71
+                })
+                .unwrap_err()
+                .code,
+            "WriterConflict"
+        );
+        let reply = store
+            .handle(
+                serde_json::from_value(json!({
+                    "operation": "admit_batch",
+                    "run_id": 4,
+                    "entries": [{
+                        "kind": "work_admitted",
+                        "payload": { "command": "printf kept" },
+                    }],
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let durable = decode_records(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&durable).unwrap(),
+            serde_json::to_value(&reply.records).unwrap()
+        );
+        assert_eq!(durable.last().unwrap().kind, "work_admitted");
+        store.handle(StoreRequest::Close).unwrap();
+        let mut reopened = Store::default();
+        assert_eq!(
+            reopened
+                .handle(StoreRequest::Open {
+                    path: Some(path.to_string_lossy().into()),
+                    session_id: 71
+                })
+                .unwrap()
+                .sequence,
+            4
+        );
+        reopened.handle(StoreRequest::Close).unwrap();
+        clean(&path);
+    }
+
+    #[test]
+    fn draft_close_discards_staged_state_and_admission_never_overwrites() {
+        let path =
+            std::env::temp_dir().join(format!("eden-draft-discard-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let open = || {
+            serde_json::from_value(json!({
+                "operation": "open_draft",
+                "path": path,
+                "session_id": 72,
+            }))
+            .unwrap()
+        };
+        let mut store = Store::default();
+        store.handle(open()).unwrap();
+        store
+            .handle(StoreRequest::Append {
+                run_id: 0,
+                kind: "session".into(),
+                payload: json!({}),
+            })
+            .unwrap();
+        store.handle(StoreRequest::Close).unwrap();
+        assert!(!path.exists());
+        store.handle(open()).unwrap();
+        std::fs::write(&path, b"external destination").unwrap();
+        let admit = || {
+            serde_json::from_value(json!({
+                "operation": "admit_batch",
+                "run_id": 1,
+                "entries": [{ "kind": "work_admitted", "payload": {} }],
+            }))
+            .unwrap()
+        };
+        assert!(store.handle(admit()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"external destination");
+        assert_eq!(store.handle(StoreRequest::Read).unwrap().sequence, 0);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(store.handle(admit()).unwrap().sequence, 1);
+        store.handle(StoreRequest::Close).unwrap();
+        clean(&path);
+    }
     #[test]
     fn checkpoint_rejects_stale_head_without_partial_notes() {
         let mut store = Store::default();

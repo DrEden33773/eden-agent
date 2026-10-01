@@ -679,7 +679,16 @@ impl Session {
     /// Identify the durable writer owned by this Session for explicit frontend reattachment.
     /// Memory sessions have no saved history path.
     pub fn history_path(&self) -> Option<&Path> {
-        self.0.history_path.as_deref()
+        self.0.history_path.get().map(std::path::PathBuf::as_path)
+    }
+    /// A draft has a reserved destination but no acknowledged durable history yet.
+    pub fn is_draft(&self) -> bool {
+        self.0.draft_path.is_some() && self.0.history_path.get().is_none()
+    }
+    /// Locate this writer for host registration, including an unpublished draft.
+    /// Only history_path proves that admission has acknowledged a saved history.
+    pub fn history_destination(&self) -> Option<&Path> {
+        self.history_path().or(self.0.draft_path.as_deref())
     }
     /// The authoritative working directory recorded for this Session.
     pub fn cwd(&self) -> &str {
@@ -690,6 +699,24 @@ impl Session {
         self.start(true, move |session, run_id, cancel| async move {
             let result = async {
                 let records = session.history().await?;
+                if session.is_draft() {
+                    if !records.iter().any(|record| record.sequence == target)
+                        || branch.trim().is_empty()
+                    {
+                        return Err(Fault::new(
+                            "InvalidInput",
+                            "navigation",
+                            "select an existing node and a branch name",
+                        ));
+                    }
+                    session
+                        .save_intent(
+                            run_id,
+                            json!({ "kind": "navigate", "target": target, "branch": branch }),
+                            &cancel,
+                        )
+                        .await?;
+                }
                 let (head, old_branch) = eden_protocol::history::branch_state(&records)?;
                 let old_path = eden_protocol::history::active_path(&records)?;
                 tokio::select! {
@@ -801,6 +828,17 @@ impl Session {
                 Ok(value) => value,
                 Err(error) => return Terminal::failed(error),
             };
+            if session.is_draft()
+                && let Err(error) = session
+                    .save_intent(
+                        run_id,
+                        json!({ "kind": "compact", "instructions": instructions }),
+                        &cancel,
+                    )
+                    .await
+            {
+                return Terminal::failed(error);
+            }
             session
                 .0
                 .kernel
@@ -902,41 +940,69 @@ impl Session {
     }
     /// Rename without replacing tags; the guarded run reads the latest durable metadata.
     pub fn rename(&self, name: String) -> Result<u64, Fault> {
-        self.start(true, move |session, run_id, _| async move {
-            let result = async {
-                let records = session.history().await?;
-                let tags = records
-                    .iter()
-                    .rev()
-                    .find(|record| record.kind == "session_metadata")
-                    .map(|record| record.payload["tags"].clone())
-                    .unwrap_or_else(|| json!([]));
-                session
-                    .commit(
-                        run_id,
-                        "session_metadata",
-                        json!({ "name": name, "tags": tags }),
-                    )
-                    .await?;
-                Ok(json!("Session renamed."))
-            }
-            .await;
-            as_terminal(result)
-        })
+        self.set_metadata_inner(name, None)
     }
     /// Save the session's name and tags as a committed record.
     pub fn set_metadata(&self, name: String, tags: Vec<String>) -> Result<u64, Fault> {
-        self.start(true, move |session, run_id, _| async move {
-            as_terminal(
+        self.set_metadata_inner(name, Some(tags))
+    }
+    fn set_metadata_inner(&self, name: String, tags: Option<Vec<String>>) -> Result<u64, Fault> {
+        let name = name.trim().to_owned();
+        if self.is_draft() && name.is_empty() {
+            return Err(Fault::new(
+                "InvalidInput",
+                "session",
+                "enter a name to save this draft",
+            ));
+        }
+        self.start(true, move |session, run_id, cancel| async move {
+            let result = async {
+                let records = session.history().await?;
+                let previous = records
+                    .iter()
+                    .rev()
+                    .find(|record| record.kind == "session_metadata");
+                let tags = tags.map(|tags| json!(tags)).unwrap_or_else(|| {
+                    previous
+                        .map(|record| record.payload["tags"].clone())
+                        .unwrap_or_else(|| json!([]))
+                });
+                let activity = records
+                    .iter()
+                    .filter_map(|record| {
+                        if record.kind == "work_admitted" {
+                            record.payload["timestamp_ms"].as_u64().map(|v| v / 1000)
+                        } else if record.kind == "session_metadata" {
+                            record.payload["activity_unix"].as_u64()
+                        } else {
+                            None
+                        }
+                    })
+                    .max()
+                    .or_else(|| {
+                        session
+                            .history_path()
+                            .and_then(|path| path.metadata().ok())
+                            .and_then(|m| m.modified().ok())
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|t| t.as_secs())
+                    });
+                if session.is_draft() {
+                    session
+                        .save_intent(run_id, json!({ "kind": "save", "name": name }), &cancel)
+                        .await?;
+                }
                 session
                     .commit(
                         run_id,
                         "session_metadata",
-                        json!({ "name": name, "tags": tags }),
+                        json!({ "name": name, "tags": tags, "activity_unix": activity }),
                     )
-                    .await
-                    .map(|_| json!("Session metadata saved.")),
-            )
+                    .await?;
+                Ok(json!("Session metadata saved."))
+            }
+            .await;
+            as_terminal(result)
         })
     }
     /// Choose delivery modes even during a model run. The queue transaction orders this

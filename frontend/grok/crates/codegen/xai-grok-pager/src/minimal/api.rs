@@ -1,3 +1,4 @@
+// Modified by Eden Agent for native host integration; see the accompanying EDEN-FRONTEND.md.
 //! Everything the `xai-grok-pager-minimal` crate reads and renders through.
 //!
 //! **If you don't work on the minimal (scrollback-native) render mode, you can ignore this file.**
@@ -735,6 +736,7 @@ pub fn build_grouped_picker_entries<'a>(
     filtered_indices: &[usize],
     built: &'a [SessionEntryData],
     fields_vecs: &'a [Vec<PickerField<'a>>],
+    previews: &'a [Vec<&'a str>],
     state: &PickerState,
     current_repo: Option<&str>,
 ) -> (Vec<PickerEntry<'a>>, Vec<bool>) {
@@ -743,6 +745,7 @@ pub fn build_grouped_picker_entries<'a>(
         filtered_indices,
         built,
         fields_vecs,
+        previews,
         state,
         current_repo,
     )

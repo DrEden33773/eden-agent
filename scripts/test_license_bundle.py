@@ -62,6 +62,22 @@ class LicenseBundleTests(unittest.TestCase):
         index = json.loads((output / "index.json").read_text(encoding="utf-8"))
         self.assertEqual(set(index[0]["files"]), {f"named-1.0.0/{path}" for path in files})
 
+    def test_frontend_notice_fallback_requires_matching_version_and_declared_license(self) -> None:
+        package = self.package("agent-client-protocol", "0.10.4")
+        package["license"] = "Apache-2.0"
+        entry = licenses.plan(ROOT, [package])[0]
+        notice = ROOT / "frontend/grok/THIRD-PARTY-NOTICES"
+        self.assertEqual(
+            entry.files[pathlib.Path("GROK-THIRD-PARTY-NOTICES")].read_bytes(), notice.read_bytes()
+        )
+        package["version"] = "99.0.0"
+        with self.assertRaises(RuntimeError):
+            licenses.plan(ROOT, [package])
+        package["version"] = "0.10.4"
+        package["license"] = "GPL-3.0-only"
+        with self.assertRaises(RuntimeError):
+            licenses.plan(ROOT, [package])
+
     def test_declared_license_cannot_be_missing_or_escape_even_when_another_license_exists(
         self,
     ) -> None:

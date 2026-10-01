@@ -132,6 +132,14 @@ class Terminal:
                 elif command == "K" and 0 <= self.row < self.height:
                     start = 0 if args == "2" else min(self.column, self.width)
                     self.cells[self.row][start:] = [" "] * (self.width - start)
+            elif data.startswith(("\x1b]", "\x1bP", "\x1b_")):
+                # OSC, DCS and APC strings are terminal controls, including window titles.
+                # Preserve partial strings until their terminator arrives in a later read.
+                end = re.search(r"\x07|\x1b\\", data[2:])
+                if end is None:
+                    self.pending = data
+                    break
+                data = data[2 + end.end() :]
             elif data.startswith("\x1b"):
                 if len(data) == 1:
                     self.pending = data

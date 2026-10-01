@@ -21,6 +21,10 @@ pub struct SavedSession {
     pub messages: usize,
     pub has_content: bool,
     pub summary: Option<String>,
+    pub last_summary: Option<String>,
+    pub activity: Option<u64>,
+    pub model: Option<String>,
+    pub has_origin: bool,
 }
 fn fault(error: impl std::fmt::Display) -> Fault {
     Fault::new("SessionDirectory", "session-directory", error.to_string())
@@ -43,12 +47,30 @@ fn describe_records(
         .count();
     let has_content = messages > 0
         || records.iter().any(|record| {
-            record.kind == "user_shell" || record.payload["type"] == "tool_execution"
+            matches!(record.kind.as_str(), "user_shell" | "work_admitted")
+                || record.payload["type"] == "tool_execution"
         });
     let summary = records
         .iter()
         .find_map(|record| {
-            if record.kind == "user_shell" {
+            if record.kind == "work_admitted" {
+                let intent = &record.payload["intent"];
+                intent["command"]
+                    .as_str()
+                    .map(|s| format!("!{s}"))
+                    .or_else(|| {
+                        (intent["kind"] == "command")
+                            .then(|| intent["name"].as_str().map(|name| format!("/{name}")))
+                            .flatten()
+                    })
+                    .or_else(|| {
+                        intent["content"].as_array().and_then(|blocks| {
+                            blocks
+                                .iter()
+                                .find_map(|block| block["text"].as_str().map(str::to_owned))
+                        })
+                    })
+            } else if record.kind == "user_shell" {
                 record.payload["command"]
                     .as_str()
                     .map(|command| format!("!{command}"))
@@ -70,6 +92,53 @@ fn describe_records(
                 .take(96)
                 .collect()
         });
+    let last_summary = records
+        .iter()
+        .rev()
+        .find_map(|record| {
+            (record.payload["type"] == "message")
+                .then(|| {
+                    record.payload["content"]
+                        .as_array()
+                        .and_then(|blocks| blocks.iter().find_map(|block| block["text"].as_str()))
+                })
+                .flatten()
+        })
+        .map(|text| {
+            text.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(140)
+                .collect()
+        });
+    let activity = records
+        .iter()
+        .filter_map(|record| {
+            if record.kind == "work_admitted" {
+                record.payload["timestamp_ms"].as_u64().map(|v| v / 1000)
+            } else if record.kind == "session_metadata" {
+                record.payload["activity_unix"].as_u64()
+            } else {
+                None
+            }
+        })
+        .max();
+    let model = records.iter().rev().find_map(|record| {
+        let target = &record.payload["selection"];
+        (record.kind == "model_selection")
+            .then(|| {
+                Some(format!(
+                    "{}/{}",
+                    target["provider"].as_str()?,
+                    target["model"].as_str()?
+                ))
+            })
+            .flatten()
+    });
+    let has_origin = records
+        .first()
+        .is_some_and(|r| !r.payload["origin"].is_null());
     SavedSession {
         session_id: records.first().map(|r| r.session_id),
         cwd: records
@@ -101,6 +170,10 @@ fn describe_records(
         messages,
         has_content,
         summary,
+        last_summary,
+        activity,
+        model,
+        has_origin,
     }
 }
 impl Session {
@@ -153,27 +226,58 @@ impl Session {
             .await
             .map_err(fault)?
     }
-    /// Delete an explicitly reviewed identity only while its ordinary writer lock is available.
-    /// The sidecar remains in place so a concurrent opener cannot acquire a different lock inode.
-    pub async fn delete_saved_session(path: PathBuf, expected_session: u64) -> Result<(), Fault> {
+    /// Update a stopped history without loading its plugins. The ordinary writer lock
+    /// arbitrates with execution hosts and the existing activity time is retained.
+    pub async fn saved_metadata(
+        path: PathBuf,
+        name: String,
+        tags: Option<Vec<String>>,
+    ) -> Result<(), Fault> {
         tokio::task::spawn_blocking(move || {
+            use std::io::Write;
             let path = std::fs::canonicalize(path).map_err(fault)?;
-            let mut lock_path = path.as_os_str().to_owned();
-            lock_path.push(".lock");
+            let mut sidecar = path.as_os_str().to_owned();
+            sidecar.push(".lock");
             let lock = std::fs::OpenOptions::new()
                 .create(true)
                 .truncate(false)
                 .read(true)
                 .write(true)
-                .open(lock_path)
+                .open(sidecar)
                 .map_err(fault)?;
             lock.try_lock()
-                .map_err(|_| fault("session is active or its writer lock is unavailable"))?;
-            let scan = eden_kernel::history::inspect(&path)?;
-            if scan.records.first().map(|r| r.session_id) != Some(expected_session) {
-                return Err(fault("session identity changed; inspect it again"));
+                .map_err(|_| fault("another writer owns this history"))?;
+            let records = eden_kernel::history::read(&path)?;
+            let first = records
+                .first()
+                .ok_or_else(|| fault("history has no identity"))?;
+            if first.schema_version != 2 {
+                return Err(fault("upgrade a copy before renaming legacy history"));
             }
-            std::fs::remove_file(path).map_err(fault)
+            let info = describe_records(path.clone(), records.clone(), None);
+            let (parent_id, branch) = eden_protocol::history::branch_state(&records)?;
+            let record = Record {
+                schema_version: 2,
+                session_id: first.session_id,
+                sequence: records.len() as u64 + 1,
+                run_id: 0,
+                parent_id,
+                branch,
+                kind: "session_metadata".into(),
+                payload: serde_json::json!({
+                    "name": name.trim(),
+                    "tags": tags.unwrap_or(info.tags),
+                    "activity_unix": info.activity.or(info.modified),
+                }),
+            };
+            let bytes = eden_protocol::history::encode_transaction(&[record])?;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .map_err(fault)?;
+            file.write_all(&bytes)
+                .and_then(|_| file.sync_all())
+                .map_err(fault)
         })
         .await
         .map_err(fault)?
@@ -330,7 +434,7 @@ mod tests {
         assert_eq!(full["summary"], "!printf OLD_NONEMPTY_MARKER");
     }
     #[tokio::test]
-    async fn active_history_cannot_be_deleted_and_bad_history_stays_visible() {
+    async fn active_history_cannot_be_renamed_and_bad_history_stays_visible() {
         let directory = std::env::temp_dir().join(format!("eden-directory-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("session.jsonl");
@@ -343,11 +447,11 @@ mod tests {
         let lock = std::fs::File::create(directory.join("session.jsonl.lock")).unwrap();
         lock.try_lock().unwrap();
         assert!(
-            Session::delete_saved_session(path.clone(), 1)
+            Session::saved_metadata(path.clone(), "locked".into(), None)
                 .await
                 .unwrap_err()
                 .message
-                .contains("active")
+                .contains("writer")
         );
         assert!(path.exists());
         drop(lock);

@@ -5,14 +5,18 @@ use xai_acp_lib::{AcpAgentTx, acp_send};
 
 pub(crate) fn enabled() -> bool {
     #[cfg(test)]
-    if TEST_ENABLED.with(|enabled| enabled.get()) { return true; }
-    std::env::var_os("EDEN_FRONTEND_ENDPOINT").is_some()
+    if TEST_ENABLED.with(|enabled| enabled.get()) {
+        return true;
+    }
+    cfg!(not(test))
 }
 
 pub(crate) fn command_connected(name: &str) -> bool {
     matches!(
         name,
-        "resume"
+        "new"
+            | "clear"
+            | "resume"
             | "rename"
             | "auth"
             | "login"
@@ -101,7 +105,6 @@ pub(crate) fn action_connected(id: crate::actions::ActionId) -> bool {
             | ActionId::InterjectPrompt
             | ActionId::Rewind
             | ActionId::KillBgTask
-            | ActionId::NewSession
             | ActionId::NewSessionInWorktree
             | ActionId::ExitSession
             | ActionId::OpenDashboard
@@ -319,28 +322,61 @@ thread_local! { static TEST_ENABLED: std::cell::Cell<bool> = const { std::cell::
 pub(crate) struct TestEnabled;
 #[cfg(test)]
 pub(crate) fn test_enabled() -> TestEnabled {
-    TEST_ENABLED.with(|enabled| { assert!(!enabled.replace(true)); });
+    TEST_ENABLED.with(|enabled| {
+        assert!(!enabled.replace(true));
+    });
     TestEnabled
 }
 #[cfg(test)]
 impl Drop for TestEnabled {
-    fn drop(&mut self) { TEST_ENABLED.with(|enabled| enabled.set(false)); }
+    fn drop(&mut self) {
+        TEST_ENABLED.with(|enabled| enabled.set(false));
+    }
 }
 
 /// Progressive lists use the same request generation and dispatch gate as final lists.
-pub(crate) fn directory_progress(notification: &agent_client_protocol::ExtNotification, app: &mut crate::app::app_view::AppView) -> bool {
+pub(crate) fn directory_progress(
+    notification: &agent_client_protocol::ExtNotification,
+    app: &mut crate::app::app_view::AppView,
+) -> bool {
     use crate::app::actions::{Action, TaskResult};
     use crate::views::session_picker_surface::SessionPickerHost;
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(notification.params.get()) else { return false; };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(notification.params.get()) else {
+        return false;
+    };
     let picker = &value["picker"];
-    let host = match picker["host"].as_str() { Some("AgentModal") => SessionPickerHost::AgentModal, Some("Welcome") => SessionPickerHost::Welcome, Some("Dashboard") => SessionPickerHost::Dashboard, _ => return false };
-    let Some(generation) = picker["generation"].as_u64() else { return false; };
-    let Some(seq) = picker["seq"].as_u64() else { return false; };
+    let host = match picker["host"].as_str() {
+        Some("AgentModal") => SessionPickerHost::AgentModal,
+        Some("Welcome") => SessionPickerHost::Welcome,
+        Some("Dashboard") => SessionPickerHost::Dashboard,
+        _ => return false,
+    };
+    let Some(generation) = picker["generation"].as_u64() else {
+        return false;
+    };
+    let Some(seq) = picker["seq"].as_u64() else {
+        return false;
+    };
     let query = picker["query"].as_str().map(str::to_owned);
-    let Ok(sessions) = crate::app::effects::session_list::parse_session_picker_entries_with(value, crate::app::effects::session_list::LocalPresence::Relabel, |_| Ok(Default::default())) else { return false; };
-    let effects = crate::app::dispatch::dispatch(Action::TaskComplete(TaskResult::SessionListLoaded {
-        host, generation, sessions, partial: None, scope: xai_grok_shell::session::unified_list::ListScope::Cwd, seq, query,
-    }), app);
+    let Ok(sessions) = crate::app::effects::session_list::parse_session_picker_entries_with(
+        value,
+        crate::app::effects::session_list::LocalPresence::Relabel,
+        |_| Ok(Default::default()),
+    ) else {
+        return false;
+    };
+    let effects = crate::app::dispatch::dispatch(
+        Action::TaskComplete(TaskResult::SessionListLoaded {
+            host,
+            generation,
+            sessions,
+            partial: None,
+            scope: xai_grok_shell::session::unified_list::ListScope::Cwd,
+            seq,
+            query,
+        }),
+        app,
+    );
     app.pending_effects.extend(effects);
     true
 }
@@ -353,35 +389,66 @@ struct FrameTrace {
 thread_local! { static FRAME_TRACE: std::cell::RefCell<FrameTrace> = std::cell::RefCell::new(FrameTrace::default()); }
 /// Observations are retained until the terminal writer acknowledges the frame that follows dispatch.
 pub(crate) fn consumed(value: serde_json::Value) -> bool {
-    if std::env::var_os("EDEN_FRONTEND_TRACE").is_none() { return false; }
+    if std::env::var_os("EDEN_FRONTEND_TRACE").is_none() {
+        return false;
+    }
     FRAME_TRACE.with(|trace| trace.borrow_mut().consumed.push(value));
     true
 }
 pub(crate) fn drawn(sequence: u64, app: &crate::app::app_view::AppView) {
-    if std::env::var_os("EDEN_FRONTEND_TRACE").is_none() { return; }
+    if std::env::var_os("EDEN_FRONTEND_TRACE").is_none() {
+        return;
+    }
     FRAME_TRACE.with(|trace| {
         let mut trace = trace.borrow_mut();
         let mut receipts = std::mem::take(&mut trace.consumed);
-        let active = match app.active_view { crate::app::app_view::ActiveView::Agent(id) => app.agents.get(&id), _ => None };
+        let active = match app.active_view {
+            crate::app::app_view::ActiveView::Agent(id) => app.agents.get(&id),
+            _ => None,
+        };
         for receipt in &mut receipts {
-            receipt["view"] = serde_json::json!(active.and_then(|agent| agent.session.session_id.as_ref()).map(|id| id.0.as_ref()));
-            receipt["ready"] = serde_json::json!(active.is_some_and(|agent| !agent.session.loading_replay));
+            receipt["view"] = serde_json::json!(
+                active
+                    .and_then(|agent| agent.session.session_id.as_ref())
+                    .map(|id| id.0.as_ref())
+            );
+            receipt["ready"] =
+                serde_json::json!(active.is_some_and(|agent| !agent.session.loading_replay));
         }
-        if !receipts.is_empty() { trace.queued.push_back((sequence, receipts)); }
+        if !receipts.is_empty() {
+            trace.queued.push_back((sequence, receipts));
+        }
     });
 }
 pub(crate) fn written(sequence: u64) {
     use std::io::Write;
-    let Some(path) = std::env::var_os("EDEN_FRONTEND_TRACE") else { return; };
+    let Some(path) = std::env::var_os("EDEN_FRONTEND_TRACE") else {
+        return;
+    };
     FRAME_TRACE.with(|trace| {
         let mut trace = trace.borrow_mut();
-        while trace.queued.front().is_some_and(|(target, _)| *target <= sequence) {
+        while trace
+            .queued
+            .front()
+            .is_some_and(|(target, _)| *target <= sequence)
+        {
             let (_, receipts) = trace.queued.pop_front().unwrap();
             for mut receipt in receipts {
                 receipt["direction"] = serde_json::json!("frame");
-                receipt["time_ns"] = serde_json::json!(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_nanos()).unwrap_or_default());
-                if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-                    let mut line = receipt.to_string().into_bytes(); line.push(b'\n'); let _ = file.write_all(&line);
+                receipt["time_ns"] = serde_json::json!(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|duration| duration.as_nanos())
+                        .unwrap_or_default()
+                );
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                {
+                    let mut line = receipt.to_string().into_bytes();
+                    line.push(b'\n');
+                    let _ = file.write_all(&line);
                 }
             }
         }

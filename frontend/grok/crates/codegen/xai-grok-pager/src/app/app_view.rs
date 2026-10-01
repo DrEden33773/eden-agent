@@ -266,6 +266,8 @@ fn reconnect_success_hides_mismatch(current: Option<&str>, incoming: &str) -> bo
 /// Entry from the session list wire: welcome/resume pickers and non-leader dashboard roster fallback (`session_picker_entry_to_roster`).
 #[derive(Debug, Clone)]
 pub struct SessionPickerEntry {
+    /// Public saved-history tags participate in Eden catalog search.
+    pub tags: Vec<String>,
     pub id: String,
     pub summary: String,
     pub updated_at: chrono::DateTime<chrono::Utc>,
@@ -1345,6 +1347,21 @@ impl AppView {
         bootstrap_acp_commands: Vec<agent_client_protocol::AvailableCommand>,
         escape_writer: crate::render::draw::EscapeWriter,
     ) -> Self {
+        Self::new_at(
+            acp_tx,
+            models,
+            bootstrap_acp_commands,
+            escape_writer,
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        )
+    }
+    pub fn new_at(
+        acp_tx: AcpAgentTx,
+        models: ModelState,
+        bootstrap_acp_commands: Vec<agent_client_protocol::AvailableCommand>,
+        escape_writer: crate::render::draw::EscapeWriter,
+        cwd: PathBuf,
+    ) -> Self {
         let slash_mru =
             std::rc::Rc::new(std::cell::RefCell::new(crate::slash::mru::SlashMru::new()));
         let command_tags =
@@ -1362,10 +1379,8 @@ impl AppView {
             registry: ActionRegistry::defaults(),
             settings_registry: Arc::new(crate::settings::SettingsRegistry::defaults()),
             current_ui: xai_grok_shell::agent::config::UiConfig::default(),
-            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            cwd_has_git_ancestor: std::env::current_dir()
-                .ok()
-                .is_some_and(|c| c.ancestors().any(|p| p.join(".git").exists())),
+            cwd: cwd.clone(),
+            cwd_has_git_ancestor: cwd.ancestors().any(|p| p.join(".git").exists()),
             acp_tx,
             bundle_state: BundleState::default(),
             scratch: ScratchBuffer::new(),
@@ -2236,7 +2251,10 @@ impl AppView {
         if !matches!(ev, Event::Resize(..))
             && let ActiveView::Agent(id) = self.active_view
             && let Some(agent) = self.agents.get_mut(&id)
-            && matches!(agent.active_modal, Some(crate::views::modal::ActiveModal::Eden { .. }))
+            && matches!(
+                agent.active_modal,
+                Some(crate::views::modal::ActiveModal::Eden { .. })
+            )
         {
             return agent.handle_input(ev, &self.registry);
         }
@@ -3366,6 +3384,12 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             header_note: None,
             action_keys: if ctx.chat_mode || focused_is_foreign {
                 &[]
+            } else if crate::eden_services::enabled() {
+                if source_filter == crate::views::session_picker::SourceFilter::Headless {
+                    &[('r', "restore")]
+                } else {
+                    &[('r', "rename"), ('d', "trash")]
+                }
             } else {
                 &[('d', "delete")]
             },
@@ -3423,6 +3447,18 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
         match outcome {
             PickerOutcome::Selected(i) => match entry_map.get(i).and_then(|e| e.as_ref()) {
                 Some(PickerItem::Fuzzy { original_index }) => {
+                    if crate::eden_services::enabled()
+                        && let Some(entry) = ctx
+                            .sp_entries
+                            .as_ref()
+                            .and_then(|entries| entries.get(*original_index))
+                        && entry.session_kind.as_deref() == Some("trash")
+                    {
+                        return InputOutcome::Action(Action::EdenHistory {
+                            kind: "history-restore",
+                            reference: entry.id.clone(),
+                        });
+                    }
                     return InputOutcome::Action(Action::PickSession(*original_index));
                 }
                 Some(PickerItem::Content { hit_index }) => {
@@ -3543,6 +3579,32 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             }
             PickerOutcome::FilterCycled => {
                 return InputOutcome::Action(Action::CycleSessionSourceFilter);
+            }
+            PickerOutcome::Action(key @ ('d' | 'r')) if crate::eden_services::enabled() => {
+                let Some(crate::views::session_picker::PickerItem::Fuzzy { original_index }) =
+                    entry_map
+                        .get(ctx.sp_state.selected)
+                        .and_then(|item| item.as_ref())
+                else {
+                    return InputOutcome::Changed;
+                };
+                let Some(entry) = ctx
+                    .sp_entries
+                    .as_ref()
+                    .and_then(|entries| entries.get(*original_index))
+                else {
+                    return InputOutcome::Changed;
+                };
+                return InputOutcome::Action(Action::EdenHistory {
+                    kind: if entry.session_kind.as_deref() == Some("trash") {
+                        "history-restore"
+                    } else if key == 'r' {
+                        "history-rename"
+                    } else {
+                        "history-remove"
+                    },
+                    reference: entry.id.clone(),
+                });
             }
             PickerOutcome::Action('d') => {
                 *ctx.sp_pending_delete =
@@ -4238,14 +4300,24 @@ impl AppView {
     fn draw_inner(&mut self, terminal: &mut PagerTerminal) {
         // Eden attaches an existing host; the upstream Welcome menu is not a startup view.
         if crate::eden_services::enabled() && matches!(self.active_view, ActiveView::Welcome) {
-            let status = self.welcome_toast.as_ref().map(|(message, _)| message.as_str())
+            let status = self
+                .welcome_toast
+                .as_ref()
+                .map(|(message, _)| message.as_str())
                 .unwrap_or("Connecting to Eden Session…  Ctrl+C to exit");
             let _ = terminal.draw(|frame| {
                 let area = frame.area();
-                let content = ratatui::layout::Rect { x: area.x + 2, y: area.y + area.height / 3,
-                    width: area.width.saturating_sub(4), height: area.height.saturating_sub(area.height / 3) };
-                frame.render_widget(ratatui::widgets::Paragraph::new(format!("Eden\n\n{status}"))
-                    .wrap(ratatui::widgets::Wrap { trim: false }), content);
+                let content = ratatui::layout::Rect {
+                    x: area.x + 2,
+                    y: area.y + area.height / 3,
+                    width: area.width.saturating_sub(4),
+                    height: area.height.saturating_sub(area.height / 3),
+                };
+                frame.render_widget(
+                    ratatui::widgets::Paragraph::new(format!("Eden\n\n{status}"))
+                        .wrap(ratatui::widgets::Wrap { trim: false }),
+                    content,
+                );
             });
             return;
         }

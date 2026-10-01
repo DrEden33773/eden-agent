@@ -483,8 +483,16 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         crate::app::workspace_sync::request(app);
     }
     match result {
-        TaskResult::EdenUi { agent_id, generation, result } => {
-            if let Some(action) = crate::eden_panel::receive(app, agent_id, generation, result) { dispatch(action, app) } else { vec![] }
+        TaskResult::EdenUi {
+            agent_id,
+            generation,
+            result,
+        } => {
+            if let Some(action) = crate::eden_panel::receive(app, agent_id, generation, result) {
+                dispatch(action, app)
+            } else {
+                vec![]
+            }
         }
         TaskResult::WithPinnedMemoryMode { .. } => {
             unreachable!("pinned memory mode wrapper is removed before task-result dispatch")
@@ -851,12 +859,14 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             vec![]
         }
         TaskResult::PromptResponse {
+            not_accepted,
             agent_id,
             result,
             http_status,
             prompt_id,
         } => {
-            let effects = handle_prompt_response(app, agent_id, result, http_status, prompt_id);
+            let effects =
+                handle_prompt_response(app, agent_id, result, http_status, prompt_id, not_accepted);
             app.refresh_status_line_for(agent_id);
             effects
         }
@@ -909,17 +919,42 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         }
         TaskResult::EdenModelPersisted { agent_id, result } => {
             refresh_open_settings_modals(app);
-            let (message, detail) = match result { Ok(()) => ("Current model and new-session default saved".to_string(), None), Err(error) => (if error.contains("Current session changed") { "Current model changed; default was not saved.".into() } else { "Model operation failed; see the transcript.".into() }, Some(error)) };
+            let (message, detail) = match result {
+                Ok(()) => (
+                    "Current model and new-session default saved".to_string(),
+                    None,
+                ),
+                Err(error) => (
+                    if error.contains("Current session changed") {
+                        "Current model changed; default was not saved.".into()
+                    } else {
+                        "Model operation failed; see the transcript.".into()
+                    },
+                    Some(error),
+                ),
+            };
             if let Some(agent) = app.agents.get_mut(&agent_id) {
-                if let Some(detail) = detail { agent.scrollback.push_block(RenderBlock::system(detail)); }
-                if let Some(crate::views::modal::ActiveModal::Settings { state }) = agent.active_modal.as_mut() { state.eden_status = Some(message.clone()); }
+                if let Some(detail) = detail {
+                    agent.scrollback.push_block(RenderBlock::system(detail));
+                }
+                if let Some(crate::views::modal::ActiveModal::Settings { state }) =
+                    agent.active_modal.as_mut()
+                {
+                    state.eden_status = Some(message.clone());
+                }
                 agent.show_toast(&message);
             }
             vec![]
         }
         TaskResult::PreferredModelPersisted { result } => {
             // Eden default result reports partial scope failure without false rollback.
-            if crate::eden_services::enabled() { app.show_toast(&match result { Ok(()) => "Current model and new-session default saved".to_string(), Err(error) => error }); return vec![]; }
+            if crate::eden_services::enabled() {
+                app.show_toast(&match result {
+                    Ok(()) => "Current model and new-session default saved".to_string(),
+                    Err(error) => error,
+                });
+                return vec![];
+            }
             if let Err(err) = result
                 && let Some(agent) = get_active_agent_mut(app)
             {
@@ -1473,7 +1508,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         } => handle_coding_data_sharing_failed(app, agent_id, error, seq),
         TaskResult::RenameSessionComplete { agent_id, title } => {
             if let Some(agent) = app.agents.get_mut(&agent_id) {
-                if crate::eden_services::enabled() { agent.display_name = Some(title.clone()); }
+                if crate::eden_services::enabled() {
+                    agent.display_name = Some(title.clone());
+                }
                 let safe = crate::views::session_title::sanitize_display_text(&title);
                 agent
                     .scrollback

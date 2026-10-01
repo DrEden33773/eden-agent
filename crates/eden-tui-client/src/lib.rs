@@ -37,6 +37,10 @@ pub struct State {
     #[serde(default)]
     pub cwd: String,
     pub closed: bool,
+    #[serde(default)]
+    pub draft: bool,
+    #[serde(default)]
+    pub reviewed_stop: bool,
     pub active_run: Option<u64>,
     #[serde(default)]
     pub read_only: bool,

@@ -585,6 +585,15 @@ impl<T> Admission<T> {
     }
 }
 impl Hub {
+    /// Hosts use this under their admission lock to retain a draft owned by another consumer.
+    pub fn has_attachments(&self) -> bool {
+        !self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .attachments
+            .is_empty()
+    }
     /// Attach a named live frontend. Detaching never cancels a run or a waiting dialog.
     pub fn attach(self: &Arc<Self>, frontend: &str) -> Result<u64, Fault> {
         if !["tui", "web"].contains(&frontend) {

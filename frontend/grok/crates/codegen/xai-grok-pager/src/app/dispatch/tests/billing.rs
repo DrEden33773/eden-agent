@@ -1,3 +1,4 @@
+// Modified by Eden Agent for its terminal library; see frontend/grok/EDEN-FRONTEND.md.
 //! Tests for credit-limit upsells, paywall gating, and auto-topup.
 
 use super::*;
@@ -1361,6 +1362,7 @@ fn free_usage_failure_opens_paywall_modal() {
     // 4. Turn-end RPC error opens the upsell modal.
     let _ = dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
+            not_accepted: false,
             agent_id: id,
             result: Err("rate limited".into()),
             http_status: Some(429),

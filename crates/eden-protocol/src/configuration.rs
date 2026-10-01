@@ -233,7 +233,9 @@ fn check_value(schema: &Value, value: &Value, path: &str, result: &mut Validatio
             }
         }
         let properties = schema.get("properties").and_then(Value::as_object);
-        for (key, child) in object {
+        // Dependency feature unification can change serde_json's object storage to
+        // insertion order. Field diagnostics keep the same order in every host.
+        for (key, child) in object.iter().collect::<std::collections::BTreeMap<_, _>>() {
             let child_path = child_path(path, key);
             if let Some(schema) = properties.and_then(|p| p.get(key)) {
                 check_value(schema, child, &child_path, result);

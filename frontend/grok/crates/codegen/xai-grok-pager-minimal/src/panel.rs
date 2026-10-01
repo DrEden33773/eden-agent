@@ -1,3 +1,4 @@
+// Modified by Eden Agent for native host integration; see the accompanying EDEN-FRONTEND.md.
 //! Minimal-mode below-prompt list panels: `/resume` (session picker) and `/mcps` (MCP server status).
 //! Both render as simple lists below the input bar instead of centered modal windows.
 //!
@@ -158,6 +159,10 @@ fn resume_body_rows(agent: &AgentView, width: u16) -> u16 {
         minimal_api::filter_session_entries(entries.as_deref(), state.query(), *source_filter);
     let built =
         minimal_api::build_session_entry_data(entries_data, &filtered, state, content_width);
+    let previews: Vec<Vec<&str>> = built
+        .iter()
+        .map(|entry| entry.snippet_preview.as_deref().into_iter().collect())
+        .collect();
     let fields_vecs: Vec<Vec<PickerField>> = built
         .iter()
         .map(|b| {
@@ -173,6 +178,7 @@ fn resume_body_rows(agent: &AgentView, width: u16) -> u16 {
         &filtered,
         &built,
         &fields_vecs,
+        &previews,
         state,
         Some(current_repo.as_str()),
     );
@@ -209,6 +215,10 @@ fn render_resume(
         minimal_api::filter_session_entries(entries.as_deref(), state.query(), *source_filter);
     let built =
         minimal_api::build_session_entry_data(entries_data, &filtered, state, content_width);
+    let previews: Vec<Vec<&str>> = built
+        .iter()
+        .map(|entry| entry.snippet_preview.as_deref().into_iter().collect())
+        .collect();
     let fields_vecs: Vec<Vec<PickerField>> = built
         .iter()
         .map(|b| {
@@ -224,6 +234,7 @@ fn render_resume(
         &filtered,
         &built,
         &fields_vecs,
+        &previews,
         state,
         Some(current_repo.as_str()),
     );

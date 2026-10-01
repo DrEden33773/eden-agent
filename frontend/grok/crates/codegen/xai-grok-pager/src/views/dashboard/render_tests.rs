@@ -1,3 +1,4 @@
+// Modified by Eden Agent for its terminal library; see frontend/grok/EDEN-FRONTEND.md.
 use super::*;
 use crate::views::dashboard::state::{ActionsFocus, DashboardState};
 use crate::views::dashboard::test_support::{buf_to_text, header_test_row};
@@ -506,6 +507,7 @@ fn dashboard_session_picker_renders_simple_open_surface() {
     let mut surface = crate::views::session_picker_surface::SessionPickerSurface::new(1);
     surface.source_filter = crate::views::session_picker::SourceFilter::Local;
     surface.entries = Some(vec![crate::app::app_view::SessionPickerEntry {
+        tags: Vec::new(),
         id: "local-session".to_owned(),
         summary: "Resume this local session".to_owned(),
         updated_at: chrono::Utc::now(),
@@ -588,6 +590,7 @@ fn dashboard_session_picker_search_focus_keeps_the_selected_row() {
     let mut surface = crate::views::session_picker_surface::SessionPickerSurface::new(1);
     surface.source_filter = crate::views::session_picker::SourceFilter::Local;
     surface.entries = Some(vec![crate::app::app_view::SessionPickerEntry {
+        tags: Vec::new(),
         id: "local-session".to_owned(),
         summary: "Resume this local session".to_owned(),
         updated_at: chrono::Utc::now(),

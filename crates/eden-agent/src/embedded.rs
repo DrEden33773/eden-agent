@@ -72,6 +72,7 @@ impl Embedded {
                 options,
                 workspace,
                 false,
+                false,
                 Some(self),
             )
             .await;

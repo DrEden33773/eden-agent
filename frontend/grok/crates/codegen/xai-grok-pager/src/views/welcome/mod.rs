@@ -1,3 +1,4 @@
+// Modified by Eden Agent for its terminal library; see frontend/grok/EDEN-FRONTEND.md.
 //! Welcome screen: the first thing users see.
 //!
 //! Layout (top to bottom):
@@ -2350,6 +2351,10 @@ pub(crate) fn render_session_picker_body(
     let built = build_session_entry_data(entries_data, &filtered_indices, ctx.state, content_width);
 
     // Build PickerEntry refs that borrow from `built`.
+    let previews: Vec<Vec<&str>> = built
+        .iter()
+        .map(|entry| entry.snippet_preview.as_deref().into_iter().collect())
+        .collect();
     let fields_vecs: Vec<Vec<PickerField>> = built
         .iter()
         .map(|b| {
@@ -2369,6 +2374,7 @@ pub(crate) fn render_session_picker_body(
             &filtered_indices,
             &built,
             &fields_vecs,
+            &previews,
             ctx.state,
             Some(current_repo.as_str()),
         )
@@ -2376,7 +2382,8 @@ pub(crate) fn render_session_picker_body(
         let entries: Vec<PickerEntry> = built
             .iter()
             .zip(fields_vecs.iter())
-            .map(|(b, fields)| {
+            .zip(previews.iter())
+            .map(|((b, fields), preview)| {
                 PickerEntry::Row(PickerRow {
                     label: &b.summary,
                     right_label: &b.right_text,
@@ -2384,7 +2391,7 @@ pub(crate) fn render_session_picker_body(
                     expanded: b.is_expanded,
                     fields,
                     description_lines: &[],
-                    summary_lines: &[],
+                    summary_lines: preview,
                     dimmed: false,
                     indent: 0,
                     badge: b.badge,
@@ -2856,6 +2863,7 @@ mod tests {
 
     fn make_entry(id: &str, summary: &str, repo_name: &str) -> SessionPickerEntry {
         SessionPickerEntry {
+            tags: Vec::new(),
             id: id.into(),
             summary: summary.into(),
             updated_at: chrono::Utc::now(),
@@ -3213,8 +3221,15 @@ mod tests {
         let fields_vecs: Vec<Vec<crate::views::picker::PickerField>> =
             built.iter().map(|_| Vec::new()).collect();
 
-        let (result, non_sel) =
-            build_grouped_picker_entries(&entries, &indices, &built, &fields_vecs, &state, None);
+        let (result, non_sel) = build_grouped_picker_entries(
+            &entries,
+            &indices,
+            &built,
+            &fields_vecs,
+            &[],
+            &state,
+            None,
+        );
 
         // Two headers and three rows make five entries
         assert_eq!(result.len(), 5);
@@ -3256,6 +3271,7 @@ mod tests {
             &indices,
             &built,
             &fields_vecs,
+            &[],
             &state,
             Some("zzz"),
         );
@@ -3281,8 +3297,15 @@ mod tests {
         let fields_vecs: Vec<Vec<crate::views::picker::PickerField>> =
             built.iter().map(|_| Vec::new()).collect();
 
-        let (result, non_sel) =
-            build_grouped_picker_entries(&entries, &indices, &built, &fields_vecs, &state, None);
+        let (result, non_sel) = build_grouped_picker_entries(
+            &entries,
+            &indices,
+            &built,
+            &fields_vecs,
+            &[],
+            &state,
+            None,
+        );
 
         assert_eq!(result.len(), 3); // one header and two rows
         assert_eq!(non_sel, vec![true, false, false]);
@@ -3296,8 +3319,15 @@ mod tests {
         let built = build_session_entry_data(&entries, &indices, &state, 80);
         let fields_vecs: Vec<Vec<crate::views::picker::PickerField>> = vec![];
 
-        let (result, non_sel) =
-            build_grouped_picker_entries(&entries, &indices, &built, &fields_vecs, &state, None);
+        let (result, non_sel) = build_grouped_picker_entries(
+            &entries,
+            &indices,
+            &built,
+            &fields_vecs,
+            &[],
+            &state,
+            None,
+        );
 
         assert!(result.is_empty());
         assert!(non_sel.is_empty());
@@ -3312,8 +3342,15 @@ mod tests {
         let fields_vecs: Vec<Vec<crate::views::picker::PickerField>> =
             built.iter().map(|_| Vec::new()).collect();
 
-        let (result, _) =
-            build_grouped_picker_entries(&entries, &indices, &built, &fields_vecs, &state, None);
+        let (result, _) = build_grouped_picker_entries(
+            &entries,
+            &indices,
+            &built,
+            &fields_vecs,
+            &[],
+            &state,
+            None,
+        );
 
         // Grouped rows are indented one column under their header
         if let Some(crate::views::picker::PickerEntry::Row(row)) = result.get(1) {

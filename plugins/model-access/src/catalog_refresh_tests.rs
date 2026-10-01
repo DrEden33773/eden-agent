@@ -213,13 +213,25 @@ async fn cache_lock_wait_yields_to_the_refresh_deadline() {
 
 #[tokio::test]
 async fn refresh_deadline_keeps_providers_that_already_succeeded() {
+    use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let source = format!("http://{}", listener.local_addr().unwrap());
+    let providers: BTreeMap<String, Value> = serde_json::from_str(BUNDLED).unwrap();
+    let next_provider = providers
+        .keys()
+        .filter(|provider| provider.as_str() != "radius")
+        .nth(REFRESH_CONCURRENCY)
+        .unwrap();
+    let refill_path = format!("/api/models/providers/{next_provider} ");
+    let published = Arc::new(tokio::sync::Notify::new());
+    let observed = published.clone();
     let server = tokio::spawn(async move {
         let mut handlers = tokio::task::JoinSet::new();
         loop {
             let (mut socket, _) = listener.accept().await.unwrap();
+            let published = published.clone();
+            let refill_path = refill_path.clone();
             handlers.spawn(async move {
                 let mut request = Vec::new();
                 let mut bytes = [0;2048];
@@ -232,6 +244,9 @@ async fn refresh_deadline_keeps_providers_that_already_succeeded() {
                     let body = r#"[{"id":"fast-model","api":"openai-responses","baseUrl":"http://localhost/v1"}]"#;
                     socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
                 } else {
+                    if String::from_utf8_lossy(&request).contains(&refill_path) {
+                        published.notify_one();
+                    }
                     // Hold the other requests until the client deadline drops its connections.
                     let _ = socket.read(&mut bytes).await;
                 }
@@ -253,11 +268,18 @@ async fn refresh_deadline_keeps_providers_that_already_succeeded() {
             disk: Disk::default(),
         }),
     };
-    let result = tokio::time::timeout(
-        std::time::Duration::from_millis(250),
-        catalog.refresh_public(None, false),
-    )
-    .await;
+    let mut refresh = Box::pin(catalog.refresh_public(None, false));
+    // Only the fast provider can release a buffer slot. The next provider starts
+    // after that result has been durably published; elapsed wall time cannot prove it.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::select! {
+            _ = observed.notified() => {},
+            result = &mut refresh => panic!("refresh ended before partial publication: {result:?}"),
+        }
+    })
+    .await
+    .expect("the completed provider was not published");
+    let result = tokio::time::timeout(Duration::ZERO, refresh).await;
     server.abort();
     let disk = std::fs::read(&path)
         .ok()

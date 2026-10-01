@@ -176,13 +176,14 @@ class Fixture:
         return result["outcome"]["value"]
 
     def start(self, *, extra=(), composition=None, trace=None, env=None):
+        offset = len(trace_rows(trace)) if trace and trace.is_file() else 0
         environment = {
             "EDEN_TUI_STATE_DIR": str(self.state),
             "GROK_XAI_API_BASE_URL": f"http://127.0.0.1:{self.business.server_port}",
             **(env or {}),
         }
         if trace:
-            environment["EDEN_FRONTEND_TRACE"] = str(trace)
+            environment["EDEN_FRONTEND_TRACE"] = str(trace.resolve())
         self.terminal = Terminal(
             self.installation / "bin/eden",
             self.endpoint_file,
@@ -192,6 +193,8 @@ class Fixture:
             env=environment,
         )
         self.terminal.wait("workflow", seconds=30)
+        if trace:
+            ready_view(self.terminal, trace, offset)
         return self.terminal
 
     def capture(self, name):
@@ -207,7 +210,8 @@ class Fixture:
             assert time.monotonic() < deadline, self.terminal.display
             self.terminal.read(0.05)
         lines = self.terminal.display.splitlines()
-        row = next(index for index, line in enumerate(lines) if label in line)
+        matches = [index for index, line in enumerate(lines) if label in line]
+        row = next((index for index in matches if f"[ {label} ]" in lines[index]), matches[0])
         column = lines[row].index(label) + 2
         self.terminal.send(f"\x1b[<0;{column};{row + 1}M\x1b[<0;{column};{row + 1}m".encode())
 
@@ -267,6 +271,40 @@ def exited(terminal):
         terminal.read(0.1)
     assert terminal.process.poll() == 0, terminal.display
     terminal.close(screen=False)
+
+
+def ready_view(terminal, trace, offset):
+    """A new view is ready only after its load result reaches a written operable frame."""
+
+    def observed():
+        rows = trace_rows(trace)[offset:]
+        for frame in rows:
+            if (
+                frame.get("direction") == "frame"
+                and frame.get("method") == "session/loaded"
+                and frame.get("ready") is True
+                and frame.get("session") == frame.get("view")
+            ):
+                loads = [
+                    row
+                    for row in rows
+                    if row.get("direction") == "in"
+                    and row.get("method") == "session/load"
+                    and row.get("session") == frame["session"]
+                ]
+                if loads and any(
+                    row.get("direction") == "out"
+                    and row.get("id") == loads[-1]["id"]
+                    and row.get("error") is None
+                    for row in rows
+                ):
+                    return frame
+        return None
+
+    frame = wait_until(observed, terminal, seconds=60)
+    terminal.drain()
+    assert "Loading session" not in terminal.display
+    return frame
 
 
 def completed_load(terminal, path, trace, offset=0, *, success=True, seconds=60):

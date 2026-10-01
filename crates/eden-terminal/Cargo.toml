@@ -1,0 +1,16 @@
+[package]
+name = "eden-terminal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+eden-session-workspace.workspace = true
+anyhow = "1.0"
+xai-grok-pager = { path = "../../frontend/grok/crates/codegen/xai-grok-pager", version = "1.0.45", default-features = false }
+xai-grok-pager-minimal = { path = "../../frontend/grok/crates/codegen/xai-grok-pager-minimal", version = "0.1.0", default-features = false }
+
+[lints]
+workspace = true

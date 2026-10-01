@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/*", "plugins/*"]
-exclude = ["frontend/grok", "tests/contract-authors/tui-editor", "tests/contract-authors/loop-a", "tests/contract-authors/context-b", "tests/contract-authors/lifecycle"]
+exclude = ["frontend/grok", "vendor/*", "tests/contract-authors/tui-editor", "tests/contract-authors/loop-a", "tests/contract-authors/context-b", "tests/contract-authors/lifecycle"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,8 +10,13 @@ rust-version = "1.98.1"
 license = "Apache-2.0"
 repository = "https://github.com/DrEden33773/eden-agent"
 
+[patch.crates-io]
+ratatui = { path = "vendor/ratatui-0.29" }
+async-openai = { git = "https://github.com/our-forks/async-openai.git", rev = "95b52ebdedf42143083cf3d6f0e0be7c84e9c808" }
+
 [workspace.dependencies]
-eden-session-lifecycle = { path = "crates/eden-session-lifecycle", version = "0.1.0" }
+eden-terminal = { path = "crates/eden-terminal", version = "0.1.0" }
+eden-session-workspace = { path = "crates/eden-session-workspace", version = "0.1.0" }
 eden-model-input = { path = "crates/eden-model-input", version = "0.1.0" }
 eden-tui = { path = "crates/eden-tui", version = "0.1.0" }
 eden-tui-client = { path = "crates/eden-tui-client", version = "0.1.0" }

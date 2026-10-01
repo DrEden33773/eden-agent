@@ -166,8 +166,23 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
 fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
     app.reconcile_foreign_resume_launch();
     let effects = match action {
+        Action::EdenOpen("sessions") => dispatch_show_session_picker(app),
+        Action::EdenLoadAfterRemoval(session) => {
+            let target = crate::app::agent::AgentId(app.next_agent_id);
+            let effects = dispatch_load_session(app, session, None, false);
+            if let Some(agent) = app.agents.get_mut(&target) {
+                agent.eden_take_previous_draft = true;
+            }
+            effects
+        }
+        Action::EdenHistory { kind, reference } => {
+            crate::eden_panel::open_history(app, kind, reference)
+        }
         Action::EdenOpen(kind) => crate::eden_panel::open(app, kind),
-        Action::EdenRequest { generation, request } => crate::eden_panel::request(app, generation, request),
+        Action::EdenRequest {
+            generation,
+            request,
+        } => crate::eden_panel::request(app, generation, request),
         Action::Quit | Action::QuitConfirmed => confirmed_quit(app),
         Action::QuitForUpdate => {
             let mut effects = unregister_all_active_sessions(app);
@@ -310,6 +325,17 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::PickSessionInWorktree(index) => dispatch_pick_session_in_worktree(app, index),
         Action::CopySessionId(index) => dispatch_copy_session_id(app, index),
         Action::ExpandSessionCard { source, session_id } => {
+            if crate::eden_services::enabled() {
+                return crate::eden_panel::open_history(
+                    app,
+                    if session_id.starts_with("trash:") {
+                        "history-restore"
+                    } else {
+                        "history-details"
+                    },
+                    session_id,
+                );
+            }
             let native_source = matches!(source.as_str(), "local" | "remote" | "both");
             let conversation_source = source == "conversation";
             if session_picker_external_filter_active(app)
@@ -1167,7 +1193,11 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ToggleTimestamps => dispatch_toggle_timestamps(app),
         Action::SetYoloMode(v) => set_yolo_mode(app, v),
         Action::SetPermissionMode(kind) => set_permission_mode(app, kind),
-        Action::EdenContextVisible(v) => { crate::eden_services::set_context_visible(v); crate::app::dispatch::refresh_open_settings_modals(app); vec![] },
+        Action::EdenContextVisible(v) => {
+            crate::eden_services::set_context_visible(v);
+            crate::app::dispatch::refresh_open_settings_modals(app);
+            vec![]
+        }
         Action::SetMultilineMode(v) => set_multiline_mode(app, v),
         Action::SetRenderMermaid(kind) => set_render_mermaid(app, kind),
         Action::SetCompactMode(v) => set_compact_mode(app, v),

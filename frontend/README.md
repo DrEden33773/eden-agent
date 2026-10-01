@@ -1,16 +1,16 @@
 # Native terminal frontend
 
-`grok/` is the fixed Apache-2.0 Grok Build source at `2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8`, imported from the locally accepted pager source at Eden `57836744e2664f9359aa649b5f963c0e45e0035b`. It retains the layout, editor, rendering, scrolling and tool/Diff components. Eden modifications are ordinary tracked source; building never runs the experiment preparation script.
+`grok/` retains the Apache-2.0 Grok Build layout, editor, rendering, scrolling and tool/Diff components from reference `2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8`, recorded in `grok/UPSTREAM_COMMIT`. The original `grok/SOURCE_REV` is an upstream internal identity and is recorded separately. Eden changes are tracked source. The application is a library called by `eden-terminal` inside the installed `eden` process; accepted work belongs to independent Eden Session hosts.
 
-Build with Rust 1.98.1. The build helper downloads the fixed reference protobuf compiler when `PROTOC` or a compiler on PATH is unavailable:
+Build with Rust 1.98.1 and the root Cargo.lock:
 
 ```sh
 python3 scripts/build-candidate.py /absolute/installation
 /absolute/installation/bin/eden --cwd /absolute/project
 ```
 
-The CLI selects a Session through `eden-session-lifecycle`, then starts `bin/eden-frontend`. The frontend embeds `eden-frontend-session` for typed host communication, projection and request/run/attempt reconciliation. There is no runtime Python wrapper or external ACP adapter. Native hosts retain accepted work after terminal detach. `/resume` selects a history explicitly; `/sessions` exposes read-only inspection and migration copies. No-target startup creates a persistent empty Session immediately.
+The root workspace builds the terminal and host together. The imported crates retain their source workspace manifest for dependency declarations, but installation uses one root dependency resolution. The checked-in tools API types avoid a protobuf compiler download. The fixed rendering dependency adjustment is documented in [vendor/ratatui-0.29/EDEN.md](../vendor/ratatui-0.29/EDEN.md).
 
-`grok/LICENSE`, `grok/THIRD-PARTY-NOTICES` and the product notices preserve upstream attribution. This is an independent Cargo workspace because the fixed rendering stack uses a different ratatui version. Its checked-in lockfile owns that stack; Eden path libraries retain the root workspace's dependency and lifecycle contracts.
+`SessionWorkspace` owns opening, identity checks, catalog operations, Trash and attachment cleanup. The frontend uses in-process commands and ordered events. New tasks remain drafts until the first accepted work or explicit naming publishes history. `/resume` and `/sessions` share one picker with Recent, All saved and Trash views. Ordinary frontend exit preserves accepted host work; unused drafts and owned readers are closed.
 
-`CANDIDATE.json` binds both successful builds to the same source fingerprint and records the installed bytes against their build outputs. `EDEN_FRONTEND_TARGET_DIR` changes only the frontend build cache location; the source remains `frontend/grok/`. Native installed verification builds this frontend before assembling its frozen seed.
+`grok/LICENSE`, `grok/THIRD-PARTY-NOTICES` and the product notices preserve attribution. `CANDIDATE.json` records the source fingerprint and installed bytes against their root build outputs. Runtime does not build or prepare source. The compatibility `build-frontend.py` command builds `eden-cli` from the root workspace.

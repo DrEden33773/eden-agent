@@ -1,3 +1,4 @@
+// Modified by Eden Agent for its terminal library; see frontend/grok/EDEN-FRONTEND.md.
 use super::*;
 use crate::acp::model_state::ModelState;
 use crate::acp::tracker::AcpUpdateTracker;
@@ -825,6 +826,7 @@ fn tick_demand_fast_while_modal_session_picker_loads() {
         "loading modal picker must keep the spinner animating"
     );
     let foreign_entry = SessionPickerEntry {
+        tags: Vec::new(),
         id: "claude-1".into(),
         summary: "claude".into(),
         updated_at: chrono::Utc::now(),
@@ -2787,6 +2789,7 @@ fn minimal_toggle_queue_chord_shows_queue_block() {
 }
 fn welcome_session_entry(id: &str) -> SessionPickerEntry {
     SessionPickerEntry {
+        tags: Vec::new(),
         id: id.into(),
         summary: id.into(),
         updated_at: chrono::Utc::now(),
@@ -7938,6 +7941,7 @@ fn handle_input_exit_session_action_closes_popup() {
 #[test]
 fn welcome_picker_f_cycle_disabled_under_chat_mode() {
     let conversation_entry = SessionPickerEntry {
+        tags: Vec::new(),
         id: "conv-welcome-f".into(),
         summary: "chat".into(),
         updated_at: chrono::Utc::now(),

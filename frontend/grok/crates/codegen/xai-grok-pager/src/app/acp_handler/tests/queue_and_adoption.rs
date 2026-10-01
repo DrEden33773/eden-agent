@@ -1,3 +1,4 @@
+// Modified by Eden Agent for its terminal library; see frontend/grok/EDEN-FRONTEND.md.
 #![cfg_attr(rustfmt, rustfmt::skip)]
     use super::*;
 
@@ -751,6 +752,7 @@
         let scroll_before = test_agent(&app, id).scrollback.len();
         let effects = dispatch(
             Action::TaskComplete(TaskResult::PromptResponse {
+        not_accepted: false,
                 agent_id: id,
                 result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
                 http_status: None,
@@ -852,6 +854,7 @@
         // p1's PromptResponse runs finish_turn and the deferred shim renders p2 once
         dispatch(
             Action::TaskComplete(TaskResult::PromptResponse {
+        not_accepted: false,
                 agent_id: id,
                 result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
                 http_status: None,

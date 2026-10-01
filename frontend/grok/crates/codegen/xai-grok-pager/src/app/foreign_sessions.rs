@@ -1,3 +1,4 @@
+// Modified by Eden Agent for its terminal library; see frontend/grok/EDEN-FRONTEND.md.
 use super::actions::Effect;
 use super::app_view::{ActiveView, AppView, SessionPickerEntry};
 use parking_lot::Mutex;
@@ -386,6 +387,7 @@ pub(crate) fn map_summary(summary: ForeignSessionSummary) -> SessionPickerEntry 
     let updated_at = chrono::DateTime::<chrono::Utc>::from(summary.updated_at);
     let cwd = summary.cwd.to_string_lossy().into_owned();
     SessionPickerEntry {
+        tags: Vec::new(),
         id: summary.native_id,
         summary: summary.title,
         updated_at,
@@ -486,6 +488,7 @@ mod tests {
     fn picker_entry(id: &str, source: &str, timestamp: i64) -> SessionPickerEntry {
         let timestamp = chrono::DateTime::from_timestamp(timestamp, 0).unwrap();
         SessionPickerEntry {
+            tags: Vec::new(),
             id: id.into(),
             summary: id.into(),
             updated_at: timestamp,

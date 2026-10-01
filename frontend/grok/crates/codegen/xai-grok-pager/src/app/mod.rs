@@ -702,587 +702,177 @@ async fn bounded_connect(
         longest_step,
     })
 }
-/// Main entry point: connect to agent, init terminal, run event loop, restore.
-/// If a session ID is provided via `--resume` / `--load` / `--continue`, the pager skips the welcome screen and immediately loads that session.
-/// The load replays the session's history; sessions not found locally are restored from remote storage.
-pub async fn run(
-    mut args: PagerArgs,
-    bg_update_rx: Option<
-        tokio::sync::oneshot::Receiver<Option<xai_grok_update::auto_update::UpdateAvailable>>,
-    >,
-) -> anyhow::Result<bool> {
-    let screen_mode_override = screen_mode_relaunch::take_screen_mode_env_override();
+/// Explicit Eden construction: the caller supplies project, preferences and Session intent.
+pub struct EdenLaunch {
+    pub context: eden_session_workspace::Lifecycle,
+    pub target: eden_session_workspace::OpenTarget,
+    pub monochrome: bool,
+}
+
+/// Run the accepted Grok interaction model as a library. Session ownership never crosses a launcher environment.
+pub async fn run_eden(launch: EdenLaunch) -> anyhow::Result<bool> {
+    use clap::Parser as _;
+    if launch.monochrome {
+        xai_grok_pager_render::theme::color_support::disable_color();
+    }
+    let cwd = launch.context.cwd.clone();
+    xai_dirs::configure_home(launch.context.state_dir.join("frontend"))?;
+    let (workspace, events) =
+        eden_session_workspace::SessionWorkspace::start(launch.context, launch.target).await?;
+    let initial = workspace.initial_view().to_owned();
     let cancel = CancellationToken::new();
-    let startup_start = std::time::Instant::now();
-    let raw_config = xai_grok_shell::config::load_effective_config()
-        .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-    let (grok_com_config, proxy_base_url) =
-        match xai_grok_shell::agent::config::Config::new_from_toml_cfg(&raw_config) {
-            Ok(c) => (c.grok_com_config, c.endpoints.proxy_url()),
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to parse config for auth refresh, using defaults");
-                (
-                    xai_grok_login::GrokComConfig::default(),
-                    xai_grok_shell::agent::config::EndpointsConfig::default().proxy_url(),
-                )
-            }
+    let (connection, bridge) =
+        crate::acp::eden_transport::connect(workspace, events, cancel.clone()).await?;
+    let result = async {
+        let args = PagerArgs::try_parse_from(["eden-ui"])?;
+        let screen_mode_override = None;
+        let remote_settings = None;
+        let materialized = session_startup::MaterializedStartup::Resume {
+            session_id: initial,
+            original_cwd: Some(cwd.clone()),
+            title: None,
+            deferred_local_miss: false,
+            suppress_code_restore: true,
         };
-    if let xai_grok_login::PreTuiLoginOutcome::SignedIn(auth) =
-        xai_grok_login::maybe_run_pre_tui_external_login(
-            &grok_com_config,
-            proxy_base_url.clone(),
-            args.force_login,
-            io::stdin().is_terminal(),
-        )
-        .await?
-    {
-        xai_grok_shell::agent::init::apply_post_login_config(*auth).await?;
-        args.force_login = false;
-    }
-    xai_tty_utils::redirect_native_stderr();
-    let refreshed_auth = tokio::time::timeout(
-        xai_grok_shell::http::STARTUP_AUTH_REFRESH_TIMEOUT,
-        xai_grok_login::try_ensure_fresh_auth(&grok_com_config, proxy_base_url),
-    )
-    .await
-    .unwrap_or(None);
-    let settings_query = xai_grok_shell::agent::remote_config::settings_get::SettingsQuery::resolve(
-        refreshed_auth,
-        Some(grok_com_config.clone()),
-    );
-    let had_prefetch =
-        xai_grok_shell::agent::remote_config::settings_get::is_eligible(&settings_query);
-    if had_prefetch {
-        xai_grok_shell::agent::remote_config::settings_get::warm_startup_settings(
-            settings_query.clone(),
-        );
-    }
-    xai_grok_shell::agent::mvp_agent::warm_async_http_client();
-    tokio::task::spawn_blocking(|| {});
-    if let Ok(cwd) = std::env::current_dir() {
+        let session_cwd = Some(cwd.clone());
         crate::git_info::populate_from_cwd_async(cwd);
-    }
-    let prefetch_wait_started = std::time::Instant::now();
-    let remote_settings = if had_prefetch {
-        let _wait_span = region!("startup.prefetch_join_wait", Parent::Inherit);
-        let warmed_auth = settings_query.auth().cloned();
-        let wait = {
-            let _settings = region!(
-                "startup.prefetch_join_wait.settings",
-                Parent::Explicit(_wait_span.span())
-            );
-            xai_grok_shell::agent::remote_config::settings_get::await_startup_settings(
-                settings_query,
-                EARLY_PREFETCH_WAIT,
-                &tokio_util::sync::CancellationToken::new(),
-            )
-            .await
-        };
-        let settings = xai_grok_shell::agent::remote_config::settings_get::consume_wait(
-            wait,
-            warmed_auth.as_ref(),
-            &grok_com_config,
+        let raw_config = std::fs::read_to_string(crate::util::pager_toml_path())
+            .ok()
+            .and_then(|text| text.parse::<toml::Value>().ok())
+            .unwrap_or_else(|| toml::Value::Table(Default::default()));
+        let tracing_handle = crate::tracing::init_local_tracing();
+        let pending_startup = xai_grok_telemetry::startup::PendingStartup::new();
+        let mut config_watcher = crate::appearance::ConfigWatcher::start().await?;
+        let alt_screen_config_mode = config_watcher.current().alt_screen;
+        let term_ctx = crate::terminal::terminal_context();
+        let is_control_mode = crate::terminal::detect_tmux_control_mode(term_ctx);
+        let alt_screen_wants_fullscreen = crate::terminal::determine_alt_screen_policy(
+            args.no_alt_screen,
+            alt_screen_config_mode,
+            term_ctx,
+            is_control_mode,
         );
-        xai_grok_telemetry::startup::record_prefetch_wait(prefetch_wait_started.elapsed());
-        settings
-    } else {
-        None
-    };
-    seed_remote_ui_caches(remote_settings.as_ref());
-    let raw_config = xai_grok_shell::config::load_effective_config()
-        .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-    xai_grok_shell::config::cache_standalone_memory_mode(
-        xai_grok_shell::config::MemoryConfig::resolve(
-            args.experimental_memory,
-            args.no_memory,
-            &raw_config,
-            remote_settings.as_ref(),
-        )
-        .mode,
-    );
-    let prefetch_elapsed = startup_start.elapsed();
-    let requested_confinement = xai_grok_sandbox::requested_confinement_profile();
-    let LeaderMode {
-        use_leader,
-        policy_disable_reason,
-        disabled_by_confinement,
-    } = resolve_leader_mode(
-        args.leader,
-        args.no_leader,
-        &raw_config,
-        remote_settings.as_ref(),
-        true,
-        requested_confinement,
-    );
-    tracing::info!(
-        use_leader,
-        ?policy_disable_reason,
-        sandbox_profile = ?requested_confinement,
-        // The other fields cannot distinguish this from leader mode being off already while a sandbox is on
-        leader_disabled_by_sandbox = disabled_by_confinement.is_some(),
-        prefetch_ms = prefetch_elapsed.as_millis() as u64,
-        "pager TUI leader mode resolved"
-    );
-    if let Some(profile) = disabled_by_confinement {
-        warn_leader_disabled_by_sandbox(profile);
-    }
-    if session_startup::chat_mode_conflicts_with_leader(args.chat(), use_leader) {
-        anyhow::bail!("{}", session_startup::CHAT_MODE_LEADER_CONFLICT);
-    }
-    if args.trust {
-        use xai_grok_workspace::folder_trust::{grant_folder_trust, report_cli_trust_grant};
-        match std::env::current_dir() {
-            Ok(cwd) => report_cli_trust_grant(&grant_folder_trust(&cwd)),
-            Err(e) => {
-                tracing::warn!(error = %e, "--trust: failed to resolve cwd; folder not trusted");
-                eprintln!("error: --trust: failed to resolve cwd; folder not trusted: {e}");
-            }
-        }
-    }
-    if let Some(reason) = policy_disable_reason {
-        tokio::spawn(xai_grok_shell::leader::kill_stale_reachable_leaders(reason));
-    }
-    if let Some(err) =
-        session_startup::chat_mode_flag_conflict(args.chat(), args.fork_session, args.restore_code)
-    {
-        anyhow::bail!("{err}");
-    }
-    #[cfg(feature = "local-workspace")]
-    {
-        let lw = session_startup::resolve_local_workspace_config(
-            args.chat(),
-            args.local_workspace(),
-            args.local_workspace_attach(),
-            args.local_workspace_cwd(),
+        let config_screen_mode = raw_config
+            .get("ui")
+            .and_then(|ui| ui.get("screen_mode"))
+            .and_then(|v| v.as_str());
+        let auto_minimal_mouse_leak = term_ctx.mouse_reporting_leaks_as_raw_text();
+        let explicit_minimal = screen_mode_relaunch::effective_minimal_preference(
+            args.minimal,
+            args.fullscreen,
+            config_screen_mode,
+            config_watcher.current().minimal,
+        );
+        let screen_mode = screen_mode_relaunch::resolve_screen_mode(
+            screen_mode_override,
+            explicit_minimal.unwrap_or(auto_minimal_mouse_leak),
+            alt_screen_wants_fullscreen,
+        );
+        MINIMAL_AUTO_SET_FOR_MOUSE_LEAK.store(
+            screen_mode.is_minimal()
+                && explicit_minimal.is_none()
+                && screen_mode_override.is_none(),
+            Ordering::Release,
+        );
+        let minimal = screen_mode.is_minimal();
+        let relaunched_into_minimal = screen_mode_override == Some(ScreenMode::Minimal);
+        let relaunched_into_fullscreen = screen_mode_override == Some(ScreenMode::Fullscreen);
+        tracing::info!(
+            use_alt_screen = screen_mode.is_fullscreen(),
+            minimal = screen_mode.is_minimal(),
+            mouse_capture = !screen_mode.is_minimal(),
+            minimal_live_rows = config_watcher.current().minimal_live_rows,
+            is_control_mode,
+            no_alt_screen_cli = args.no_alt_screen,
+            minimal_cli = args.minimal,
+            fullscreen_cli = args.fullscreen,
+            config_screen_mode = ?config_screen_mode,
+            auto_minimal_mouse_leak,
+            config_mode = ?alt_screen_config_mode,
+            multiplexer = ?term_ctx.multiplexer,
+            "resolved fullscreen policy"
+        );
+        let minimal_live_rows = config_watcher.current().minimal_live_rows;
+        let (frame_tx, writer_sync, writer_event_rx, writer_thread) =
+            crate::render::draw::spawn_writer_thread()
+                .context("failed to spawn the term-writer thread")?;
+        let cursor_blink = event_loop::load_initial_ui_config().cursor_blink;
+        let TerminalInit {
+            mut terminal,
+            screen_mode,
+            startup_typeahead,
+        } = init_terminal(
+            screen_mode,
+            minimal_live_rows,
+            relaunched_into_minimal,
+            frame_tx,
+            writer_sync,
+            cursor_blink,
         )?;
-        if let Some(ref cfg) = lw {
-            session_startup::emit_local_workspace_startup_ux(cfg)?;
-        }
-        session_startup::set_active_local_workspace(lw)?;
-    }
-    let intent = args
-        .session_startup_intent()
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let mut materialize_ctx = session_startup::MaterializeCtx::from_pager_args(&args);
-    materialize_ctx.restore_progress_on_stdout =
-        std::io::IsTerminal::is_terminal(&std::io::stdout());
-    let materialized = session_startup::materialize_startup(materialize_ctx, intent).await?;
-    if args.chat()
-        && let session_startup::MaterializedStartup::Resume { session_id, .. } = &materialized
-    {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        if session_startup::chat_mode_refuses_local_build_load(true, false, session_id, &cwd) {
-            anyhow::bail!(
-                "{} (session id: {session_id})",
-                session_startup::CHAT_MODE_LOCAL_BUILD_REFUSAL
-            );
-        }
-    }
-    let mut session_title = match &materialized {
-        session_startup::MaterializedStartup::Resume { title, .. }
-        | session_startup::MaterializedStartup::Fork {
-            parent_title: title,
-            ..
-        } => title.clone(),
-        _ => None,
-    };
-    let title_lookup_id = match &materialized {
-        session_startup::MaterializedStartup::Resume { session_id, .. } => {
-            Some(session_id.as_str())
-        }
-        session_startup::MaterializedStartup::Fork {
-            parent_session_id, ..
-        } => Some(parent_session_id.as_str()),
-        _ => None,
-    };
-    if session_title.is_none()
-        && !args.chat()
-        && let Some(id) = title_lookup_id
-    {
-        let summaries = xai_grok_shell::session::persistence::list_summaries(None).await?;
-        if let Some(s) = summaries.iter().find(|s| s.info.id.0.as_ref() == id)
-            && let Some(title) = s.display_title_opt()
-        {
-            session_title = Some(title);
-        }
-    }
-    let session_cwd = match &materialized {
-        session_startup::MaterializedStartup::Resume { original_cwd, .. }
-        | session_startup::MaterializedStartup::Fork {
-            parent_cwd: original_cwd,
-            ..
-        } => original_cwd.clone(),
-        _ => None,
-    };
-    let env_hunk_tracker_mode = std::env::var("GROK_HUNK_TRACKER").ok();
-    let config_hunk_tracker_mode = raw_config
-        .get("ui")
-        .and_then(|ui| ui.get("hunk_tracker_mode"))
-        .and_then(|v| v.as_str());
-    let hunk_tracker_mode = resolve_hunk_tracker_mode(
-        args.hunk_tracker_mode.as_deref(),
-        env_hunk_tracker_mode.as_deref(),
-        config_hunk_tracker_mode,
-    );
-    let remote_permission_mode = remote_settings
-        .as_ref()
-        .and_then(|s| s.permission_mode.as_deref());
-    let launch_yolo = xai_grok_shell::util::config::effective_yolo_for_launch(
-        args.yolo,
-        args.permission_mode_flag.as_deref(),
-        remote_permission_mode,
-    );
-    let launch_auto = xai_grok_shell::util::config::effective_auto_for_launch(
-        args.yolo,
-        args.permission_mode_flag.as_deref(),
-        remote_permission_mode,
-        xai_grok_shell::util::config::default_interactive_permission_mode(),
-    );
-    let mut connect_flags = crate::acp::ConnectFlags {
-        no_subagents: args.no_subagents,
-        memory_enabled_override: args.memory_enabled_override(),
-        memory_override_flag: args.memory_override_flag(),
-        disable_web_search: args.disable_web_search,
-        todo_gate: args.todo_gate,
-        laziness_debug_log: None,
-        storage_mode: args.storage_mode.clone(),
-        client_identifier: args.client_identifier.clone(),
-        hunk_tracker_mode,
-        terminal: args.terminal,
-        fs_read: args.fs_read,
-        fs_write: args.fs_write,
-        installer: args.installer.clone(),
-        remote_settings: remote_settings.clone(),
-        system_prompt_override: args.system_prompt_override.clone(),
-        rules: args.rules.clone(),
-        reasoning_effort_override: args
-            .reasoning_effort
-            .as_deref()
-            .and_then(xai_grok_shell::sampling::types::parse_canonical_effort_token),
-        permission_rules: crate::headless::parse_permission_rules_lenient(
-            &args.allow_rules,
-            &args.deny_rules,
-        ),
-        default_yolo_mode: launch_yolo.yolo,
-        default_auto_mode: launch_auto && !launch_yolo.yolo,
-        status_line: false,
-    };
-    let mut config_watcher = crate::appearance::ConfigWatcher::start().await?;
-    let alt_screen_config_mode = config_watcher.current().alt_screen;
-    let term_ctx = crate::terminal::terminal_context();
-    let is_control_mode = crate::terminal::detect_tmux_control_mode(term_ctx);
-    let alt_screen_wants_fullscreen = crate::terminal::determine_alt_screen_policy(
-        args.no_alt_screen,
-        alt_screen_config_mode,
-        term_ctx,
-        is_control_mode,
-    );
-    let config_screen_mode = raw_config
-        .get("ui")
-        .and_then(|ui| ui.get("screen_mode"))
-        .and_then(|v| v.as_str());
-    let auto_minimal_mouse_leak = term_ctx.mouse_reporting_leaks_as_raw_text();
-    let explicit_minimal = screen_mode_relaunch::effective_minimal_preference(
-        args.minimal,
-        args.fullscreen,
-        config_screen_mode,
-        config_watcher.current().minimal,
-    );
-    let screen_mode = screen_mode_relaunch::resolve_screen_mode(
-        screen_mode_override,
-        explicit_minimal.unwrap_or(auto_minimal_mouse_leak),
-        alt_screen_wants_fullscreen,
-    );
-    MINIMAL_AUTO_SET_FOR_MOUSE_LEAK.store(
-        screen_mode.is_minimal() && explicit_minimal.is_none() && screen_mode_override.is_none(),
-        Ordering::Release,
-    );
-    let minimal = screen_mode.is_minimal();
-    connect_flags.status_line = event_loop::load_initial_ui_config()
-        .status_line
-        .reserves_a_row();
-    let relaunched_into_minimal = screen_mode_override == Some(ScreenMode::Minimal);
-    let relaunched_into_fullscreen = screen_mode_override == Some(ScreenMode::Fullscreen);
-    tracing::info!(
-        use_alt_screen = screen_mode.is_fullscreen(),
-        minimal = screen_mode.is_minimal(),
-        mouse_capture = !screen_mode.is_minimal(),
-        minimal_live_rows = config_watcher.current().minimal_live_rows,
-        is_control_mode,
-        no_alt_screen_cli = args.no_alt_screen,
-        minimal_cli = args.minimal,
-        fullscreen_cli = args.fullscreen,
-        config_screen_mode = ?config_screen_mode,
-        auto_minimal_mouse_leak,
-        config_mode = ?alt_screen_config_mode,
-        multiplexer = ?term_ctx.multiplexer,
-        "resolved fullscreen policy"
-    );
-    if disabled_by_confinement.is_some() && screen_mode.is_fullscreen() {
-        tokio::time::sleep(SANDBOX_NOTICE_LINGER).await;
-    }
-    crate::theme::cache::set_terminal_theme_enabled(resolve_terminal_theme_enabled(
-        remote_settings
-            .as_ref()
-            .and_then(|s| s.terminal_theme_enabled),
-    ));
-    engage_startup_theme(screen_mode);
-    let minimal_live_rows = config_watcher.current().minimal_live_rows;
-    let (frame_tx, writer_sync, writer_event_rx, writer_thread) =
-        crate::render::draw::spawn_writer_thread()
-            .context("failed to spawn the term-writer thread")?;
-    let cursor_blink = event_loop::load_initial_ui_config().cursor_blink;
-    let TerminalInit {
-        mut terminal,
-        screen_mode,
-        startup_typeahead,
-    } = init_terminal(
-        screen_mode,
-        minimal_live_rows,
-        relaunched_into_minimal,
-        frame_tx,
-        writer_sync,
-        cursor_blink,
-    )?;
-    MINIMAL_SHOW_SWITCH_BACK_TO_FULLSCREEN.store(
-        relaunched_into_minimal && screen_mode.is_minimal(),
-        Ordering::Release,
-    );
-    apply_screen_mode_globals(screen_mode);
-    finish_theme_after_probe(minimal, screen_mode);
-    if let Some(ref t) = session_title {
-        set_terminal_title(t);
-    }
-    let connect_ui_timeout_env = std::env::var(connect_timeout::CONNECT_UI_TIMEOUT_ENV).ok();
-    let connect_ui_timeout = connect_timeout::resolve(
-        connect_ui_timeout_env.as_deref(),
-        xai_grok_cloud_config::managed_config::startup_profile(),
-    );
-    if let Some(ref raw) = connect_ui_timeout_env {
-        crate::unified_log::write_direct_info(
-            "startup connect budget from env",
-            Some(serde_json::json!({
-                "raw": raw,
-                "timeout_secs": connect_ui_timeout.as_secs(),
-            })),
+        MINIMAL_SHOW_SWITCH_BACK_TO_FULLSCREEN.store(
+            relaunched_into_minimal && screen_mode.is_minimal(),
+            Ordering::Release,
         );
+        apply_screen_mode_globals(screen_mode);
+        finish_theme_after_probe(minimal, screen_mode);
+        set_terminal_title("Eden");
+        let effective_args = PagerArgs {
+            resume_session: None,
+            load_session: None,
+            continue_last_session: false,
+            session_id: None,
+            fork_session: false,
+            ..args
+        };
+        let term_state = event_loop::TerminalState {
+            is_control_mode,
+            screen_mode,
+            relaunched_into_minimal,
+            relaunched_into_fullscreen,
+            initial_theme: crate::theme::cache::current_kind(),
+            startup_typeahead,
+        };
+        let mut reader_thread = ReaderThread::detached();
+        let result = event_loop::run(
+            &mut terminal,
+            connection,
+            pending_startup,
+            tracing_handle,
+            &mut config_watcher,
+            &effective_args,
+            session_cwd,
+            remote_settings,
+            term_state,
+            materialized,
+            None,
+            writer_event_rx,
+            &mut reader_thread,
+        )
+        .await;
+
+        signal_handler::clear_quit_notify();
+        let restored = restore_terminal(
+            terminal,
+            writer_thread,
+            reader_thread,
+            current_screen_mode(),
+        );
+        crate::unified_log::flush_blocking().await;
+        restored?;
+        result.map(|run| run.quit_for_update)
     }
-    let fallback_flags = use_leader.then(|| connect_flags.clone());
-    let primary_target = if use_leader {
-        crate::acp::AgentKind::Leader
-    } else {
-        crate::acp::AgentKind::Embedded
-    };
-    xai_grok_telemetry::external::init(
-        xai_grok_shell::agent::config::resolve_external_otel_config(
-            xai_grok_telemetry::external::config::ExternalClientInfo {
-                service_version: xai_grok_version::full_version().to_owned(),
-                client_version: xai_grok_version::VERSION.to_owned(),
-                app_entrypoint: "tui".to_owned(),
-            },
-        ),
-    );
-    let tracing_handle = crate::tracing::init_tracing();
-    let pending_startup = xai_grok_telemetry::startup::PendingStartup::new();
-    let timer = xai_grok_telemetry::startup::begin(crate::acp::Owner::Client);
-    let primary_started = std::time::Instant::now();
-    let connect_result = bounded_connect(
-        &cancel,
-        connect_ui_timeout,
-        connect_ui_timeout_env.as_deref(),
-        primary_target,
-        startup_failure::ConnectAttempt::First,
-        &timer,
-        async {
-            match primary_target {
-                crate::acp::AgentKind::Leader => {
-                    crate::acp::connect_via_leader(&cancel, connect_flags, &raw_config).await
-                }
-                crate::acp::AgentKind::Embedded => {
-                    crate::acp::connect(&cancel, connect_flags).await
-                }
-            }
-        },
-    )
     .await;
-    let (connect_result, embedded_fallback, timer, connect_target) = match connect_result {
-        Err(f) if primary_target == crate::acp::AgentKind::Leader && !cancel.is_cancelled() => {
-            tracing::warn!(error = %f.error, "leader connect failed; falling back to embedded agent");
-            timer.emit_telemetry(primary_target, f.outcome, f.timeout_secs, false);
-            let flags = fallback_flags.expect("set on the use_leader path");
-            let timer = xai_grok_telemetry::startup::begin(crate::acp::Owner::Client);
-            let target = crate::acp::AgentKind::Embedded;
-            let fallback = bounded_connect(
-                &cancel,
-                connect_ui_timeout,
-                connect_ui_timeout_env.as_deref(),
-                target,
-                startup_failure::ConnectAttempt::AfterFallback(startup_failure::EarlierAttempt {
-                    target: primary_target,
-                    wait: primary_started.elapsed(),
-                    outcome: f.outcome,
-                    longest_step: f.longest_step,
-                }),
-                &timer,
-                async { crate::acp::connect(&cancel, flags).await },
-            )
-            .await;
-            (fallback, true, timer, target)
-        }
-        other => (other, false, timer, primary_target),
-    };
-    let mut connection = match connect_result {
-        Ok(conn) => {
-            tracing::info!(
-                elapsed_ms = startup_start.elapsed().as_millis() as u64,
-                use_leader = use_leader && !embedded_fallback,
-                embedded_fallback,
-                phases = %timer.summary(),
-                "Connected"
-            );
-            timer.emit_telemetry(
-                connect_target,
-                crate::acp::StartupOutcome::Ok,
-                None,
-                embedded_fallback,
-            );
-            conn
-        }
-        Err(f) => {
-            timer.emit_telemetry(connect_target, f.outcome, f.timeout_secs, embedded_fallback);
-            if f.outcome == crate::acp::StartupOutcome::Cancelled {
-                pending_startup.abandon();
-            } else {
-                pending_startup.finish(f.outcome);
-            }
-            let _ = restore_terminal(
-                terminal,
-                writer_thread,
-                ReaderThread::detached(),
-                screen_mode,
-            );
-            crate::unified_log::flush_blocking().await;
-            cancel.cancel();
-            return Err(f.error);
-        }
-    };
-    let agent_guard =
-        crate::acp::spawn::AgentShutdownGuard::new(cancel.clone(), connection.agent_thread.take());
-    let effective_args = PagerArgs {
-        resume_session: None,
-        load_session: None,
-        continue_last_session: false,
-        session_id: None,
-        fork_session: false,
-        ..args
-    };
-    let term_state = event_loop::TerminalState {
-        is_control_mode,
-        screen_mode,
-        relaunched_into_minimal,
-        relaunched_into_fullscreen,
-        initial_theme: crate::theme::cache::current_kind(),
-        startup_typeahead,
-    };
-    let mut reader_thread = ReaderThread::detached();
-    let result = event_loop::run(
-        &mut terminal,
-        connection,
-        pending_startup,
-        tracing_handle,
-        &mut config_watcher,
-        &effective_args,
-        session_cwd,
-        remote_settings,
-        term_state,
-        materialized,
-        bg_update_rx,
-        writer_event_rx,
-        &mut reader_thread,
-    )
-    .await;
-    signal_handler::clear_quit_notify();
-    let forced_exit_code = match &result {
-        Ok(run_result) if run_result.quit_for_update || run_result.relaunch.is_some() => None,
-        Ok(_) => Some(0),
-        Err(_) => Some(1),
-    };
-    if let Some(code) = forced_exit_code {
-        exit_timeout::arm(code);
-        exit_timeout::hold_teardown_for_test();
-    }
-    let restore_result = restore_terminal(
-        terminal,
-        writer_thread,
-        reader_thread,
-        current_screen_mode(),
-    );
-    crate::unified_log::flush_blocking().await;
-    drop(agent_guard);
-    xai_grok_telemetry::session_ctx::drain_at_process_exit().await;
-    xai_tty_utils::global_process_scope().kill_all();
-    crate::app::status_line::metrics::global().report_health();
-    let terminal_reading = !matches!(restore_result, Ok(WriterJoin::TimedOut));
-    if let Err(cleanup_error) = &restore_result {
-        match &result {
-            Ok(_) => {
-                tracing::warn!(
-                    error = %cleanup_error,
-                    "terminal cleanup failed after successful event loop"
-                )
-            }
-            Err(run_error) => {
-                tracing::warn!(
-                    error = %cleanup_error,
-                    run_error = %run_error,
-                    "terminal cleanup also failed"
-                )
-            }
-        }
-    }
-    match result {
-        Ok(run_result) => {
-            if let Some(msg) = run_result.trust_quit_error.as_deref()
-                && terminal_reading
-            {
-                let _ = writeln!(io::stderr(), "{msg}");
-            }
-            if run_result.quit_for_update {
-                return Ok(true);
-            }
-            if let Some(relaunch) = run_result.relaunch.as_ref() {
-                if let Err(e) = screen_mode_relaunch::exec_screen_mode_relaunch(
-                    &relaunch.session_id,
-                    relaunch.minimal,
-                ) {
-                    tracing::error!(error = %e, "screen-mode relaunch failed");
-                    if terminal_reading {
-                        print_relaunch_failure_hint(
-                            &e,
-                            &relaunch.session_id,
-                            relaunch.minimal,
-                            &mut io::stderr(),
-                        );
-                    }
-                }
-                return Ok(false);
-            }
-            if let Some(info) = run_result.exit_info
-                && terminal_reading
-            {
-                let width = crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize);
-                print_exit_resume_hint(&info, width, &mut io::stderr());
-            }
-            Ok(false)
-        }
-        Err(run_error) => Err(run_error),
-    }
+    cancel.cancel();
+    let closed = bridge.await?;
+    result.and_then(|result| closed.map(|_| result))
 }
 /// Plain-quit "Resume this session with…" lines (after terminal restore).
 /// Best-effort: closed-pane EIO/BrokenPipe must not panic (`panic = "abort"`).
 /// TODO: extend beyond --minimal by rebuilding resume argv from launch flags (see screen_mode_relaunch)
 fn print_exit_resume_hint(info: &ExitInfo, max_width: usize, w: &mut impl Write) {
-    if crate::eden_services::enabled() { return; }
+    if crate::eden_services::enabled() {
+        return;
+    }
     use crate::render::line_utils::truncate_str;
     let _ = writeln!(w);
     if let Some(summary) = &info.summary {
@@ -1715,7 +1305,11 @@ pub(crate) fn set_terminal_title(title: &str) {
 /// Strips control characters: crossterm's `SetTitle` emits the string raw inside an OSC sequence.
 /// An embedded BEL/ESC would terminate the OSC early and let the remainder inject arbitrary escape sequences into the terminal.
 fn terminal_title_string(title: &str) -> String {
-    let brand = if crate::eden_services::enabled() { "Eden" } else { "grok" };
+    let brand = if crate::eden_services::enabled() {
+        "Eden"
+    } else {
+        "grok"
+    };
     let sanitized: String = title.chars().filter(|c| !c.is_control()).collect();
     if sanitized.is_empty() {
         brand.into()

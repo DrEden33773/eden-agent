@@ -425,6 +425,7 @@ impl AgentView {
             load_failed: false,
             loading_placeholder_id: None,
             eden_previous_agent: None,
+            eden_take_previous_draft: false,
             pending_recap_entry: None,
             display_name: None,
             generated_session_title: None,

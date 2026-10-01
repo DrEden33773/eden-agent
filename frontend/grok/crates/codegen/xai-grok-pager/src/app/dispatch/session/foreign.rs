@@ -189,6 +189,14 @@ pub(in crate::app::dispatch) fn handle_session_list_loaded(
         );
         let partial_notice = partial.map(ConversationsPartial::picker_notice);
         notice = target.native_loaded(sessions, query, chat_mode, empty_notice, partial_notice);
+        if crate::eden_services::enabled() {
+            crate::eden_services::consumed(serde_json::json!({
+                "method": "directory/accepted", "host": format!("{:?}", request.host),
+                "generation": request.generation, "seq": request.seq,
+                "count": target.entries.as_ref().map_or(0, Vec::len),
+                "row": target.entries.as_ref().and_then(|entries| entries.first()).map(|entry| &entry.id),
+            }));
+        }
         *target.detail_seq += 1;
     }
     if let Some(notice) = notice {

@@ -63,27 +63,27 @@ pub fn lifecycle(cli: &Cli) -> Result<Lifecycle, Box<dyn std::error::Error>> {
         }
     }
 
-    Ok(Lifecycle {
-        executable: std::env::current_exe()?,
-        arguments: command
+    Ok(Lifecycle::new(
+        std::env::current_exe()?,
+        command
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect(),
-        cwd: std::fs::canonicalize(
+        std::fs::canonicalize(
             cli.cwd
                 .as_ref()
                 .cloned()
                 .unwrap_or(std::env::current_dir()?),
         )?,
-        state_dir: state_dir(),
-        legacy_directories: std::env::var_os("EDEN_LEGACY_SESSION_DIRS")
+        state_dir(),
+        std::env::var_os("EDEN_LEGACY_SESSION_DIRS")
             .map(|value| {
                 std::env::split_paths(&value)
                     .map(|path| invocation.join(path))
                     .collect()
             })
             .unwrap_or_default(),
-    })
+    ))
 }
 
 /// Launch the installed frontend after explicit lifecycle selection.

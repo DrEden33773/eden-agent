@@ -12,7 +12,7 @@ pub(crate) struct Server {
     copies: Mutex<BTreeMap<String, eden_agent::CopyPlan>>,
     pub(crate) forms: crate::forms::Forms,
     sessions: Mutex<BTreeMap<String, Arc<Adapter>>>,
-    saved: Mutex<BTreeMap<String, String>>,
+    saved: std::sync::Mutex<BTreeMap<String, String>>,
     opening: Mutex<()>,
     followers: Mutex<tokio::task::JoinSet<()>>,
 }
@@ -34,7 +34,7 @@ impl Server {
             sessions: Mutex::new(BTreeMap::from([(root.identity.clone(), root.clone())])),
             root: Mutex::new(root),
             forms: Default::default(),
-            saved: Mutex::new(saved),
+            saved: std::sync::Mutex::new(saved),
             opening: Mutex::new(()),
             followers: Mutex::new(tokio::task::JoinSet::new()),
         }
@@ -71,6 +71,9 @@ impl Server {
         }
     }
 
+    pub(crate) async fn finish_startup_cleanup(&self) {
+        self.lifecycle.finish_startup_cleanup().await;
+    }
     pub(crate) async fn stop_followers(&self) {
         self.followers.lock().await.shutdown().await;
     }
@@ -185,7 +188,7 @@ impl Server {
         let path = self
             .saved
             .lock()
-            .await
+            .unwrap_or_else(|error| error.into_inner())
             .get(base)
             .cloned()
             .ok_or_else(|| fault("Choose a history from the Eden session picker first"))?;
@@ -208,7 +211,10 @@ impl Server {
                     .display()
             )
         };
-        self.saved.lock().await.insert(id.clone(), path.into());
+        self.saved
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(id.clone(), path.into());
         self.open_adapter(path, &id, reading).await?;
         Ok(id)
     }
@@ -225,10 +231,22 @@ impl Server {
         {
             return Ok(adapter);
         }
+        crate::trace(json!({
+            "direction": "phase",
+            "phase": "connection",
+            "edge": "start",
+            "session": id,
+        }));
         let opened = self
             .lifecycle
             .open(std::path::Path::new(path), reading)
             .await?;
+        crate::trace(json!({
+            "direction": "phase",
+            "phase": "connection",
+            "edge": "end",
+            "session": id,
+        }));
         let mut adapter = match Adapter::new(
             opened.endpoint.clone(),
             self.output.clone(),
@@ -315,7 +333,7 @@ impl Server {
         if let Some(path) = opened.history {
             self.saved
                 .lock()
-                .await
+                .unwrap_or_else(|error| error.into_inner())
                 .insert(identity.clone(), path.to_string_lossy().into_owned());
         }
         self.sessions.lock().await.insert(identity.clone(), adapter);
@@ -447,45 +465,17 @@ impl Server {
             .ok_or_else(|| fault("Session unavailable"))
     }
 
-    pub(crate) async fn list(&self, params: &Value) -> Result<Value, Fault> {
-        let root = self.root().await;
-        let owner = if let Some(id) = params["sessionId"]
-            .as_str()
-            .or_else(|| params["filter_session_id"].as_str())
-        {
-            self.sessions.lock().await.get(id).cloned().unwrap_or(root)
-        } else {
-            root
-        };
-        let view = owner.view.lock().await;
-        let cwd = if view.snapshot.state.cwd.is_empty() {
-            self.lifecycle.cwd.clone()
-        } else {
-            PathBuf::from(&view.snapshot.state.cwd)
-        };
-        drop(view);
-        let saved = self
-            .saved
-            .lock()
-            .await
-            .values()
-            .map(PathBuf::from)
-            .collect::<Vec<_>>();
-        let explicit = params["directory"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .map(std::path::Path::new);
-        let directory = self.lifecycle.discover(&cwd, explicit, &saved).await;
+    fn directory_rows(
+        directory: &eden_session_lifecycle::Directory,
+        params: &Value,
+        current_history: Option<&std::path::Path>,
+    ) -> Vec<Value> {
         let query = text(&params["query"]).to_lowercase();
         let mut rows = vec![];
-        for entry in directory.entries {
+        for entry in &directory.entries {
             let path = entry.path.to_string_lossy().into_owned();
             let id = format!("history:{path}");
-            let current = owner
-                .opened
-                .as_ref()
-                .and_then(|opened| opened.history.as_ref())
-                .is_some_and(|history| history == &entry.path);
+            let current = current_history == Some(entry.path.as_path());
             let content = if entry.diagnostic.is_some() {
                 "History needs inspection"
             } else if !entry.has_content {
@@ -511,7 +501,6 @@ impl Server {
             if !query.is_empty() && !format!("{summary} {path}").to_lowercase().contains(&query) {
                 continue;
             }
-            self.saved.lock().await.insert(id.clone(), path.clone());
             rows.push(json!({
                 "sessionId": id,
                 "summary": summary,
@@ -528,6 +517,95 @@ impl Server {
                     "edenCurrent": current,
                 },
             }));
+        }
+        rows
+    }
+    pub(crate) async fn list(&self, params: &Value) -> Result<Value, Fault> {
+        let root = self.root().await;
+        let owner = if let Some(id) = params["sessionId"]
+            .as_str()
+            .or_else(|| params["filter_session_id"].as_str())
+        {
+            self.sessions.lock().await.get(id).cloned().unwrap_or(root)
+        } else {
+            root
+        };
+        let view = owner.view.lock().await;
+        let cwd = if view.snapshot.state.cwd.is_empty() {
+            self.lifecycle.cwd.clone()
+        } else {
+            PathBuf::from(&view.snapshot.state.cwd)
+        };
+        drop(view);
+        let saved = self
+            .saved
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .values()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        let explicit = params["directory"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(std::path::Path::new);
+        let current_history = owner
+            .opened
+            .as_ref()
+            .and_then(|opened| opened.history.as_deref());
+        crate::trace(json!({
+            "direction": "phase",
+            "phase": "directory",
+            "edge": "start",
+            "cwd": cwd,
+            "picker": params["_meta"]["edenPicker"],
+        }));
+        let mut emitted = 0;
+        let directory = self
+            .lifecycle
+            .discover_progress(&cwd, explicit, &saved, |partial| {
+                let rows = Self::directory_rows(partial, params, current_history);
+                for row in &rows {
+                    self.saved
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .insert(
+                            text(&row["sessionId"]).into(),
+                            text(&row["_meta"]["edenPath"]).into(),
+                        );
+                }
+                if (emitted == 0 || partial.entries.len() % 16 == 0)
+                    && !params["_meta"]["edenPicker"].is_null()
+                {
+                    let _ = self.output.send(json!({
+                        "jsonrpc": "2.0",
+                        "method": "_eden/session/list_progress",
+                        "params": {
+                            "picker": params["_meta"]["edenPicker"],
+                            "sessions": rows,
+                            "_meta": { "edenDiagnostics": partial.diagnostics },
+                        },
+                    }));
+                    emitted += 1;
+                }
+            })
+            .await;
+        crate::trace(json!({
+            "direction": "phase",
+            "phase": "directory",
+            "edge": "end",
+            "picker": params["_meta"]["edenPicker"],
+            "entries": directory.entries.len(),
+            "progress_batches": emitted,
+        }));
+        let rows = Self::directory_rows(&directory, params, current_history);
+        for row in &rows {
+            self.saved
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(
+                    text(&row["sessionId"]).into(),
+                    text(&row["_meta"]["edenPath"]).into(),
+                );
         }
         Ok(json!({
             "sessions": rows,

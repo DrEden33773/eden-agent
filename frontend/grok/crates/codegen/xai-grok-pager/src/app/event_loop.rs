@@ -636,6 +636,8 @@ impl Presenter {
             || sync.queued(),
         );
         if drew {
+            crate::eden_services::drawn(sync.queued(), app);
+            crate::eden_services::written(sync.written());
             self.mark_drawn(Instant::now());
         }
     }
@@ -2156,6 +2158,7 @@ pub(crate) async fn run(
                         return Err(e);
                     }
                 };
+                crate::eden_services::written(sequence);
                 if presenter.acknowledge(sequence) {
                     let first_frame = xai_grok_telemetry::startup::record_interactive_frame();
                     if first_frame && xai_grok_telemetry::startup::exit_after_first_render() {

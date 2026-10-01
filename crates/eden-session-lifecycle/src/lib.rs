@@ -19,6 +19,8 @@ pub struct Lifecycle {
     pub cwd: PathBuf,
     pub state_dir: PathBuf,
     pub legacy_directories: Vec<PathBuf>,
+    #[serde(skip)]
+    startup_cleanup: std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 /// Keep the history locator and host instance separate from persistent Session identity.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -65,7 +67,7 @@ pub enum OpenOutcome {
     ReadOnly,
 }
 /// Faulty directories cannot discard valid histories from other directories.
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[allow(missing_docs)]
 pub struct Directory {
     pub entries: Vec<SavedSession>,
@@ -141,15 +143,62 @@ pub fn report_start_failure(error: &(dyn std::error::Error + 'static)) {
     }
 }
 // A cancelled startup still kills its unpublished child; published hosts are disarmed.
-struct Startup(Option<tokio::process::Child>);
+struct Startup {
+    child: Option<tokio::process::Child>,
+    endpoint: PathBuf,
+    cleanup: std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+}
 impl Drop for Startup {
     fn drop(&mut self) {
-        if let Some(child) = &mut self.0 {
+        if let Some(mut child) = self.child.take() {
             let _ = child.start_kill();
+            let endpoint = self.endpoint.clone();
+            let task = tokio::spawn(async move {
+                let _ = child.wait().await;
+                let _ = tokio::fs::remove_file(endpoint).await;
+            });
+            self.cleanup
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(task);
         }
     }
 }
 impl Lifecycle {
+    /// Keep launch configuration serializable while cleanup ownership remains local to its consumer.
+    pub fn new(
+        executable: PathBuf,
+        arguments: Vec<String>,
+        cwd: PathBuf,
+        state_dir: PathBuf,
+        legacy_directories: Vec<PathBuf>,
+    ) -> Self {
+        Self {
+            executable,
+            arguments,
+            cwd,
+            state_dir,
+            legacy_directories,
+            startup_cleanup: Default::default(),
+        }
+    }
+    /// Frontend shutdown calls this after cancelling requests, before reporting cleanup complete.
+    pub async fn finish_startup_cleanup(&self) {
+        loop {
+            let tasks = std::mem::take(
+                &mut *self
+                    .startup_cleanup
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()),
+            );
+            if tasks.is_empty() {
+                return;
+            }
+            for task in tasks {
+                let _ = task.await;
+            }
+        }
+    }
     /// Validate endpoint metadata and the responding host before acquiring an attachment.
     pub async fn attach(&self, endpoint: &Path, history: Option<PathBuf>) -> Result<Opened, Fault> {
         let endpoint_path = std::fs::canonicalize(endpoint)
@@ -402,13 +451,17 @@ impl Lifecycle {
         command.process_group(0);
         #[cfg(windows)]
         command.creation_flags(0x0800_0200);
-        let mut startup = Startup(Some(
-            command
-                .spawn()
-                .map_err(|e| fault("StartFailed", e.to_string()))?,
-        ));
+        let mut startup = Startup {
+            child: Some(
+                command
+                    .spawn()
+                    .map_err(|e| fault("StartFailed", e.to_string()))?,
+            ),
+            endpoint: endpoint.clone(),
+            cleanup: self.startup_cleanup.clone(),
+        };
         let child = startup
-            .0
+            .child
             .as_mut()
             .ok_or_else(|| fault("StartFailed", "missing startup child"))?;
         let ready = tokio::time::timeout(Duration::from_secs(30), async {
@@ -444,7 +497,7 @@ impl Lifecycle {
         });
         match ready {
             Ok(mut opened) => {
-                if let Some(mut child) = startup.0.take() {
+                if let Some(mut child) = startup.child.take() {
                     tokio::spawn(async move {
                         let _ = child.wait().await;
                     });
@@ -464,10 +517,12 @@ impl Lifecycle {
                 Ok(opened)
             }
             Err(error) => {
-                if let Some(mut child) = startup.0.take() {
-                    let _ = child.kill().await;
+                // Retain ownership across the wait so cancellation still queues the reaper.
+                if let Some(child) = startup.child.as_mut() {
+                    let _ = child.start_kill();
                     let _ = child.wait().await;
                 }
+                startup.child.take();
                 let _ = tokio::fs::remove_file(&endpoint).await;
                 Err(error)
             }
@@ -552,6 +607,16 @@ impl Lifecycle {
         explicit: Option<&Path>,
         saved: &[PathBuf],
     ) -> Directory {
+        self.discover_progress(cwd, explicit, saved, |_| {}).await
+    }
+    /// Emit usable metadata before slower entries finish; callers keep the same canonical policy.
+    pub async fn discover_progress(
+        &self,
+        cwd: &Path,
+        explicit: Option<&Path>,
+        saved: &[PathBuf],
+        mut progress: impl FnMut(&Directory),
+    ) -> Directory {
         let project = cwd.join(".eden/sessions");
         let mut directories = if let Some(directory) = explicit {
             vec![cwd.join(directory)]
@@ -588,6 +653,12 @@ impl Lifecycle {
                         entry.path = canonical(&entry.path);
                         if !result.entries.iter().any(|r| r.path == entry.path) {
                             result.entries.push(entry);
+                            result.entries.sort_by(|a, b| {
+                                b.modified_ns
+                                    .cmp(&a.modified_ns)
+                                    .then_with(|| a.path.cmp(&b.path))
+                            });
+                            progress(&result);
                         }
                     }
                     Err(error) => result
@@ -619,6 +690,7 @@ mod tests {
             cwd: directory.clone(),
             state_dir: directory.join("state"),
             legacy_directories: vec![],
+            startup_cleanup: Default::default(),
         }
     }
     fn history(path: &Path, id: u64) {
@@ -643,6 +715,53 @@ mod tests {
                 + "\n",
         )
         .unwrap();
+    }
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn cancelled_start_waits_child_exit_and_writer_release() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut service = fixture("cancelled-start");
+        let executable = service.cwd.join("slow-host");
+        std::fs::write(
+            &executable,
+            r#"#!/usr/bin/env python3
+import fcntl, os, pathlib, sys, time
+cwd = pathlib.Path(sys.argv[sys.argv.index('--cwd') + 1])
+lock = (cwd / 'startup.lock').open('a+')
+fcntl.flock(lock, fcntl.LOCK_EX)
+(cwd / 'startup.pid').write_text(str(os.getpid()))
+while True: time.sleep(60)
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        service.executable = executable;
+        let created = service.clone();
+        let task = tokio::spawn(async move { created.create(false).await });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut tick = tokio::time::interval(Duration::from_millis(10));
+            while !service.cwd.join("startup.pid").exists() {
+                tick.tick().await;
+            }
+        })
+        .await
+        .unwrap();
+        let pid = std::fs::read_to_string(service.cwd.join("startup.pid")).unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(service.cwd.join("startup.lock"))
+            .unwrap();
+        assert!(lock.try_lock().is_err());
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(10), service.finish_startup_cleanup())
+            .await
+            .unwrap();
+        assert!(!PathBuf::from(format!("/proc/{pid}")).exists());
+        lock.try_lock().unwrap();
+        drop(lock);
+        std::fs::remove_dir_all(service.cwd).unwrap();
     }
     #[tokio::test]
     async fn stale_registry_does_not_take_over_an_existing_writer() {
@@ -749,7 +868,13 @@ mod tests {
         let invalid = service.cwd.join("not-a-directory");
         std::fs::write(&invalid, "fixture").unwrap();
         service.legacy_directories.push(invalid);
-        let result = service.discover(&service.cwd, None, &[]).await;
+        let mut received = vec![];
+        let result = service
+            .discover_progress(&service.cwd, None, &[], |partial| {
+                received.push(partial.entries.len())
+            })
+            .await;
+        assert_eq!(received, [1, 2, 3]);
         assert_eq!(result.entries.len(), 3);
         assert_eq!(
             result

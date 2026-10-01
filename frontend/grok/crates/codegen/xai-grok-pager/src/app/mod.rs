@@ -39,7 +39,7 @@ mod acp_handler;
 mod connect_timeout;
 mod csi_filter;
 mod dashboard_session_picker;
-mod dispatch;
+pub(crate) mod dispatch;
 pub mod roster;
 pub mod session_startup;
 pub(crate) mod session_title_resolve;

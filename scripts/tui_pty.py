@@ -79,6 +79,21 @@ class Terminal:
         self.paint(self.decoder.decode(bytes(result)))
         return bytes(result)
 
+    def drain(self):
+        """Paint all bytes already acknowledged by the terminal writer."""
+        result = bytearray()
+        while select.select([self.master], [], [], 0)[0]:
+            try:
+                chunk = os.read(self.master, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            result.extend(chunk)
+        self.output.extend(result)
+        self.paint(self.decoder.decode(bytes(result)))
+        return bytes(result)
+
     def paint(self, data):
         data = self.pending + data
         self.pending = ""

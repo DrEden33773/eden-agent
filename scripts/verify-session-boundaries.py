@@ -149,12 +149,68 @@ def main():
         large_endpoint_path, large_endpoint = owner(fixture, large)
         assert large_endpoint_path != new_endpoint_path
         assert large_endpoint["session_id"] == current_endpoint["session_id"]
+        ready_frame = wait_until(
+            lambda: next(
+                (
+                    row
+                    for row in trace_rows(trace)
+                    if row.get("direction") == "frame"
+                    and row.get("method") == "session/loaded"
+                    and row.get("session") == load["reply"]["session"]
+                    and row.get("ready") is True
+                ),
+                None,
+            ),
+            terminal,
+        )
+        phase_rows = [
+            row
+            for row in trace_rows(trace)
+            if row.get("direction") == "phase" and row.get("session") == load["reply"]["session"]
+        ]
+        timings = {}
+        for phase in ("connection", "snapshot", "projection"):
+            starts = [
+                row
+                for row in phase_rows
+                if row.get("phase") == phase and row.get("edge") == "start"
+            ]
+            ends = [
+                row for row in phase_rows if row.get("phase") == phase and row.get("edge") == "end"
+            ]
+            timings[phase + "_seconds"] = sum(
+                (end["time_ns"] - start["time_ns"]) / 1e9
+                for start, end in zip(starts, ends, strict=True)
+            )
+        list_starts = [
+            row
+            for row in trace_rows(trace)
+            if row.get("phase") == "directory" and row.get("edge") == "start"
+        ]
+        list_ends = [
+            row
+            for row in trace_rows(trace)
+            if row.get("phase") == "directory" and row.get("edge") == "end"
+        ]
+        timings["directory_seconds"] = (list_ends[-1]["time_ns"] - list_starts[-1]["time_ns"]) / 1e9
+        request = next(
+            row
+            for row in trace_rows(trace)
+            if row.get("direction") == "in"
+            and row.get("id") == load["request"]["id"]
+            and row.get("session") == load["request"]["session"]
+        )
+        timings["request_to_written_operable_frame_seconds"] = (
+            ready_frame["time_ns"] - request["time_ns"]
+        ) / 1e9
         terminal.command("!printf LARGE_INPUT_USABLE")
         committed(large_endpoint, "LARGE_INPUT_USABLE")
         terminal.wait("LARGE_INPUT_USABLE")
         fixture.capture("large-history-ready")
         checks["large_history"] = {
             "bytes": large_size,
+            "phase_timings": timings,
+            "written_operable_frame": ready_frame,
             "synthetic_committed_user_messages_with_padding": 80,
             "load": load,
             "input_usable": True,
@@ -287,6 +343,32 @@ def main():
         assert len(fixture.provider.requests) == 0
         assert not fixture.business.calls, fixture.business.calls
         checks["grok_business_http_calls"] = 0
+        observed = trace_rows(trace)
+        directory_starts = [
+            row
+            for row in observed
+            if row.get("phase") == "directory" and row.get("edge") == "start"
+        ]
+        directory_ends = [
+            row for row in observed if row.get("phase") == "directory" and row.get("edge") == "end"
+        ]
+        early_frames = [
+            frame
+            for start, end in zip(directory_starts, directory_ends, strict=True)
+            for frame in observed
+            if frame.get("direction") == "frame"
+            and frame.get("method") == "directory/accepted"
+            and frame.get("count", 0) > 0
+            and frame.get("row")
+            and isinstance(start.get("picker"), dict)
+            and start["picker"] == end["picker"]
+            and frame.get("host") == start["picker"]["host"]
+            and frame.get("generation") == start["picker"]["generation"]
+            and frame.get("seq") == start["picker"]["seq"]
+            and start["time_ns"] < frame["time_ns"] < end["time_ns"]
+        ]
+        assert early_frames, "No usable directory row written before scan completion"
+        checks["progressive_directory_written_before_scan_complete"] = early_frames[0]
         checks["provider_requests"] = 0
         (args.output / "summary.json").write_text(json.dumps(checks, indent=2) + "\n")
 

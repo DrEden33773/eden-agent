@@ -1393,6 +1393,7 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
             cwd: agent.session.cwd.display().to_string(),
         });
         notify_session_ready(&app.notification_service, agent);
+        crate::eden_services::consumed(serde_json::json!({ "method": "session/loaded", "session": agent.session.session_id.as_ref().map(|id| id.0.as_ref()) }));
         let loaded_identity = agent.session.session_id.clone();
         let previous = agent.eden_previous_agent.take();
         if let Some(previous) = previous {

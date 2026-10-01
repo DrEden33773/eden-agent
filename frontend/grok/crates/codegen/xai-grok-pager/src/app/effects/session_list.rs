@@ -16,7 +16,7 @@ use xai_grok_shell::session::unified_list::ListScope;
 use xai_grok_tools::implementations::skills::skill::extract_skill_display_text;
 /// Which rows the local-storage lookup applies to; the store is walked at most once either way.
 #[derive(Debug, Clone, Copy)]
-pub(super) enum LocalPresence {
+pub(crate) enum LocalPresence {
     /// `remote` rows found on disk become `local`; everything else keeps the shell's label.
     Relabel,
     /// Rows needing local storage must exist on disk; daemon rows stay available. Conversation and foreign rows never qualify.
@@ -99,7 +99,7 @@ pub(super) async fn parse_session_picker_entries_blocking(
 /// Sessions older than 30 days, and sessions with no usable user prompt (empty `summary` after fallbacks), are dropped.
 ///
 /// `resolve_local` receives the candidate ids for `presence` and returns the subset that exists on disk; each call is a full `~/.grok/sessions` walk.
-fn parse_session_picker_entries_with(
+pub(crate) fn parse_session_picker_entries_with(
     mut payload: Value,
     presence: LocalPresence,
     resolve_local: impl FnOnce(&[&str]) -> Result<HashSet<String>, String>,

@@ -3,7 +3,7 @@
 //! This module takes [`Effect`] values produced by [`super::dispatch`] and spawns them as async tasks on a [`JoinSet`].
 //! When tasks complete, the event loop converts their output into [`TaskResult`] and feeds it back through dispatch.
 pub(crate) mod helpers;
-mod session_list;
+pub(crate) mod session_list;
 use super::actions;
 use super::worktree_session;
 #[allow(unused_imports)]
@@ -748,6 +748,9 @@ pub(crate) fn execute(
                             "FetchSessionList with kind facet filter"
                         );
                         }
+                    }
+                    if crate::eden_services::enabled() {
+                        params["_meta"]["edenPicker"] = serde_json::json!({ "host": format!("{host:?}"), "generation": generation, "seq": seq, "query": query });
                     }
                     let request = acp::ExtRequest::new(
                         "x.ai/session/list",

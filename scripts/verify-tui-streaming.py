@@ -107,6 +107,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     )
                 else:
                     emit({"content": "TOOLS_FINISHED"}, "stop")
+            elif server.mode == "single":
+                server.allow.wait(15)
+                emit({"content": "STREAM_FINISHED"}, "stop")
             else:
                 server.allow.wait(15)
                 emit({"content": "```rust\n"})

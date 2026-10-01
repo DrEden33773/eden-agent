@@ -58,25 +58,49 @@ def main():
         fixture.provider.started.clear()
         fixture.provider.done.clear()
         fixture.provider.allow.clear()
+        # One agent chunk contains the final marker, making its frame unambiguous.
+        fixture.provider.mode = "single"
         terminal.command("LATE_PREVIOUS_TARGET_WORK")
         assert fixture.provider.started.wait(timeout=10)
+        active_previous = probe.streaming.live.call(endpoint, "/tui/snapshot")["state"][
+            "active_run"
+        ]
         terminal.send(b"\x12")
-        select(terminal, empty, trace)
+        selected_load = select(terminal, empty, trace)
         terminal.wait("Empty session")
         terminal.send(b"NEW_TARGET_DRAFT")
         offset = len(trace.read_text().splitlines())
         fixture.provider.allow.set()
         probe.streaming.live.wait_for(endpoint, lambda frame: frame["state"]["active_run"] is None)
-        wait_until(
-            lambda: any(
-                row.get("update") == "agent_message_chunk"
-                and row.get("session", "").startswith(f"history:{history}::view-")
-                for row in trace_rows(trace)[offset:]
-                if row.get("session") is not None
+        consumed = wait_until(
+            lambda: next(
+                (
+                    row
+                    for row in trace_rows(trace)[offset:]
+                    if row.get("direction") == "frame"
+                    and row.get("method") == "session/update"
+                    and row.get("update") == "agent_message_chunk"
+                    and row.get("session", "").startswith(f"history:{history}::view-")
+                    and row.get("run") == active_previous
+                    and row.get("replay") is False
+                    and row.get("view") == selected_load["reply"]["session"]
+                ),
+                None,
             ),
             terminal,
         )
-        terminal.read(0.1)
+        outgoing = [
+            row
+            for row in trace_rows(trace)[offset:]
+            if row.get("direction") == "out"
+            and row.get("method") == "session/update"
+            and row.get("update") == "agent_message_chunk"
+            and row.get("session") == consumed["session"]
+            and row.get("run") == active_previous
+            and row.get("replay") is False
+        ]
+        assert len(outgoing) == 1, "The marker must identify exactly one agent update"
+        terminal.drain()
         assert "STREAM_FINISHED" not in terminal.display
         assert "NEW_TARGET_DRAFT" in terminal.display
         fixture.capture("late-old-events-isolated")
@@ -92,6 +116,7 @@ def main():
             "accepted_work_survives_ctrl_d_detach": True,
             "restored_completed_work_without_replay": True,
             "late_previous_target_events_do_not_pollute_new_view_or_draft": True,
+            "matching_consumed_and_written_frame": consumed,
             "selected_target_input_usable": True,
             "provider_requests": 2,
             "grok_business_http_calls": 0,

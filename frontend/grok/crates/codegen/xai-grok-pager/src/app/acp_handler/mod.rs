@@ -148,9 +148,14 @@ fn ack_prompt_from_update(view: &mut AgentView, meta: &NotificationMeta) {
     }
 }
 pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
+    let receipt = match &msg {
+        AcpClientMessage::SessionNotification(notif) => Some(serde_json::json!({ "method": "session/update", "update": if matches!(&notif.request.update, acp::SessionUpdate::AgentMessageChunk(_)) { "agent_message_chunk" } else { "other" }, "session": notif.request.session_id.0.as_ref(), "run": notif.request.meta.as_ref().and_then(|meta| meta.get("edenRunId")), "replay": notif.request.meta.as_ref().and_then(|meta| meta.get("isReplay")) })),
+        _ => None,
+    };
     let state_changed = handle_inner(msg, app);
+    let observed = receipt.is_some_and(crate::eden_services::consumed);
     let flushed = app.flush_image_notices_if_root();
-    state_changed || flushed
+    state_changed || flushed || observed
 }
 fn handle_inner(msg: AcpClientMessage, app: &mut AppView) -> bool {
     match msg {
@@ -623,6 +628,7 @@ fn queue_open_workflows_modal_refresh(app: &mut AppView, agent_id: AgentId) {
 }
 fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     let method = notif.method.as_ref();
+    if crate::eden_services::enabled() && method == "eden/session/list_progress" { return crate::eden_services::directory_progress(notif, app); }
     if crate::eden_services::enabled() && method == "eden/context/state" { return crate::eden_services::context_update(notif, app); }
     if crate::eden_services::enabled() && method == "eden/session/title" { return crate::eden_services::title_update(notif, app); }
     if crate::eden_services::enabled() && method == "eden/model/state" { let changed = crate::eden_services::model_update(notif, app); super::dispatch::refresh_open_settings_modals(app); return changed; }

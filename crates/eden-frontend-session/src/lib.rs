@@ -49,7 +49,13 @@ struct Adapter {
     output: mpsc::UnboundedSender<Value>,
 }
 
-fn trace(value: Value) {
+fn trace(mut value: Value) {
+    value["time_ns"] = json!(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    );
     if let Some(path) = std::env::var_os("EDEN_FRONTEND_TRACE") {
         use std::io::Write;
         if let Ok(mut file) = std::fs::OpenOptions::new()
@@ -82,9 +88,23 @@ impl Adapter {
         let expected = metadata["session_id"]
             .as_u64()
             .ok_or_else(|| fault("Missing endpoint Session identity"))?;
+        trace(json!({
+            "direction": "phase",
+            "phase": "snapshot",
+            "edge": "start",
+            "stage": "connect",
+            "session": identity,
+        }));
         let snapshot = HostClient::for_session(&endpoint, expected)
             .snapshot()
             .await?;
+        trace(json!({
+            "direction": "phase",
+            "phase": "snapshot",
+            "edge": "end",
+            "stage": "connect",
+            "session": identity,
+        }));
         let session = snapshot.presentation.session_id;
         Ok(Self {
             client: HostClient::for_session(&endpoint, session),
@@ -162,6 +182,14 @@ impl Adapter {
         self.client.wait(run).await?.into_result()
     }
     async fn project(&self, snapshot: Snapshot, replay: bool) {
+        if replay {
+            trace(json!({
+                "direction": "phase",
+                "phase": "projection",
+                "edge": "start",
+                "session": self.identity,
+            }));
+        }
         let resources = snapshot
             .events
             .iter()
@@ -245,6 +273,14 @@ impl Adapter {
             self.send(json!({
                 "method": "_eden/model/state",
                 "params": { "sessionId": self.identity, "models": models },
+            }));
+        }
+        if replay {
+            trace(json!({
+                "direction": "phase",
+                "phase": "projection",
+                "edge": "end",
+                "session": self.identity,
             }));
         }
     }
@@ -390,7 +426,21 @@ impl Adapter {
                     let lease = self.client.attach("tui").await?;
                     self.lease.store(lease, Ordering::Relaxed);
                 }
+                trace(json!({
+                    "direction": "phase",
+                    "phase": "snapshot",
+                    "edge": "start",
+                    "stage": "replay",
+                    "session": self.identity,
+                }));
                 let snapshot = self.client.snapshot().await?;
+                trace(json!({
+                    "direction": "phase",
+                    "phase": "snapshot",
+                    "edge": "end",
+                    "stage": "replay",
+                    "session": self.identity,
+                }));
                 let running = self.adopt_run(&snapshot).await;
                 self.project(snapshot, true).await;
                 self.publish_resources(&self.resource_inventory().await?, true);
@@ -647,6 +697,7 @@ pub async fn serve(
     }
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
+    server.finish_startup_cleanup().await;
     server.stop_followers().await;
     server.forms.close_all(&server).await;
     let mut cleanup_error = None;

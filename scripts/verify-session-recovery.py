@@ -147,12 +147,7 @@ def main():
             old_endpoint, "/shutdown", {"session_id": old_endpoint["session_id"]}
         )
         # Registry retirement and lock release are separate from shutdown acceptance.
-        lock_path = Path(str(old) + ".lock")
-        import fcntl
-
-        with lock_path.open("r+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            fcntl.flock(lock, fcntl.LOCK_UN)
+        wait_until(lambda: not writer_held(old))
         wait_until(lambda: process_gone(old_endpoint["pid"]))
         stopped_bytes = old.read_bytes()
         terminal = start()

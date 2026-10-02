@@ -53,7 +53,8 @@ pub struct State {
     #[serde(default)]
     pub pending_inputs: usize,
 }
-/// History contains committed public records; events are the retained live window, never synthetic messages.
+/// A requested consumer projection of committed history and the retained live event window.
+/// Complete audit reads remain available through the host's ordinary snapshot/history interfaces.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[allow(missing_docs)]
 pub struct Snapshot {
@@ -65,6 +66,9 @@ pub struct Snapshot {
     pub state: State,
     pub history: std::sync::Arc<Vec<Record>>,
     pub events: Vec<Event>,
+    /// Advance across events omitted by a consumer view without creating synthetic runtime events.
+    #[serde(default)]
+    pub events_cursor: u64,
 }
 /// A missing request is not proof of rejection: the bounded host receipt cache may have expired.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -234,7 +238,8 @@ impl HostClient {
     }
     /// Initial authoritative read, also suitable for reconnecting after an expired event cursor.
     pub async fn snapshot(&self) -> Result<Snapshot, Fault> {
-        self.read_snapshot("/tui/snapshot").await
+        self.read_snapshot("/tui/snapshot?history_view=presentation")
+            .await
     }
     /// Wait for either presentation or model/tool events, refreshing the attachment heartbeat.
     /// `AttachmentExpired` means call `attach` again on this same endpoint and use its new lease;
@@ -247,7 +252,7 @@ impl HostClient {
     ) -> Result<Snapshot, Fault> {
         self.read_snapshot(&format!(
             "/tui/snapshot?attachment={attachment}&after={presentation_sequence}&\
-             events_after={event_sequence}"
+             events_after={event_sequence}&history_view=presentation"
         ))
         .await
     }
@@ -258,11 +263,13 @@ impl HostClient {
         previous: Snapshot,
     ) -> Result<Snapshot, Fault> {
         let presentation = previous.presentation.sequence;
-        let events = previous.events.last().map_or(0, |e| e.sequence);
+        let events = previous
+            .events_cursor
+            .max(previous.events.last().map_or(0, |e| e.sequence));
         let head = previous.history.last().map_or(0, |r| r.sequence);
         let route = format!(
             "/tui/snapshot?attachment={attachment}&after={presentation}&events_after={events}&\
-             history_head={head}&incremental=1"
+             history_head={head}&incremental=1&history_view=presentation&history_delta=1"
         );
         self.read_snapshot_with_previous(&route, Some(previous))
             .await
@@ -276,7 +283,13 @@ impl HostClient {
         previous: Option<Snapshot>,
     ) -> Result<Snapshot, Fault> {
         let mut raw = self.request("GET", route, None).await?;
+        let mut timing = eden_protocol::latency::Span::new(
+            "snapshot.decode",
+            self.session_id.unwrap_or_default(),
+            0,
+        );
         let unchanged = raw["history_unchanged"] == true;
+        let append = raw["history_append"] == true;
         let reset = raw["events_reset"] != false;
         let first = raw["events_first"].as_u64();
         raw["presentation"] =
@@ -291,8 +304,25 @@ impl HostClient {
                 "endpoint now serves another session",
             ));
         }
-        if let Some(previous) = previous {
+        if let Some(mut previous) = previous {
             if unchanged {
+                snapshot.history = previous.history;
+            } else if append {
+                let mut head = previous.history.last().map_or(0, |record| record.sequence);
+                for record in snapshot.history.iter() {
+                    if record.sequence <= head
+                        || record.parent_id != (head != 0).then_some(head)
+                        || record.session_id != snapshot.state.session_id
+                    {
+                        return Err(fault(
+                            "InvalidInput",
+                            "history delta did not continue the requested cursor",
+                        ));
+                    }
+                    head = record.sequence;
+                }
+                std::sync::Arc::make_mut(&mut previous.history)
+                    .extend(std::sync::Arc::unwrap_or_clone(snapshot.history));
                 snapshot.history = previous.history;
             }
             if !reset {
@@ -304,7 +334,16 @@ impl HostClient {
                 }
                 snapshot.events = events;
             }
+        } else if append {
+            return Err(fault(
+                "InvalidInput",
+                "history delta needs a previous snapshot",
+            ));
         }
+        snapshot.events_cursor = snapshot
+            .events_cursor
+            .max(snapshot.events.last().map_or(0, |event| event.sequence));
+        timing.sizes(snapshot.history.len(), 0);
         Ok(snapshot)
     }
     /// Preserve text, images and references through the shared submission hook.
@@ -636,6 +675,22 @@ async fn call_pinned(
         endpoint.token,
         bytes.len()
     );
+    let mutation = method != "GET"
+        && !matches!(
+            route.split('?').next(),
+            Some(
+                "/request-status"
+                    | "/context/inspect"
+                    | "/configuration/inspect"
+                    | "/queue/inspect"
+                    | "/resources"
+                    | "/tools"
+                    | "/commands"
+                    | "/manage/info"
+                    | "/manage/tree"
+                    | "/manage/directory"
+            )
+        );
     tokio::time::timeout(deadlines.io, async {
         stream.write_all(header.as_bytes()).await?;
         stream.write_all(&bytes).await
@@ -644,7 +699,11 @@ async fn call_pinned(
     .map_err(|_| {
         fault(
             "OutputFailure",
-            "request write deadline exceeded; acceptance unknown",
+            if mutation {
+                "request write deadline exceeded; acceptance unknown"
+            } else {
+                "read request write deadline exceeded"
+            },
         )
     })?
     .map_err(|error| fault("OutputFailure", error.to_string()))?;
@@ -656,34 +715,51 @@ async fn call_pinned(
             Some("/terminal" | "/configuration/wait")
         )
     {
-        read_response(&mut stream).await
+        read_response(&mut stream, mutation).await
     } else {
-        tokio::time::timeout(deadlines.io, read_response(&mut stream))
+        tokio::time::timeout(deadlines.io, read_response(&mut stream, mutation))
             .await
             .map_err(|_| {
                 fault(
                     "InputFailure",
-                    "response deadline exceeded; mutation acceptance unknown, reconcile the \
-                     request identity before retrying",
+                    if mutation {
+                        "response deadline exceeded; mutation acceptance unknown, reconcile the \
+                         request identity before retrying"
+                    } else {
+                        "read response deadline exceeded"
+                    },
                 )
             })?
     }
 }
-async fn read_response(stream: &mut TcpStream) -> Result<Value, Fault> {
+async fn read_response(stream: &mut TcpStream, mutation: bool) -> Result<Value, Fault> {
+    let transfer = eden_protocol::latency::Span::new("http.response.read", 0, 0);
     let mut response = Vec::new();
     stream
         .read_to_end(&mut response)
         .await
         .map_err(|error| fault("InputFailure", error.to_string()))?;
+    drop(transfer);
+    let mut timing = eden_protocol::latency::Span::new("http.response.decode", 0, 0);
+    timing.sizes(0, response.len());
     let start = response
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
-        .ok_or_else(|| fault("InputFailure", "invalid response; acceptance unknown"))?
+        .ok_or_else(|| {
+            fault(
+                "InputFailure",
+                if mutation {
+                    "invalid response; acceptance unknown"
+                } else {
+                    "invalid read response"
+                },
+            )
+        })?
         + 4;
-    let envelope: Value = serde_json::from_slice(&response[start..])
+    let mut envelope: Value = serde_json::from_slice(&response[start..])
         .map_err(|error| fault("InputFailure", error.to_string()))?;
     if envelope["ok"] == true {
-        Ok(envelope["result"].clone())
+        Ok(envelope["result"].take())
     } else {
         Err(serde_json::from_value(envelope["error"].clone())
             .map_err(|error| fault("InputFailure", error.to_string()))?)
@@ -916,6 +992,110 @@ mod transport_tests {
         server.await.unwrap();
         tokio::fs::remove_file(path).await.unwrap();
     }
+    #[tokio::test]
+    async fn history_deltas_preserve_the_prefix_and_advance_across_filtered_events() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let path = std::env::temp_dir().join(format!("eden-delta-cursor-{}.json", address.port()));
+        tokio::fs::write(
+            &path,
+            json!({ "address": address.to_string(), "token": "fixture", "session_id": 1 })
+                .to_string(),
+        )
+        .await
+        .unwrap();
+        let node = |sequence, parent_id, text| {
+            json!({
+                "schema_version": 2,
+                "session_id": 1,
+                "sequence": sequence,
+                "run_id": 7,
+                "parent_id": parent_id,
+                "branch": "main",
+                "kind": "message",
+                "payload": { "text": text },
+            })
+        };
+        let initial = json!({
+            "presentation": {
+                "version": presentation::VERSION,
+                "session_id": 1,
+                "sequence": 0,
+                "views": [],
+                "activity": [],
+                "pending_interactions": [],
+            },
+            "state": { "session_id": 1, "closed": false },
+            "history": [node(1, None::<u64>, "prefix")],
+            "events": [],
+            "events_cursor": 8,
+        });
+        let mut append = initial.clone();
+        append["history"] = json!([node(2, Some(1), "suffix")]);
+        append["history_append"] = json!(true);
+        append["events_reset"] = json!(false);
+        append["events_cursor"] = json!(12);
+        let mut unchanged = append.clone();
+        unchanged["history"] = json!([]);
+        unchanged["history_append"] = json!(false);
+        unchanged["history_unchanged"] = json!(true);
+        unchanged["events_cursor"] = json!(15);
+        let server = tokio::spawn(async move {
+            for (index, response) in [initial, append, unchanged].into_iter().enumerate() {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let mut bytes = [0; 1024];
+                    let count = socket.read(&mut bytes).await.unwrap();
+                    assert!(count > 0);
+                    request.extend_from_slice(&bytes[..count]);
+                }
+                let request = String::from_utf8(request).unwrap();
+                if index > 0 {
+                    assert!(request.contains("history_delta=1"));
+                    assert!(
+                        request
+                            .contains(&format!("events_after={}", if index == 1 { 8 } else { 12 }))
+                    );
+                }
+                let body = json!({ "ok": true, "result": response }).to_string();
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: \
+                             close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let client = HostClient::for_session(&path, 1);
+        let initial = client.snapshot().await.unwrap();
+        let prefix = initial.history.clone();
+        let appended = client.poll_incremental(1, initial).await.unwrap();
+        assert_eq!(appended.history.len(), 2);
+        assert_eq!(appended.history[0].payload["text"], "prefix");
+        assert_eq!(appended.history[1].payload["text"], "suffix");
+        assert_eq!(
+            prefix.len(),
+            1,
+            "an already consumed snapshot must stay immutable"
+        );
+        assert_eq!(appended.events_cursor, 12);
+        let shared = appended.history.clone();
+        let unchanged = client.poll_incremental(1, appended).await.unwrap();
+        assert!(std::sync::Arc::ptr_eq(&shared, &unchanged.history));
+        assert_eq!(unchanged.events_cursor, 15);
+        assert!(
+            unchanged.events.is_empty(),
+            "cursor progress is not a synthetic runtime event"
+        );
+        server.await.unwrap();
+        tokio::fs::remove_file(path).await.unwrap();
+    }
     async fn silent_host() -> (
         PathBuf,
         tokio::task::JoinHandle<Vec<u8>>,
@@ -963,25 +1143,49 @@ mod transport_tests {
 
     #[tokio::test]
     async fn response_deadlines_release_socket_and_leave_mutation_acceptance_unknown() {
-        for (method, route, body) in [
-            ("GET", "/tui/snapshot", None),
-            (
-                "POST",
-                "/prompt",
-                Some(json!({ "request_id": "stable", "text": "once" })),
-            ),
-            (
-                "POST",
-                "/request-status",
-                Some(json!({ "request_id": "stable" })),
-            ),
-        ] {
+        for (method, route, body) in [(
+            "POST",
+            "/prompt",
+            Some(json!({ "request_id": "stable", "text": "once" })),
+        )] {
             let (path, server, _ready) = silent_host().await;
             let error = call_with_deadlines(&path, method, route, body.as_ref(), short_deadlines())
                 .await
                 .unwrap_err();
             assert_eq!(error.code, "InputFailure");
             assert!(error.message.contains("acceptance unknown"));
+            let request = tokio::time::timeout(Duration::from_secs(1), server)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                String::from_utf8(request)
+                    .unwrap()
+                    .starts_with(&format!("{method} {route} HTTP/1.1"))
+            );
+            tokio::fs::remove_file(path).await.unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn read_deadlines_release_socket_without_claiming_unknown_mutation() {
+        for (method, route, body) in [
+            ("GET", "/tui/snapshot", None),
+            (
+                "POST",
+                "/request-status",
+                Some(json!({ "request_id": "stable" })),
+            ),
+            ("POST", "/context/inspect", Some(Value::Null)),
+        ] {
+            let (path, server, _ready) = silent_host().await;
+            let error = call_with_deadlines(&path, method, route, body.as_ref(), short_deadlines())
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, "InputFailure");
+            assert!(
+                !error.message.contains("acceptance unknown"),
+                "{route}: {error}"
+            );
             let request = tokio::time::timeout(Duration::from_secs(1), server)
                 .await
                 .unwrap()

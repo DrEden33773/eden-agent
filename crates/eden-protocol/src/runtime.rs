@@ -82,6 +82,17 @@ pub enum HostRequest {
     /// new projection. Strategies call this at their successful projection commit boundary.
     InvalidateSnapshot,
     Environment,
+    /// Whether a role has no wrappers and resolves to this invocation's exact owner.
+    /// A false answer keeps callers on the complete legacy data contract.
+    IsOwnService {
+        contract: String,
+    },
+    /// An optional data view may be used only when both contracts resolve to the
+    /// same unwrapped live provider in this invocation's scope.
+    HasCompanion {
+        contract: String,
+        companion: String,
+    },
     Call {
         scope: String,
         contract: String,

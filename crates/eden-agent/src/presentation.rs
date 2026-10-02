@@ -78,7 +78,7 @@ impl Session {
         if !self.0.coding || !self.0.kernel.available() {
             return Ok(());
         }
-        let records = self.history().await?;
+        let records = self.history_with_view(c::StoreView::Presentation).await?;
         let saved = self.0.presentation.static_record(run_id, &records);
         if !saved.views.is_empty() {
             self.commit(run_id, "presentation_static", serde_json::json!(saved))

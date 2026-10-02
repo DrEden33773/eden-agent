@@ -859,13 +859,17 @@ pub async fn run_eden(launch: EdenLaunch) -> anyhow::Result<bool> {
         .await;
 
         signal_handler::clear_quit_notify();
+        let restore_timing = eden_session_workspace::latency::Span::new("terminal.restore", 0, 0);
         let restored = restore_terminal(
             terminal,
             writer_thread,
             reader_thread,
             current_screen_mode(),
         );
+        drop(restore_timing);
+        let flush_timing = eden_session_workspace::latency::Span::new("terminal.log_flush", 0, 0);
         crate::unified_log::flush_blocking().await;
+        drop(flush_timing);
         restored?;
         result.map(|run| run.quit_for_update)
     }

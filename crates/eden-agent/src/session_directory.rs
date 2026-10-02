@@ -3,6 +3,8 @@ use crate::{Fault, Session};
 use eden_protocol::coding::Record;
 use serde::Serialize;
 use std::path::PathBuf;
+#[path = "directory_scan.rs"]
+mod scan;
 
 #[derive(Clone, Debug, Serialize)]
 #[allow(missing_docs)]
@@ -373,24 +375,11 @@ fn describe_cancellable(
     path: PathBuf,
     cancel: &eden_plugin_sdk::Cancellation,
 ) -> Result<Option<SavedSession>, Fault> {
-    use std::io::Read;
-    let mut file = std::fs::File::open(&path).map_err(fault)?;
-    let mut bytes = Vec::new();
-    let mut chunk = [0; 65536];
-    loop {
-        if cancel.is_cancelled() {
-            return Ok(None);
-        }
-        let n = file.read(&mut chunk).map_err(fault)?;
-        if n == 0 {
-            break;
-        }
-        bytes.extend_from_slice(&chunk[..n]);
-    }
-    let scan = eden_protocol::history::scan_records(&bytes);
-    if cancel.is_cancelled() {
+    let file = std::fs::File::open(&path).map_err(fault)?;
+    let _timing = eden_protocol::latency::Span::new("directory.scan", 0, 0);
+    let Some(scan) = scan::inspect(file, cancel)? else {
         return Ok(None);
-    }
+    };
     Ok(Some(describe_records(path, scan.records, scan.diagnostic)))
 }
 

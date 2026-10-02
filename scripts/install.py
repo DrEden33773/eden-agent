@@ -164,7 +164,7 @@ def install(
                     "eden.history-recall-tool.v1",
                 ],
             ),
-            ("local-history", ["eden.session-store.v2"]),
+            ("local-history", ["eden.session-store.v2", "eden.session-store-access.v1"]),
             ("workspace-resources", ["eden.resource-source.v1"]),
             (
                 "distribution",

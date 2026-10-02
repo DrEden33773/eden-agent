@@ -199,6 +199,28 @@ pub(crate) fn context_update(
     true
 }
 
+pub(crate) fn connection_update(
+    notification: &agent_client_protocol::ExtNotification,
+    app: &mut crate::app::app_view::AppView,
+) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(notification.params.get()) else {
+        return false;
+    };
+    let Some(session) = value["sessionId"].as_str() else { return false };
+    let Some(connected) = value["connected"].as_bool() else { return false };
+    let message = value["message"].as_str().unwrap_or("Host connection changed");
+    for agent in app.agents.values_mut() {
+        if agent.session.session_id.as_ref().is_some_and(|id| id.0.as_ref() == session) {
+            agent.eden_connection = (!connected).then(|| message.to_owned());
+            if connected {
+                agent.show_toast(message);
+            }
+        }
+    }
+    consumed(serde_json::json!({ "method": "eden/connection/state", "session": session, "connected": connected }));
+    true
+}
+
 pub(crate) fn context_line(
     value: &serde_json::Value,
     model_window: Option<u64>,
@@ -378,6 +400,7 @@ pub(crate) fn directory_progress(
         app,
     );
     app.pending_effects.extend(effects);
+    consumed(serde_json::json!({ "method": "eden/session/list_progress", "generation": generation, "seq": seq }));
     true
 }
 
@@ -406,6 +429,29 @@ pub(crate) fn drawn(sequence: u64, app: &crate::app::app_view::AppView) {
             crate::app::app_view::ActiveView::Agent(id) => app.agents.get(&id),
             _ => None,
         };
+        if let Some(agent) = active {
+            use crate::acp::tracker::{TurnActivity, WaitingReason};
+            let phase = match agent.resolve_turn_activity_unenriched() {
+                Some(TurnActivity::Waiting(WaitingReason::PromptAck)) => "acceptance",
+                Some(TurnActivity::Waiting(WaitingReason::Model)) => "model",
+                Some(TurnActivity::Thinking) => "thinking",
+                Some(TurnActivity::Responding) => "responding",
+                Some(TurnActivity::ToolRunning { .. } | TurnActivity::WritingToolCall(_)) => "tool",
+                Some(_) => "other",
+                None if agent.session.state.is_idle() => "idle",
+                None => "working",
+            };
+            receipts.push(serde_json::json!({
+                "method": "eden/turn/state",
+                "session": agent.session.session_id.as_ref().map(|id| id.0.as_ref()),
+                "prompt": agent.session.current_prompt_id,
+                "phase": phase,
+                "ack_pending": agent.prompt_ack.is_some(),
+                "elapsed_ms": agent.turn_started_at.map(|start| start.elapsed().as_millis()),
+                "display_elapsed_ms": agent.status_activity_started_at().map(|start| start.elapsed().as_millis()),
+                "activity_elapsed_ms": agent.activity_started_at.map(|start| start.elapsed().as_millis()),
+            }));
+        }
         for receipt in &mut receipts {
             receipt["view"] = serde_json::json!(
                 active

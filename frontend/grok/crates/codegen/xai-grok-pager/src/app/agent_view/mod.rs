@@ -881,6 +881,8 @@ pub struct AgentView {
     pub(crate) modal_hovered_key: Option<char>,
     /// Cached server-reported context state.
     pub eden_context: serde_json::Value,
+    /// Connection feedback remains separate from assistant content and survives input edits.
+    pub(crate) eden_connection: Option<String>,
     pub context_state: Option<xai_grok_shell::session::ContextInfo>,
     pub status_context: Option<xai_grok_status_line::StatusLineContext>,
     /// Held across a frame that clamps the row away, so a script keeps the size

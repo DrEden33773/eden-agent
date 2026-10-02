@@ -81,6 +81,20 @@ fn inspect_ref(path: &Path) -> Result<HistoryRef, Fault> {
             .as_nanos(),
     })
 }
+fn file_revision(path: &Path, session_id: Option<u64>) -> Result<HistoryRef, Fault> {
+    let metadata = path.metadata().map_err(io)?;
+    Ok(HistoryRef {
+        path: path.to_owned(),
+        session_id,
+        bytes: metadata.len(),
+        modified_ns: metadata
+            .modified()
+            .map_err(io)?
+            .duration_since(UNIX_EPOCH)
+            .map_err(io)?
+            .as_nanos(),
+    })
+}
 fn lock_writer(path: &Path) -> Result<File, Fault> {
     let mut lock = path.as_os_str().to_owned();
     lock.push(".lock");
@@ -163,12 +177,20 @@ impl Lifecycle {
     }
     /// Review a selected history without changing its owner or acquiring a new execution host.
     pub async fn plan_removal(&self, path: &Path) -> Result<RemovalPlan, Fault> {
-        let path = path.to_owned();
-        let history = tokio::task::spawn_blocking(move || inspect_ref(&path))
-            .await
-            .map_err(io)??;
-        let info = Session::describe_saved_session(history.path.clone()).await?;
-        let owner = self.owner(&history.path).await?;
+        let _timing = eden_protocol::latency::Span::new("directory.removal_preview", 0, 0);
+        let path = std::fs::canonicalize(path).map_err(io)?;
+        let before = file_revision(&path, None)?;
+        let info = Session::describe_saved_session(path.clone()).await?;
+        let history = file_revision(&path, info.session_id)?;
+        if before.bytes != history.bytes || before.modified_ns != history.modified_ns {
+            return Err(fault(
+                "StaleSelection",
+                "history changed during inspection; review removal again",
+            ));
+        }
+        let owner = self
+            .owner_checked(history.path.clone(), history.session_id)
+            .await?;
         let state = if let Some(owner) = &owner {
             Some(
                 eden_tui_client::HostClient::for_instance(

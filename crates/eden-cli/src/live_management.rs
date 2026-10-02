@@ -302,6 +302,7 @@ mod tests {
             web_root: None,
             submissions: Mutex::new((HashMap::new(), VecDeque::new())),
             history: tokio::sync::Mutex::new(None),
+            presentation_history: tokio::sync::Mutex::new(None),
             stop,
         });
         let attachment = session.attach_presentation("tui").unwrap();

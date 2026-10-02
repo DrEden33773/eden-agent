@@ -51,6 +51,8 @@ struct Shared {
     submissions: Mutex<(HashMap<String, Submission>, VecDeque<String>)>,
     stop: watch::Sender<bool>,
     history: tokio::sync::Mutex<Option<(u64, Arc<Vec<eden_protocol::coding::Record>>)>>,
+    presentation_history:
+        tokio::sync::Mutex<Option<(u64, Arc<Vec<eden_protocol::coding::Record>>)>>,
 }
 fn fault(code: &str, message: impl Into<String>) -> Fault {
     Fault::new(code, "live", message)
@@ -208,6 +210,7 @@ async fn serve_session(
         web_root: web_root.map(Path::to_owned),
         submissions: Mutex::new((HashMap::new(), VecDeque::new())),
         history: tokio::sync::Mutex::new(None),
+        presentation_history: tokio::sync::Mutex::new(None),
         stop,
     });
     println!(
@@ -312,11 +315,14 @@ async fn serve(mut stream: TcpStream, host: Host) -> Result<(), Fault> {
                 json_error(fault("Unauthorized", "invalid host token"))
             } else {
                 match host.dispatch(&method, &path, body).await {
-                    Ok(value) => (
-                        200,
-                        "application/json",
-                        serde_json::to_vec(&json!({ "ok": true, "result": value })).unwrap(),
-                    ),
+                    Ok(value) => {
+                        let mut timing =
+                            eden_protocol::latency::Span::new("http.response.encode", 0, 0);
+                        let bytes =
+                            serde_json::to_vec(&json!({ "ok": true, "result": value })).unwrap();
+                        timing.sizes(0, bytes.len());
+                        (200, "application/json", bytes)
+                    }
                     Err(error) => json_error(error),
                 }
             }
@@ -329,6 +335,8 @@ async fn serve(mut stream: TcpStream, host: Host) -> Result<(), Fault> {
         if status == 200 { "OK" } else { "Error" },
         bytes.len()
     );
+    let mut timing = eden_protocol::latency::Span::new("http.response.write", 0, 0);
+    timing.sizes(0, bytes.len());
     tokio::time::timeout(Duration::from_secs(10), async {
         stream.write_all(header.as_bytes()).await?;
         stream.write_all(&bytes).await?;
@@ -549,8 +557,18 @@ async fn dispatch(
             }
             // Read events before history: a commit that races this read can appear in history
             // first, but its live event remains available to the next cursor read.
+            let _timing = eden_protocol::latency::Span::new("snapshot.build", session.id(), 0);
             let events = session.events();
-            let history = snapshot_history(shared, &events).await?;
+            let view = if query_parameter(path, "history_view") == Some("presentation") {
+                eden_protocol::coding::StoreView::Presentation
+            } else {
+                eden_protocol::coding::StoreView::Full
+            };
+            let history = if view == eden_protocol::coding::StoreView::Full {
+                snapshot_history(shared, &events).await?
+            } else {
+                snapshot_history_view(shared, &events, view).await?
+            };
             let incremental = query_parameter(path, "incremental") == Some("1");
             let after = query_parameter(path, "events_after")
                 .and_then(|v| v.parse::<u64>().ok())
@@ -560,18 +578,36 @@ async fn dispatch(
                     .first()
                     .is_some_and(|e| e.sequence > after.saturating_add(1));
             let head = history.last().map_or(0, |record| record.sequence);
-            let unchanged = !reset
-                && query_parameter(path, "history_head").and_then(|v| v.parse::<u64>().ok())
-                    == Some(head);
+            let previous_head =
+                query_parameter(path, "history_head").and_then(|v| v.parse::<u64>().ok());
+            let unchanged = !reset && previous_head == Some(head);
+            let append_from =
+                if !reset && !unchanged && query_parameter(path, "history_delta") == Some("1") {
+                    match previous_head {
+                        Some(0) => Some(0),
+                        Some(previous) => history
+                            .binary_search_by_key(&previous, |record| record.sequence)
+                            .ok()
+                            .map(|index| index + 1),
+                        None => None,
+                    }
+                } else {
+                    None
+                };
             let first = events.first().map(|event| event.sequence);
+            let cursor = events.last().map_or(0, |event| event.sequence);
             let events = events
                 .into_iter()
                 .filter(|event| reset || event.sequence > after)
+                .filter(|event| {
+                    view != eden_protocol::coding::StoreView::Presentation
+                        || event.kind != "service_called"
+                })
                 .collect::<Vec<_>>();
             let wire_history = if unchanged {
                 serde_json::Value::Array(Vec::new())
             } else {
-                serde_json::to_value(&history)
+                serde_json::to_value(&history[append_from.unwrap_or(0)..])
                     .map_err(|error| fault("InvalidInput", error.to_string()))?
             };
             Ok(json!({
@@ -579,8 +615,10 @@ async fn dispatch(
                 "state": session.state(),
                 "history": wire_history,
                 "history_unchanged": unchanged,
+                "history_append": append_from.is_some(),
                 "events_reset": reset,
                 "events_first": first,
+                "events_cursor": cursor,
                 "events": events,
             }))
         }
@@ -891,6 +929,14 @@ async fn dispatch_static(shared: &StaticShared, method: &str, path: &str) -> Res
             if query_parameter(path, "after").is_some() {
                 tokio::time::sleep(Duration::from_secs(4)).await;
             }
+            let history = if query_parameter(path, "history_view") == Some("presentation") {
+                eden_protocol::history::view_records(
+                    &shared.history,
+                    eden_protocol::coding::StoreView::Presentation,
+                )?
+            } else {
+                shared.history.clone()
+            };
             Ok(json!({
                 "presentation": shared.snapshot,
                 "state": {
@@ -900,7 +946,7 @@ async fn dispatch_static(shared: &StaticShared, method: &str, path: &str) -> Res
                     "read_only": true,
                     "cwd": shared.cwd,
                 },
-                "history": shared.history,
+                "history": history,
                 "host_instance": shared.instance,
                 "history_path": shared.history_path,
                 "reading": shared.reading,
@@ -1226,7 +1272,19 @@ async fn snapshot_history(
     shared: &Shared,
     events: &[eden_protocol::Event],
 ) -> Result<Arc<Vec<eden_protocol::coding::Record>>, Fault> {
-    let mut cache = shared.history.lock().await;
+    snapshot_history_view(shared, events, eden_protocol::coding::StoreView::Full).await
+}
+async fn snapshot_history_view(
+    shared: &Shared,
+    events: &[eden_protocol::Event],
+    view: eden_protocol::coding::StoreView,
+) -> Result<Arc<Vec<eden_protocol::coding::Record>>, Fault> {
+    let _timing = eden_protocol::latency::Span::new("snapshot.history", shared.session.id(), 0);
+    let mut cache = if view == eden_protocol::coding::StoreView::Presentation {
+        shared.presentation_history.lock().await
+    } else {
+        shared.history.lock().await
+    };
     let current = events.last().map_or(0, |event| event.sequence);
     let refresh = cache.as_ref().is_none_or(|(previous, _)| {
         events
@@ -1236,7 +1294,10 @@ async fn snapshot_history(
                 // A history read emits this trace after the snapshot's event cursor was
                 // captured. It cannot change history, so must not invalidate its own cache.
                 let history_read = event.kind == "service_called"
-                    && event.payload["contract"] == eden_protocol::coding::STORE
+                    && matches!(
+                        event.payload["contract"].as_str(),
+                        Some(eden_protocol::coding::STORE | eden_protocol::coding::STORE_ACCESS)
+                    )
                     && event.payload["input"]["operation"] == "read";
                 event.sequence > *previous
                     && !history_read
@@ -1250,7 +1311,8 @@ async fn snapshot_history(
             })
     });
     if refresh {
-        let history = eden_protocol::history::active_path(&shared.session.history().await?)?;
+        let records = shared.session.history_with_view(view).await?;
+        let history = eden_protocol::history::active_path(&records)?;
         *cache = Some((current, Arc::new(history)));
     }
     if let Some((sequence, history)) = cache.as_mut() {

@@ -16,6 +16,7 @@ mod sessions;
 mod submission;
 
 pub use eden_protocol::Fault;
+pub use eden_protocol::latency;
 use eden_tui_client::{HostClient, Snapshot};
 use projection::{Projection, text};
 use serde_json::{Value, json};
@@ -184,6 +185,11 @@ impl Adapter {
         self.client.wait(run).await?.into_result()
     }
     async fn project(&self, snapshot: Snapshot, replay: bool) {
+        let _timing = eden_protocol::latency::Span::new(
+            "snapshot.consume",
+            self.session,
+            snapshot.state.active_run.unwrap_or_default(),
+        );
         if replay {
             trace(json!({
                 "direction": "phase",
@@ -305,7 +311,7 @@ impl Adapter {
             match self.client.poll_incremental(lease, previous).await {
                 Ok(snapshot) => {
                     if disconnected {
-                        self.message("Reconnected to the same Eden Session.");
+                        self.connection_status(true, "Reconnected to the same Eden Session.");
                     }
                     disconnected = false;
                     self.project(snapshot, false).await;
@@ -325,7 +331,7 @@ impl Adapter {
                 }
                 Err(error) => {
                     if !disconnected {
-                        self.message(&format!("Host disconnected: {error}"));
+                        self.connection_status(false, &format!("Host disconnected: {error}"));
                     }
                     if matches!(
                         error.code.as_str(),
@@ -338,6 +344,12 @@ impl Adapter {
                 }
             }
         }
+    }
+    fn connection_status(&self, connected: bool, message: &str) {
+        self.emit(
+            ViewEventKind::Connection,
+            json!({ "sessionId": self.identity, "connected": connected, "message": message }),
+        );
     }
     fn message(&self, body: &str) {
         self.update(

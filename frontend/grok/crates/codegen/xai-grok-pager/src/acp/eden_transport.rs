@@ -106,6 +106,7 @@ pub(crate) async fn connect(
                                 ViewEventKind::PromptComplete => "x.ai/session/prompt_complete",
                                 ViewEventKind::Queue => "x.ai/queue/changed",
                                 ViewEventKind::CatalogProgress => "eden/session/list_progress",
+                                ViewEventKind::Connection => "eden/connection/state",
                                 ViewEventKind::Update => unreachable!(),
                             };
                             let notification = acp::ExtNotification::new(

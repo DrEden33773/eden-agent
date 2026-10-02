@@ -22,6 +22,7 @@ pub enum ViewEventKind {
     PromptComplete,
     Queue,
     CatalogProgress,
+    Connection,
 }
 
 /// Ordered view stream. The consumer acknowledges the barrier only after preceding updates
@@ -216,6 +217,14 @@ impl SessionWorkspace {
             "id": id,
             "error": result.as_ref().err().map(|error| &error.code),
             "session": result.as_ref().ok().and_then(|r| r["sessionId"].as_str()),
+            "run": result
+                .as_ref()
+                .ok()
+                .and_then(|r| r["_meta"]["edenRunId"].as_u64()),
+            "prompt": result
+                .as_ref()
+                .ok()
+                .and_then(|r| r["_meta"]["promptId"].as_str()),
         }));
         self.server.follow_all().await;
         result
@@ -223,6 +232,7 @@ impl SessionWorkspace {
 
     /// Finish consumer-owned cleanup. A draft with no accepted work is closed; saved hosts detach.
     pub async fn close(&self) -> Result<(), Fault> {
+        let _timing = eden_protocol::latency::Span::new("frontend.cleanup", 0, 0);
         self.server.cancel_catalog();
         let mut error = self.server.finish_startup_cleanup().await.err();
         self.server.stop_followers().await;

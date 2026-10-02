@@ -254,6 +254,14 @@ mod tests {
                     records: vec![]
                 })
             }
+            eden_plugin_sdk::protocol::runtime::HOST => {
+                let eden_plugin_sdk::protocol::runtime::HostRequest::HasCompanion { .. } =
+                    serde_json::from_value(request.payload).unwrap()
+                else {
+                    panic!("unexpected host query")
+                };
+                json!(false)
+            }
             other => panic!("unexpected contract {other}"),
         };
         // SAFETY: Each accepted request consumes its unique reply token once.

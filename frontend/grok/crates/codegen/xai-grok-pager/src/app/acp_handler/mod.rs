@@ -630,6 +630,7 @@ fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> b
     let method = notif.method.as_ref();
     if crate::eden_services::enabled() && method == "eden/session/list_progress" { return crate::eden_services::directory_progress(notif, app); }
     if crate::eden_services::enabled() && method == "eden/context/state" { return crate::eden_services::context_update(notif, app); }
+    if crate::eden_services::enabled() && method == "eden/connection/state" { return crate::eden_services::connection_update(notif, app); }
     if crate::eden_services::enabled() && method == "eden/session/title" { return crate::eden_services::title_update(notif, app); }
     if crate::eden_services::enabled() && method == "eden/model/state" { let changed = crate::eden_services::model_update(notif, app); super::dispatch::refresh_open_settings_modals(app); return changed; }
     if crate::acp::is_session_update_ext_method(method) {

@@ -349,6 +349,13 @@ impl Lifecycle {
         let expected = Session::describe_saved_session(history.clone())
             .await?
             .session_id;
+        self.owner_checked(history, expected).await
+    }
+    pub(crate) async fn owner_checked(
+        &self,
+        history: PathBuf,
+        expected: Option<u64>,
+    ) -> Result<Option<Opened>, Fault> {
         let entries = match std::fs::read_dir(self.state_dir.join("live")) {
             Ok(entries) => entries,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),

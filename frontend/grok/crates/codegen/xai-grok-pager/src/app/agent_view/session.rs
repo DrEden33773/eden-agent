@@ -195,6 +195,7 @@ impl AgentView {
             modal_buttons: Vec::new(),
             modal_hovered_key: None,
             eden_context: serde_json::Value::Null,
+            eden_connection: None,
             context_state: None,
             status_context: None,
             last_status_line_size: None,
@@ -1061,6 +1062,15 @@ impl AgentView {
             now_ms,
         }))
     }
+    /// Eden's visible prompt clock must not restart when acceptance or connection feedback changes phase.
+    pub(crate) fn status_activity_started_at(&self) -> Option<Instant> {
+        if crate::eden_services::enabled() {
+            self.turn_started_at.or(self.activity_started_at)
+        } else {
+            self.activity_started_at
+        }
+    }
+
     /// Turn activity for the status spinner: an implicit "no activity" gap during a running inference turn resolves to an explicit [`WaitingReason`].
     /// A `TaskOutput` wait shows the bg task's description (`{description}…`).
     /// A `Subagent` wait shows the subagent count (`Waiting for subagent` or `Waiting for N subagents`).

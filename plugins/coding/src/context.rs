@@ -714,8 +714,12 @@ pub(crate) async fn context(
         ));
     }
     if input.records.is_empty() && input.action != "branch_summary" {
-        let history: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
+        let history: StoreReply = store_call(&cx, StoreRequest::Read).await?;
         input.records = history.records;
+    }
+    if input.action != "branch_summary" && cx.is_own_service(CONTEXT).await.unwrap_or(false) {
+        input.records =
+            eden_plugin_sdk::protocol::history::view_records(&input.records, StoreView::Coding)?;
     }
     if let Some(target) = &input.target {
         input.limits = target.limits.clone();
@@ -759,7 +763,7 @@ pub(crate) async fn context(
     ) || input.action == "branch_summary"
         || ((input.action.is_empty() || input.action == "project") && threshold)
     {
-        let before: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
+        let before: StoreReply = store_call(&cx, StoreRequest::Read).await?;
         if input.action != "branch_summary"
             && serde_json::to_value(&before.records).ok()
                 != serde_json::to_value(&input.records).ok()
@@ -1001,20 +1005,19 @@ pub(crate) async fn context(
                     "checkpoint cancelled before commit",
                 ));
             }
-            let committed: StoreReply = cx
-                .call(
-                    STORE,
-                    &StoreRequest::AppendChecked {
-                        new_branch: None,
-                        run_id: cx.run_id(),
-                        session_id: before.session_id,
-                        sequence: before.sequence,
-                        head: before.active_head,
-                        branch: before.active_branch,
-                        entries,
-                    },
-                )
-                .await?;
+            let committed: StoreReply = store_call(
+                &cx,
+                StoreRequest::AppendChecked {
+                    new_branch: None,
+                    run_id: cx.run_id(),
+                    session_id: before.session_id,
+                    sequence: before.sequence,
+                    head: before.active_head,
+                    branch: before.active_branch,
+                    entries,
+                },
+            )
+            .await?;
             cx.invalidate_snapshot().await?;
             cx.emit(
                 "committed",

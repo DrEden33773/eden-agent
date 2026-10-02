@@ -52,6 +52,11 @@ impl CallContext {
         contract: &str,
         input: &I,
     ) -> Result<O, Fault> {
+        let _timing = p::latency::Span::new(
+            p::latency::service_stage(contract),
+            self.session_id(),
+            self.run_id(),
+        );
         let value = self.call_terminal(contract, input).await?.into_result()?;
         serde_json::from_value(value).map_err(serialization)
     }
@@ -146,6 +151,28 @@ impl CallContext {
     pub async fn host_environment(&self) -> Result<Option<p::environment::HostEnvironment>, Fault> {
         self.call(p::runtime::HOST, &p::runtime::HostRequest::Environment)
             .await
+    }
+    /// Ask the host before using an instance-specific compact input. Wrappers and
+    /// replacement services must continue receiving their complete legacy inputs.
+    pub async fn is_own_service(&self, contract: &str) -> Result<bool, Fault> {
+        self.call(
+            p::runtime::HOST,
+            &p::runtime::HostRequest::IsOwnService {
+                contract: contract.into(),
+            },
+        )
+        .await
+    }
+    /// Negotiate an optional view without bypassing a selected replacement or wrapper.
+    pub async fn has_companion(&self, contract: &str, companion: &str) -> Result<bool, Fault> {
+        self.call(
+            p::runtime::HOST,
+            &p::runtime::HostRequest::HasCompanion {
+                contract: contract.into(),
+                companion: companion.into(),
+            },
+        )
+        .await
     }
     /// Host-issued owner and generation; never derive ownership from package configuration.
     pub fn identity(&self) -> Option<&p::runtime::CallIdentity> {

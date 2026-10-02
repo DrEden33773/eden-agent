@@ -8,17 +8,37 @@ use eden_plugin_sdk::{
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+async fn store_call(cx: &CallContext, request: StoreRequest) -> Result<StoreReply, Fault> {
+    let view = if cx.is_own_service(CONTEXT).await.unwrap_or(false) {
+        StoreView::Coding
+    } else {
+        StoreView::Full
+    };
+    let mut reply: StoreReply = if view != StoreView::Full
+        && cx.has_companion(STORE, STORE_ACCESS).await.unwrap_or(false)
+    {
+        cx.call(STORE_ACCESS, &request.with_view(view)).await?
+    } else {
+        cx.call(STORE, &request).await?
+    };
+    if view != StoreView::Full {
+        reply.records = eden_plugin_sdk::protocol::history::view_records(&reply.records, view)?;
+    }
+    Ok(reply)
+}
+
 async fn append(cx: &CallContext, kind: &str, payload: Value) -> Result<StoreReply, Fault> {
-    let receipt: StoreReply = cx
-        .call(
-            STORE,
-            &StoreRequest::Append {
-                run_id: cx.run_id(),
-                kind: kind.into(),
-                payload,
-            },
-        )
-        .await?;
+    let request = StoreRequest::Append {
+        run_id: cx.run_id(),
+        kind: kind.into(),
+        payload,
+    };
+    let receipt: StoreReply = if cx.has_companion(STORE, STORE_ACCESS).await.unwrap_or(false) {
+        cx.call(STORE_ACCESS, &request.with_view(StoreView::Receipt))
+            .await?
+    } else {
+        cx.call(STORE, &request).await?
+    };
     cx.emit(
         "committed",
         json!({ "sequence": receipt.sequence, "kind": kind }),
@@ -418,7 +438,7 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
                 return Ok(answer);
             }
         }
-        let history: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
+        let history: StoreReply = store_call(&cx, StoreRequest::Read).await?;
         let context_input = ContextInput {
             target: input.target.clone(),
             resources: resources.clone(),
@@ -438,7 +458,7 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
         )
         .await?;
         let mut context_input = context_input;
-        let fresh: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
+        let fresh: StoreReply = store_call(&cx, StoreRequest::Read).await?;
         context_input.records = fresh.records;
         let projected: ModelInput = cx.call(CONTEXT, &context_input).await?;
         let prepared = match edits::prepare(&context_input, projected, &cx, &settings).await {
@@ -449,7 +469,7 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
         let mut projected = prepared.input;
         // Context may have committed a summary request and checkpoint. Allocate
         // the next identity from that resulting history, never the stale input.
-        let history: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
+        let history: StoreReply = store_call(&cx, StoreRequest::Read).await?;
         let request_id = format!("{}:{}", cx.run_id(), history.sequence + 1);
         let deliveries = queue::statuses(&history.records);
         let queue_ids: Vec<_> = deliveries
@@ -471,20 +491,19 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
                 "prompt_cache": prepared.prompt_cache,
             }),
         });
-        let committed: Result<StoreReply, Fault> = cx
-            .call(
-                STORE,
-                &StoreRequest::AppendChecked {
-                    new_branch: None,
-                    run_id: cx.run_id(),
-                    session_id: prepared.revision.session_id,
-                    sequence: prepared.revision.sequence,
-                    head: prepared.revision.head,
-                    branch: prepared.revision.branch,
-                    entries: request_records,
-                },
-            )
-            .await;
+        let committed: Result<StoreReply, Fault> = store_call(
+            &cx,
+            StoreRequest::AppendChecked {
+                new_branch: None,
+                run_id: cx.run_id(),
+                session_id: prepared.revision.session_id,
+                sequence: prepared.revision.sequence,
+                head: prepared.revision.head,
+                branch: prepared.revision.branch,
+                entries: request_records,
+            },
+        )
+        .await;
         let committed = match committed {
             Ok(receipt) => receipt,
             Err(error) if error.code == "CheckpointConflict" => continue,
@@ -555,7 +574,7 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
                 ));
             }
         }
-        let response_history: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
+        let response_history: StoreReply = store_call(&cx, StoreRequest::Read).await?;
         // Consumption and every intention share one durable response transaction.
         // A cancellation can therefore never consume input without its model response.
         let mut drafts: Vec<_> = reply
@@ -591,15 +610,14 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
             }
         }
         let committed_kinds: Vec<_> = drafts.iter().map(|draft| draft.kind.clone()).collect();
-        let receipt: StoreReply = cx
-            .call(
-                STORE,
-                &StoreRequest::AppendBatch {
-                    run_id: cx.run_id(),
-                    entries: drafts,
-                },
-            )
-            .await?;
+        let receipt: StoreReply = store_call(
+            &cx,
+            StoreRequest::AppendBatch {
+                run_id: cx.run_id(),
+                entries: drafts,
+            },
+        )
+        .await?;
         let first_sequence = receipt.sequence - committed_kinds.len() as u64 + 1;
         for (index, kind) in committed_kinds.iter().enumerate() {
             cx.emit(
@@ -638,7 +656,7 @@ async fn run(mut input: RunInput, cx: CallContext, settings: Settings) -> Result
             .await?;
         }
         if usage_overflow && settings.auto_compaction() && !prepared.references {
-            let history: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
+            let history: StoreReply = store_call(&cx, StoreRequest::Read).await?;
             let _: ModelInput = cx
                 .call(
                     CONTEXT,

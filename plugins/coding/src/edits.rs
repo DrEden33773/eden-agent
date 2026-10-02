@@ -91,7 +91,7 @@ pub(crate) async fn service(
         references,
     } = request
     {
-        let before: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
+        let before: StoreReply = store_call(&cx, StoreRequest::Read).await?;
         input.records = before.records;
         if input.target.is_none() {
             input.limits = super::model_limits(&cx).await?;
@@ -185,7 +185,7 @@ pub(crate) async fn service(
     if input.target.is_none() {
         input.limits = super::model_limits(&cx).await?;
     }
-    let before: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
+    let before: StoreReply = store_call(&cx, StoreRequest::Read).await?;
     input.records = before.records.clone();
     input.action = "inspect".into();
     let model: ModelInput = cx.call(CONTEXT, &input).await?;
@@ -282,23 +282,22 @@ pub(crate) async fn service(
         scope: edit.scope,
         source: edit.source,
     };
-    let committed: StoreReply = cx
-        .call(
-            STORE,
-            &StoreRequest::AppendChecked {
-                new_branch: None,
-                run_id: cx.run_id(),
-                session_id: before.session_id,
-                sequence: before.sequence,
-                head: before.active_head,
-                branch: before.active_branch,
-                entries: vec![RecordDraft {
-                    kind: "context_edit".into(),
-                    payload: json!(transaction),
-                }],
-            },
-        )
-        .await?;
+    let committed: StoreReply = store_call(
+        &cx,
+        StoreRequest::AppendChecked {
+            new_branch: None,
+            run_id: cx.run_id(),
+            session_id: before.session_id,
+            sequence: before.sequence,
+            head: before.active_head,
+            branch: before.active_branch,
+            entries: vec![RecordDraft {
+                kind: "context_edit".into(),
+                payload: json!(transaction),
+            }],
+        },
+    )
+    .await?;
     cx.invalidate_snapshot().await?;
     cx.emit(
         "committed",
@@ -330,7 +329,7 @@ pub(crate) async fn prepare(
     cx: &CallContext,
     settings: &Settings,
 ) -> Result<e::Prepared, Fault> {
-    let before: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
+    let before: StoreReply = store_call(&cx, StoreRequest::Read).await?;
     if before
         .records
         .iter()
@@ -444,7 +443,7 @@ async fn rebuild_context(
     cx: CallContext,
     settings: Settings,
 ) -> Result<e::Snapshot, Fault> {
-    let before: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
+    let before: StoreReply = store_call(&cx, StoreRequest::Read).await?;
     let path = active_path(&before.records)?;
     if rebuild.edit_ids.iter().any(|id| {
         !path.iter().any(|record| {
@@ -474,26 +473,22 @@ async fn rebuild_context(
     let original = context::document(&input, &cx).await?;
     let (effective, edits) = apply(&original, &input.records)?;
     effective.validate()?;
-    let committed: StoreReply = cx
-        .call(
-            STORE,
-            &StoreRequest::AppendChecked {
-                run_id: cx.run_id(),
-                session_id: rebuild.revision.session_id,
-                sequence: rebuild.revision.sequence,
-                head: rebuild.revision.head,
-                branch: rebuild.revision.branch,
-                new_branch: Some(rebuild.branch),
-                entries: vec![RecordDraft {
-                    kind: "context_rebuild".into(),
-                    payload: json!({
-                        "edit_ids": rebuild.edit_ids,
-                        "source_head": before.active_head,
-                    }),
-                }],
-            },
-        )
-        .await?;
+    let committed: StoreReply = store_call(
+        &cx,
+        StoreRequest::AppendChecked {
+            run_id: cx.run_id(),
+            session_id: rebuild.revision.session_id,
+            sequence: rebuild.revision.sequence,
+            head: rebuild.revision.head,
+            branch: rebuild.revision.branch,
+            new_branch: Some(rebuild.branch),
+            entries: vec![RecordDraft {
+                kind: "context_rebuild".into(),
+                payload: json!({ "edit_ids": rebuild.edit_ids, "source_head": before.active_head }),
+            }],
+        },
+    )
+    .await?;
     cx.invalidate_snapshot().await?;
     cx.emit(
         "committed",
@@ -566,7 +561,7 @@ async fn edit_images(
     cx: CallContext,
     settings: Settings,
 ) -> Result<e::Snapshot, Fault> {
-    let before: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
+    let before: StoreReply = store_call(&cx, StoreRequest::Read).await?;
     if edit.revision.session_id != before.session_id
         || edit.revision.sequence != before.sequence
         || edit.revision.head != before.active_head
@@ -615,20 +610,19 @@ async fn edit_images(
     )
     .await?;
     if !prepared.records.is_empty() {
-        let committed: StoreReply = cx
-            .call(
-                STORE,
-                &StoreRequest::AppendChecked {
-                    run_id: cx.run_id(),
-                    session_id: before.session_id,
-                    sequence: before.sequence,
-                    head: before.active_head,
-                    branch: before.active_branch,
-                    new_branch: None,
-                    entries: prepared.records,
-                },
-            )
-            .await?;
+        let committed: StoreReply = store_call(
+            &cx,
+            StoreRequest::AppendChecked {
+                run_id: cx.run_id(),
+                session_id: before.session_id,
+                sequence: before.sequence,
+                head: before.active_head,
+                branch: before.active_branch,
+                new_branch: None,
+                entries: prepared.records,
+            },
+        )
+        .await?;
         cx.invalidate_snapshot().await?;
         cx.emit(
             "committed",
@@ -698,13 +692,13 @@ pub(crate) async fn recover_request(
     first_sequence: u64,
 ) -> Result<ModelInput, Fault> {
     let retry = if applied.is_empty() {
-        let history: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
+        let history: StoreReply = store_call(&cx, StoreRequest::Read).await?;
         reject_late_changes(&history.records, first_sequence)?;
         let mut recovery = input.clone();
         recovery.action = "overflow".into();
         recovery.records = history.records;
         let compacted: ModelInput = cx.call(CONTEXT, &recovery).await?;
-        let after: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
+        let after: StoreReply = store_call(&cx, StoreRequest::Read).await?;
         reject_late_changes(&after.records, first_sequence)?;
         recovery.records = after.records;
         // A context strategy returns original image blocks. Every actual attempt must still
@@ -712,7 +706,7 @@ pub(crate) async fn recover_request(
         prepare(&recovery, compacted, cx, settings).await?
     } else {
         let compacted = context::recover_edited(input, model, cx, settings).await?;
-        let history: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
+        let history: StoreReply = store_call(&cx, StoreRequest::Read).await?;
         e::Prepared {
             input: compacted,
             revision: e::Revision {
@@ -736,20 +730,19 @@ pub(crate) async fn recover_request(
             "prompt_cache": retry.prompt_cache,
         }),
     });
-    let committed: StoreReply = cx
-        .call(
-            STORE,
-            &StoreRequest::AppendChecked {
-                run_id: cx.run_id(),
-                session_id: retry.revision.session_id,
-                sequence: retry.revision.sequence,
-                head: retry.revision.head,
-                branch: retry.revision.branch,
-                new_branch: None,
-                entries: records,
-            },
-        )
-        .await?;
+    let committed: StoreReply = store_call(
+        &cx,
+        StoreRequest::AppendChecked {
+            run_id: cx.run_id(),
+            session_id: retry.revision.session_id,
+            sequence: retry.revision.sequence,
+            head: retry.revision.head,
+            branch: retry.revision.branch,
+            new_branch: None,
+            entries: records,
+        },
+    )
+    .await?;
     cx.emit(
         "committed",
         json!({ "sequence": committed.sequence, "kind": "model_request_revision" }),

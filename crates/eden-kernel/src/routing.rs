@@ -33,6 +33,22 @@ pub(super) struct Router {
     pub jobs: Mutex<BTreeMap<u64, Arc<Job>>>,
 }
 impl Router {
+    pub(crate) fn has_companion(&self, scope: &str, contract: &str, companion: &str) -> bool {
+        let (Ok(primary), Ok(view)) = (
+            self.graph.binding(scope, contract),
+            self.graph.binding(scope, companion),
+        ) else {
+            return false;
+        };
+        primary.wrappers.is_empty()
+            && view.wrappers.is_empty()
+            && primary.tail == view.tail
+            && self.unit(&primary.tail).is_ok_and(|unit| {
+                unit.open.load(Ordering::Acquire)
+                    && unit.provides.iter().any(|role| role == contract)
+                    && unit.provides.iter().any(|role| role == companion)
+            })
+    }
     pub fn unit(&self, id: &str) -> Result<Arc<Managed>, Fault> {
         self.instances
             .lock()
@@ -451,6 +467,21 @@ impl Router {
             }
 
             HostRequest::Environment => serde_json::to_value(&self.environment).map_err(codec),
+            HostRequest::HasCompanion {
+                contract,
+                companion,
+            } => Ok(serde_json::json!(self.has_companion(
+                &identity.scope,
+                &contract,
+                &companion
+            ))),
+            HostRequest::IsOwnService { contract } => {
+                let selected = self.graph.binding(&identity.scope, &contract)?;
+                let own = selected.wrappers.is_empty()
+                    && selected.tail == identity.owner.id
+                    && self.unit(&selected.tail)?.identity == identity.owner;
+                Ok(serde_json::json!(own))
+            }
             HostRequest::Call {
                 scope,
                 contract,

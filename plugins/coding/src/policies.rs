@@ -35,7 +35,7 @@ pub(crate) async fn run(
             })
             .map(|entry| entry.id.clone())
             .collect();
-        let history: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
+        let history: StoreReply = store_call(&cx, StoreRequest::Read).await?;
         if let Some(checkpoint) = eden_plugin_sdk::protocol::history::active_path(&history.records)?
             .iter()
             .rev()

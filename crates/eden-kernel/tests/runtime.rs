@@ -54,6 +54,101 @@ fn tail() -> Package {
     }
     package
 }
+#[tokio::test]
+async fn optional_views_never_bypass_a_replacement_wrapper_or_scoped_store() {
+    use p::coding::{STORE, STORE_ACCESS};
+    for (wrapped, other_view) in [(false, false), (true, false), (false, true)] {
+        let make_store = |name| {
+            Package::new(name)
+                .service(STORE, |_: Value, _| async { Ok(Value::Null) })
+                .service(STORE_ACCESS, |_: Value, _| async { Ok(Value::Null) })
+        };
+        let wrapper = Package::new("store-wrapper").service(STORE, |input: Value, cx| async move {
+            cx.delegate::<_, Value>(&input).await
+        });
+        let probe = Package::new("probe")
+            .service("view-probe", |_: Value, cx| async move {
+                let child: bool = cx
+                    .call_in("child", "child-view-probe", &Value::Null)
+                    .await?;
+                Ok(json!({
+                    "view": cx.has_companion(STORE, STORE_ACCESS).await?,
+                    "own": cx.is_own_service("view-probe").await?,
+                    "missing": cx.has_companion(STORE, "missing-view").await?,
+                    "child": child,
+                }))
+            })
+            .service("child-view-probe", |_: Value, cx| async move {
+                cx.has_companion(STORE, STORE_ACCESS).await
+            });
+        let kernel = mount(
+            vec![
+                tail(),
+                make_store("store"),
+                make_store("other"),
+                wrapper,
+                probe,
+            ],
+            json!({
+                "scopes": {
+                    "": {
+                        "bindings": {
+                            (STORE): {
+                                "tail": "store",
+                                "wrappers": if wrapped {
+                                        vec!["store-wrapper"]
+                                    } else {
+                                        vec![]
+                                    },
+                            },
+                            (STORE_ACCESS): {
+                                "tail": if other_view {
+                                        "other"
+                                    } else {
+                                        "store"
+                                    },
+                            },
+                            "view-probe": { "tail": "probe" },
+                            "child-view-probe": { "tail": "probe" },
+                        },
+                    },
+                    "child": { "parent": "", "bindings": { (STORE): { "tail": "other" } } },
+                },
+            }),
+        )
+        .await;
+        assert_eq!(
+            kernel.has_companion(STORE, STORE_ACCESS),
+            !wrapped && !other_view
+        );
+        let result = kernel
+            .invoke(
+                Request {
+                    execution: None,
+                    session_id: 1,
+                    run_id: 1,
+                    contract: "view-probe".into(),
+                    payload: Value::Null,
+                },
+                Cancellation::default(),
+            )
+            .await
+            .into_result()
+            .unwrap();
+        assert_eq!(
+            result,
+            json!({
+                "view": !wrapped && !other_view,
+                "own": true,
+                "missing": false,
+                "child": other_view,
+            })
+        );
+        kernel.quiesce_instance("store").unwrap();
+        assert!(!kernel.has_companion(STORE, STORE_ACCESS));
+        kernel.shutdown().await.unwrap();
+    }
+}
 async fn invoke(kernel: &Kernel, input: &str) -> String {
     kernel
         .invoke(

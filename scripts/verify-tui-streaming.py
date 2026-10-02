@@ -35,6 +35,9 @@ class Provider(http.server.ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), Handler)
         self.sent = {}
         self.requests = []
+        self.arrivals = []
+        self.first_bytes = []
+        self.gate_timeout = 15
         self.started = threading.Event()
         self.allow = threading.Event()
         self.done = threading.Event()
@@ -52,12 +55,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         assert isinstance(server, Provider)
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         server.requests.append(request)
+        server.arrivals.append(time.monotonic())
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
         server.started.set()
 
         def emit(delta, finish=None, usage=None):
+            if len(server.first_bytes) < len(server.requests):
+                server.first_bytes.append(time.monotonic())
             value = {"choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
             if usage:
                 value["usage"] = usage
@@ -108,10 +114,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 else:
                     emit({"content": "TOOLS_FINISHED"}, "stop")
             elif server.mode == "single":
-                server.allow.wait(15)
+                server.allow.wait(server.gate_timeout)
                 emit({"content": "STREAM_FINISHED"}, "stop")
             else:
-                server.allow.wait(15)
+                server.allow.wait(server.gate_timeout)
                 emit({"content": "```rust\n"})
                 for index in range(600 if server.mode == "stream" else 2):
                     server.sent[index] = time.monotonic()

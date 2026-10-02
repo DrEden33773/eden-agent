@@ -1,6 +1,9 @@
 //! Public history validation and active-branch projection, independent of native plugins.
 
-use crate::{Fault, coding::Record};
+use crate::{
+    Fault,
+    coding::{Record, StoreView},
+};
 use serde::{Deserialize, Serialize};
 
 /// A validated committed prefix and, if present, the first damage diagnostic.
@@ -24,7 +27,9 @@ fn invalid(message: impl Into<String>) -> Fault {
     Fault::new("PersistenceFailure", "public-history", message)
 }
 
-fn validate_next(records: &[Record], record: &Record) -> Result<(), Fault> {
+/// Validate one next node against an already validated prefix. Readers must publish
+/// a transaction only after every node passes; this check does not write history.
+pub fn validate_next(records: &[Record], record: &Record) -> Result<(), Fault> {
     if !matches!(record.schema_version, 1 | 2)
         || record.sequence != records.len() as u64 + 1
         || record.branch.trim().is_empty()
@@ -167,6 +172,86 @@ pub fn active_path(records: &[Record]) -> Result<Vec<Record>, Fault> {
     Ok(path)
 }
 
+/// Build a requested read view while retaining every tree identity. Full audit reads
+/// remain byte-for-byte representable; these projections never enter persisted history.
+pub fn view_records(records: &[Record], view: StoreView) -> Result<Vec<Record>, Fault> {
+    if view == StoreView::Full {
+        return Ok(records.to_vec());
+    }
+    if view == StoreView::Receipt {
+        return Ok(Vec::new());
+    }
+    let (mut head, _) = branch_state(records)?;
+    let mut last_input = None;
+    if view == StoreView::Coding {
+        while let Some(sequence) = head {
+            let record = &records[sequence as usize - 1];
+            if matches!(
+                record.kind.as_str(),
+                "model_request" | "model_request_revision"
+            ) && record.payload.get("input").is_some()
+            {
+                last_input = Some(sequence);
+                break;
+            }
+            head = record.parent_id;
+        }
+    }
+    Ok(records
+        .iter()
+        .map(|record| {
+            let payload = if matches!(
+                record.kind.as_str(),
+                "model_request" | "model_request_revision"
+            ) && Some(record.sequence) != last_input
+            {
+                record
+                    .payload
+                    .as_object()
+                    .map(|payload| {
+                        serde_json::Value::Object(
+                            payload
+                                .iter()
+                                .filter(|(key, _)| {
+                                    !matches!(key.as_str(), "input" | "prompt_cache")
+                                })
+                                .map(|(key, value)| (key.clone(), value.clone()))
+                                .collect(),
+                        )
+                    })
+                    .unwrap_or_else(|| record.payload.clone())
+            } else if matches!(record.kind.as_str(), "message" | "user_message")
+                && record.payload["type"] == "message"
+            {
+                serde_json::Value::Object(
+                    record
+                        .payload
+                        .as_object()
+                        .into_iter()
+                        .flatten()
+                        .filter(|(key, _)| {
+                            matches!(key.as_str(), "type" | "role" | "content" | "references")
+                        })
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect(),
+                )
+            } else {
+                record.payload.clone()
+            };
+            Record {
+                schema_version: record.schema_version,
+                session_id: record.session_id,
+                sequence: record.sequence,
+                parent_id: record.parent_id,
+                branch: record.branch.clone(),
+                run_id: record.run_id,
+                kind: record.kind.clone(),
+                payload,
+            }
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,6 +267,79 @@ mod tests {
             kind: kind.into(),
             payload: json!({}),
         }
+    }
+    #[test]
+    fn consumer_views_preserve_audit_and_select_the_current_ancestor_request() {
+        let mut first = record(2, Some(1), "model_request");
+        first.payload = json!({
+            "input": { "items": ["OLD_AUDIT_INPUT"] },
+            "context_edits": [1],
+            "prompt_cache": { "version": 2 },
+        });
+        let mut departed = record(3, Some(2), "model_request");
+        departed.payload =
+            json!({ "input": { "items": ["DEPARTED_INPUT"] }, "context_edits": [2] });
+        let mut selection = record(4, Some(2), "branch_selected");
+        selection.branch = "alternate".into();
+        selection.payload = json!({ "target": 2, "branch": "alternate" });
+        let mut message = record(5, Some(2), "message");
+        message.branch = "alternate".into();
+        message.payload = json!({
+            "type": "message",
+            "role": "user",
+            "content": [{ "type": "text", "text": "KEEP_ALL_TEXT" }],
+            "references": ["KEEP_REFERENCE"],
+            "audit_extra": "x".repeat(1024 * 1024),
+        });
+        let records = vec![
+            record(1, None, "session"),
+            first,
+            departed,
+            selection,
+            message,
+        ];
+        let original = encode_transaction(&records).unwrap();
+        let coding = view_records(&records, StoreView::Coding).unwrap();
+        validate_records(&coding).unwrap();
+        assert_eq!(coding.len(), records.len());
+        assert_eq!(coding[1].payload["input"], records[1].payload["input"]);
+        assert_eq!(
+            coding[1].payload["prompt_cache"],
+            records[1].payload["prompt_cache"]
+        );
+        assert!(coding[2].payload.get("input").is_none());
+        assert_eq!(coding[2].payload["context_edits"], json!([2]));
+        assert_eq!(coding[4].payload["references"], json!(["KEEP_REFERENCE"]));
+        assert_eq!(coding[4].payload["content"], records[4].payload["content"]);
+        assert!(serde_json::to_vec(&coding).unwrap().len() < 4096);
+        let presentation = view_records(&records, StoreView::Presentation).unwrap();
+        assert!(presentation[1].payload.get("input").is_none());
+        assert_eq!(
+            encode_transaction(&view_records(&records, StoreView::Full).unwrap()).unwrap(),
+            original
+        );
+        assert_eq!(encode_transaction(&records).unwrap(), original);
+    }
+
+    #[test]
+    fn optional_store_reply_view_retains_the_legacy_operation_wire_contract() {
+        let request = crate::coding::StoreRequest::AppendChecked {
+            run_id: 7,
+            session_id: 9,
+            sequence: 12,
+            head: Some(10),
+            branch: "work".into(),
+            new_branch: None,
+            entries: vec![crate::coding::RecordDraft {
+                kind: "message".into(),
+                payload: json!({ "text": "intent" }),
+            }],
+        };
+        let legacy = serde_json::to_value(&request).unwrap();
+        let optional = serde_json::to_value(request.with_view(StoreView::Receipt)).unwrap();
+        assert_eq!(optional["_eden_history_view"], "receipt");
+        let decoded: crate::coding::StoreRequest = serde_json::from_value(optional).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), legacy);
     }
     #[test]
     fn incomplete_transaction_exposes_only_previously_committed_prefix() {

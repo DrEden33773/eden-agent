@@ -152,7 +152,7 @@ def main() -> None:
                 package("presentation-live", PROVIDES, str(native), target()),
                 package(
                     "local-history",
-                    [STORE],
+                    [STORE, "eden.session-store-access.v1"],
                     str(build_target() / "debug" / library("eden_local_history")),
                     target(),
                 ),

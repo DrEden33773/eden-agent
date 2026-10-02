@@ -9,6 +9,7 @@ pub mod context_edit;
 pub mod delivery;
 pub mod environment;
 pub mod interaction;
+pub mod latency;
 pub mod models;
 pub mod presentation;
 pub mod private_input;

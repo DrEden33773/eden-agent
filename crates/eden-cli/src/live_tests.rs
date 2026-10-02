@@ -23,6 +23,9 @@ async fn session_with_preview_barrier(
                 cx.scope.cancellation().cancelled().await;
                 Err(fault("Cancelled", "test cancelled"))
             } else {
+                if input.prompt == "snapshot-context" {
+                    cx.call::<_, Value>(CONTEXT, &Value::Null).await?;
+                }
                 Ok::<_, Fault>(json!(input.prompt))
             }
         })
@@ -128,6 +131,7 @@ async fn typed_transport_preserves_receipts_detach_and_real_events() {
         web_root: None,
         submissions: Mutex::new((HashMap::new(), VecDeque::new())),
         history: tokio::sync::Mutex::new(None),
+        presentation_history: tokio::sync::Mutex::new(None),
         stop,
     });
     let server = tokio::spawn(async move {
@@ -341,6 +345,7 @@ async fn idle_snapshots_do_not_refresh_history_from_their_own_store_reads() {
         web_root: None,
         submissions: Mutex::new((HashMap::new(), VecDeque::new())),
         history: tokio::sync::Mutex::new(None),
+        presentation_history: tokio::sync::Mutex::new(None),
         stop,
     });
     for _ in 0..4 {
@@ -380,6 +385,105 @@ async fn idle_snapshots_do_not_refresh_history_from_their_own_store_reads() {
 }
 
 #[tokio::test]
+async fn presentation_snapshot_filters_runtime_calls_and_sends_only_the_valid_history_suffix() {
+    use eden_protocol::coding::{Record, StoreView};
+    let session = session().await;
+    let records: Vec<Record> = (1..=3)
+        .map(|sequence| Record {
+            schema_version: 2,
+            session_id: session.id(),
+            sequence,
+            parent_id: (sequence > 1).then_some(sequence - 1),
+            branch: "main".into(),
+            run_id: 0,
+            kind: if sequence == 2 {
+                "model_request"
+            } else {
+                "message"
+            }
+            .into(),
+            payload: if sequence == 2 {
+                json!({ "input": { "fixture_audit": "x".repeat(1048576) }, "prompt_cache": {} })
+            } else {
+                json!({
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "text", "text": "visible" }],
+                })
+            },
+        })
+        .collect();
+    let run = session.submit("snapshot-context").unwrap();
+    session.wait(run).await.unwrap().into_result().unwrap();
+    let cursor = session.events().last().unwrap().sequence;
+    let (stop, _) = watch::channel(false);
+    let shared = Arc::new(Shared {
+        instance: "test-instance".into(),
+        management: Default::default(),
+        session: session.clone(),
+        token: "unused".into(),
+        web_root: None,
+        submissions: Mutex::new((HashMap::new(), VecDeque::new())),
+        history: tokio::sync::Mutex::new(Some((cursor, Arc::new(records.clone())))),
+        presentation_history: tokio::sync::Mutex::new(Some((
+            cursor,
+            Arc::new(
+                eden_protocol::history::view_records(&records, StoreView::Presentation).unwrap(),
+            ),
+        ))),
+        stop,
+    });
+    let full = dispatch(&shared, "GET", "/tui/snapshot", Value::Null)
+        .await
+        .unwrap();
+    assert!(
+        full["history"][1]["payload"]["input"]["fixture_audit"]
+            .as_str()
+            .unwrap()
+            .len()
+            == 1048576
+    );
+    assert!(
+        full["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["kind"] == "service_called")
+    );
+    let projected = dispatch(
+        &shared,
+        "GET",
+        "/tui/snapshot?history_view=presentation",
+        Value::Null,
+    )
+    .await
+    .unwrap();
+    assert!(projected["history"][1]["payload"]["input"].is_null());
+    assert!(
+        projected["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|event| event["kind"] != "service_called")
+    );
+    assert_eq!(projected["events_cursor"], cursor);
+    let route = format!(
+        "/tui/snapshot?incremental=1&events_after={cursor}&history_view=presentation&\
+         history_delta=1&history_head=1"
+    );
+    let delta = dispatch(&shared, "GET", &route, Value::Null).await.unwrap();
+    assert_eq!(delta["history_append"], true);
+    assert_eq!(delta["history"].as_array().unwrap().len(), 2);
+    assert_eq!(delta["history"][0]["parent_id"], 1);
+    // A selected sibling branch cannot append to an unrelated prior head.
+    let route = route.replace("history_head=1", "history_head=99");
+    let replacement = dispatch(&shared, "GET", &route, Value::Null).await.unwrap();
+    assert_eq!(replacement["history_append"], false);
+    assert_eq!(replacement["history"].as_array().unwrap().len(), 3);
+    session.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn idle_poll_waits_and_expired_attachment_can_rejoin_same_session() {
     let session = session().await;
     let (stop, _) = watch::channel(false);
@@ -391,6 +495,7 @@ async fn idle_poll_waits_and_expired_attachment_can_rejoin_same_session() {
         web_root: None,
         submissions: Mutex::new((HashMap::new(), VecDeque::new())),
         history: tokio::sync::Mutex::new(None),
+        presentation_history: tokio::sync::Mutex::new(None),
         stop,
     });
     let attachment = session.attach_presentation("tui").unwrap();
@@ -463,6 +568,7 @@ async fn management_catalog_preserves_receipts_and_busy_admission() {
         web_root: None,
         submissions: Mutex::new((HashMap::new(), VecDeque::new())),
         history: tokio::sync::Mutex::new(None),
+        presentation_history: tokio::sync::Mutex::new(None),
         stop,
     });
     let catalog = dispatch(&shared, "POST", "/models/list", json!({}))
@@ -511,6 +617,7 @@ async fn public_auth_route_refuses_secret_bodies_before_receipt_storage() {
         web_root: None,
         submissions: Mutex::new((HashMap::new(), VecDeque::new())),
         history: tokio::sync::Mutex::new(None),
+        presentation_history: tokio::sync::Mutex::new(None),
         stop,
     });
     let error = dispatch(
@@ -574,6 +681,7 @@ async fn detaching_frontend_cancels_pending_preview_and_observes_cleanup() {
         web_root: None,
         submissions: Mutex::new((HashMap::new(), VecDeque::new())),
         history: tokio::sync::Mutex::new(None),
+        presentation_history: tokio::sync::Mutex::new(None),
         stop,
     });
     let attachment = dispatch(&shared, "POST", "/attach", json!({ "frontend": "tui" }))
@@ -649,6 +757,7 @@ async fn detached_preview_receipt_does_not_retain_the_artifact() {
         web_root: None,
         submissions: Mutex::new((HashMap::new(), VecDeque::new())),
         history: tokio::sync::Mutex::new(None),
+        presentation_history: tokio::sync::Mutex::new(None),
         stop,
     });
     let attachment = dispatch(&shared, "POST", "/attach", json!({ "frontend": "tui" }))
@@ -701,6 +810,7 @@ async fn lease_expiry_cleans_preview_before_reattachment_and_exit() {
         web_root: None,
         submissions: Mutex::new((HashMap::new(), VecDeque::new())),
         history: tokio::sync::Mutex::new(None),
+        presentation_history: tokio::sync::Mutex::new(None),
         stop,
     });
     let old = dispatch(&shared, "POST", "/attach", json!({ "frontend": "tui" }))
@@ -767,6 +877,7 @@ async fn private_key_admission_waits_for_background_context_inspection() {
         web_root: None,
         submissions: Mutex::new((HashMap::new(), VecDeque::new())),
         history: tokio::sync::Mutex::new(None),
+        presentation_history: tokio::sync::Mutex::new(None),
         management: Default::default(),
         stop,
     });

@@ -154,6 +154,29 @@ impl Events {
     }
     /// Append an observation using a session-local monotonically increasing sequence.
     pub fn push(&self, run_id: u64, kind: &str, payload: serde_json::Value) {
+        let _timing = match kind {
+            "reserved" => Some(p::latency::Span::new(
+                "event.reserved",
+                self.session_id,
+                run_id,
+            )),
+            "accepted" => Some(p::latency::Span::new(
+                "event.accepted",
+                self.session_id,
+                run_id,
+            )),
+            "model_request" => Some(p::latency::Span::new(
+                "event.model_request",
+                self.session_id,
+                run_id,
+            )),
+            "settled" => Some(p::latency::Span::new(
+                "event.settled",
+                self.session_id,
+                run_id,
+            )),
+            _ => None,
+        };
         let mut ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
         if kind == "accepted" && payload["management"] == false {
             ledger.foreground_run = Some(run_id);
@@ -814,6 +837,11 @@ impl Kernel {
     /// Whether the session scope resolves this public contract.
     pub fn has_role(&self, contract: &str) -> bool {
         self.router.graph.binding("", contract).is_ok()
+    }
+    /// Preserve legacy role selection and wrappers when an optional consumer view
+    /// is absent, replaced, or bound to a different store instance.
+    pub fn has_companion(&self, contract: &str, companion: &str) -> bool {
+        self.router.has_companion("", contract, companion)
     }
     /// Report whether the selected chain still has live publications after a partial failure.
     pub fn role_running(&self, contract: &str) -> bool {

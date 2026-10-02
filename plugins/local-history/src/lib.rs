@@ -24,7 +24,21 @@ struct Store {
     failed: bool,
 }
 impl Store {
+    #[cfg(test)]
     fn handle(&mut self, request: StoreRequest) -> Result<StoreReply, Fault> {
+        self.handle_view(request, StoreView::Full)
+    }
+    fn handle_view(&mut self, request: StoreRequest, view: StoreView) -> Result<StoreReply, Fault> {
+        let stage = match &request {
+            StoreRequest::Read => "store.read",
+            StoreRequest::Append { .. }
+            | StoreRequest::AppendBatch { .. }
+            | StoreRequest::AppendChecked { .. } => "store.append",
+            StoreRequest::AdmitBatch { .. } => "store.admit",
+            _ => "store.lifecycle",
+        };
+        let mut timing = eden_plugin_sdk::protocol::latency::Span::new(stage, self.id, 0);
+        timing.sizes(self.records.len(), 0);
         match request {
             StoreRequest::OpenDraft {
                 path,
@@ -272,7 +286,7 @@ impl Store {
         Ok(StoreReply {
             session_id: self.id,
             sequence: self.records.len() as u64,
-            records: self.records.clone(),
+            records: eden_plugin_sdk::protocol::history::view_records(&self.records, view)?,
             active_head,
             active_branch,
         })
@@ -330,10 +344,18 @@ impl Store {
     }
 
     fn commit(&mut self, pending: Vec<Record>) -> Result<(), Fault> {
+        let build = eden_plugin_sdk::protocol::latency::Span::new("store.commit.build", self.id, 0);
         let mut next = self.records.clone();
         next.extend(pending.iter().cloned());
         validate_records(&next)?;
+        drop(build);
+        let encode =
+            eden_plugin_sdk::protocol::latency::Span::new("store.commit.encode", self.id, 0);
         let bytes = encode_transaction(&pending)?;
+        drop(encode);
+        let mut write =
+            eden_plugin_sdk::protocol::latency::Span::new("store.commit.write", self.id, 0);
+        write.sizes(pending.len(), bytes.len());
         if let Some(file) = &mut self.file {
             // A failed write leaves an uncertain tail. Only explicit recovery may
             // create a new writable history; later appends cannot certify that tail.
@@ -480,26 +502,90 @@ fn descriptor() -> Descriptor {
     Descriptor {
         package: "local-history".into(),
         version: "0.1.0".into(),
-        provides: vec![STORE.into()],
+        provides: vec![STORE.into(), STORE_ACCESS.into()],
     }
 }
 fn create(_: Value) -> Result<Package, Fault> {
     let store = Arc::new(Mutex::new(Store::default()));
-    Ok(
-        Package::new("local-history").service(STORE, move |request: StoreRequest, _| {
-            let result = store
+    let legacy = store.clone();
+    Ok(Package::new("local-history")
+        .service(STORE, move |request: StoreRequest, _| {
+            let result = legacy
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .handle(request);
+                .handle_view(request, StoreView::Full);
             async move { result }
-        }),
-    )
+        })
+        .service(STORE_ACCESS, move |request: Value, _| {
+            let result = (|| {
+                let view = request
+                    .get("_eden_history_view")
+                    .map(|view| serde_json::from_value(view.clone()))
+                    .transpose()
+                    .map_err(|error| fault(error.to_string()))?
+                    .unwrap_or_default();
+                let request =
+                    serde_json::from_value(request).map_err(|error| fault(error.to_string()))?;
+                store
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .handle_view(request, view)
+            })();
+            async move { result }
+        }))
 }
 eden_plugin_sdk::export_plugin!(descriptor, create);
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn compact_commit_receipt_preserves_full_history_and_conflict_arbitration() {
+        let mut store = Store::default();
+        store
+            .handle(StoreRequest::Open {
+                path: None,
+                session_id: 71,
+            })
+            .unwrap();
+        let receipt = store
+            .handle_view(
+                StoreRequest::Append {
+                    run_id: 7,
+                    kind: "model_request".into(),
+                    payload: json!({ "audit": "x".repeat(1024 * 1024) }),
+                },
+                StoreView::Receipt,
+            )
+            .unwrap();
+        assert_eq!(receipt.sequence, 1);
+        assert_eq!(receipt.active_head, Some(1));
+        assert!(receipt.records.is_empty());
+        let error = store
+            .handle_view(
+                StoreRequest::AppendChecked {
+                    run_id: 7,
+                    session_id: 71,
+                    sequence: 0,
+                    head: None,
+                    branch: "main".into(),
+                    new_branch: None,
+                    entries: vec![RecordDraft {
+                        kind: "message".into(),
+                        payload: json!({}),
+                    }],
+                },
+                StoreView::Receipt,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "CheckpointConflict");
+        let full = store.handle(StoreRequest::Read).unwrap();
+        assert_eq!(full.sequence, 1);
+        assert_eq!(
+            full.records[0].payload["audit"].as_str().unwrap().len(),
+            1024 * 1024
+        );
+    }
     #[test]
     fn draft_admission_publishes_initial_state_and_work_as_one_history() {
         let path =

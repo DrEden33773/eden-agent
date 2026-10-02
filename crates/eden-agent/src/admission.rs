@@ -102,8 +102,12 @@ impl Session {
             };
             // This owned store operation is not interrupted after publication starts. Its
             // receipt decides admission even when the requesting frontend has gone away.
-            self.service::<_, c::StoreReply>(run_id, c::STORE, &request)
-                .await?;
+            self.service::<_, c::StoreReply>(
+                run_id,
+                c::STORE,
+                &request.with_view(c::StoreView::Receipt),
+            )
+            .await?;
             if let Some(path) = &self.0.draft_path
                 && self.0.history_path.set(path.clone()).is_ok()
             {

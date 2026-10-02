@@ -14,6 +14,7 @@ from session_fixture import (
     probe,
     process_gone,
     records,
+    trace_rows,
     wait_until,
     writer_held,
 )
@@ -108,6 +109,50 @@ def scenario(installation, author, output, case):
         assert any(e["kind"] == "reserved" for e in events), events
         assert not any(e["kind"] == "accepted" for e in events), events
         assert not history.exists() and not fixture.provider.requests
+        if case == "timer":
+            wait_until(
+                lambda: any(
+                    row.get("direction") == "frame"
+                    and row.get("method") == "eden/turn/state"
+                    and row.get("phase") == "acceptance"
+                    for row in trace_rows(trace)
+                ),
+                terminal,
+                seconds=20,
+            )
+            gate.reply = "accept"
+            gate.release.set()
+            wait_until(fixture.provider.started.is_set, terminal)
+            fixture.provider.allow.set()
+            wait_until(
+                lambda: any(
+                    row.get("direction") == "frame"
+                    and row.get("method") == "session/prompt/ready"
+                    and row.get("idle") is True
+                    for row in trace_rows(trace)
+                ),
+                terminal,
+            )
+            samples = [
+                row["display_elapsed_ms"]
+                for row in trace_rows(trace)
+                if row.get("direction") == "frame"
+                and row.get("method") == "eden/turn/state"
+                and row.get("display_elapsed_ms") is not None
+            ]
+            assert samples and all(
+                right >= left for left, right in zip(samples, samples[1:], strict=False)
+            ), samples
+            assert len(fixture.provider.requests) == 1
+            fixture.capture("delayed-admission-timer")
+            exited(terminal)
+            return {
+                "case": case,
+                "reserved_run": gate.run,
+                "display_timer_nondecreasing": True,
+                "provider_requests": len(fixture.provider.requests),
+                "passed": True,
+            }
         peer = None
         if case == "peer":
             peer = probe.streaming.live.call(endpoint, "/attach", {"frontend": "tui"})["attachment"]
@@ -172,11 +217,11 @@ def main():
     parser.add_argument("--installation", type=Path, required=True)
     parser.add_argument("--author", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--case", choices=["rejected", "accepted", "peer"])
+    parser.add_argument("--case", choices=["rejected", "accepted", "peer", "timer"])
     args = parser.parse_args()
     results = [
         scenario(args.installation, args.author, args.output / case, case)
-        for case in ([args.case] if args.case else ["rejected", "accepted", "peer"])
+        for case in ([args.case] if args.case else ["rejected", "accepted", "peer", "timer"])
     ]
     (args.output / "summary.json").write_text(json.dumps(results, indent=2) + "\n")
 

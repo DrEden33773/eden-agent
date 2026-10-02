@@ -489,7 +489,7 @@ def composition() -> dict:
             ),
             package(
                 "local-history",
-                [presentation.STORE],
+                [presentation.STORE, "eden.session-store-access.v1"],
                 str(build_target() / "debug" / library("eden_local_history")),
                 target(),
             ),

@@ -1314,6 +1314,7 @@ impl AgentView {
             .or(model_window);
         if crate::eden_services::enabled() {
             if crate::eden_services::context_visible() { status.push("context", crate::eden_services::context_line(&self.eden_context, model_window, layout.status_bar.width, &theme)); }
+            if let Some(message) = &self.eden_connection { status.push("connection", ratatui::text::Line::from(message.clone())); }
         } else if let Some(ctx_line) = context_bar::context_bar_line_for_session(
             ctx_used,
             ctx_total,
@@ -2066,7 +2067,7 @@ impl AgentView {
                         state: &status_state,
                         activity: &activity,
                         turn_elapsed: self.turn_elapsed(),
-                        activity_started_at: self.activity_started_at,
+                        activity_started_at: self.status_activity_started_at(),
                         tick,
                         drain_blocked: turn_status_drain_blocked,
                         buttons: Some(turn_status::MouseButtons {

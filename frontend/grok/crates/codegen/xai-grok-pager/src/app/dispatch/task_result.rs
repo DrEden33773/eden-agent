@@ -873,8 +873,18 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             http_status,
             prompt_id,
         } => {
+            let completed_prompt = prompt_id.clone();
             let effects =
                 handle_prompt_response(app, agent_id, result, http_status, prompt_id, not_accepted);
+            if crate::eden_services::enabled() {
+                let agent = app.agents.get(&agent_id);
+                crate::eden_services::consumed(serde_json::json!({
+                    "method": "session/prompt/ready",
+                    "session": agent.and_then(|agent| agent.session.session_id.as_ref()).map(|id| id.0.as_ref()),
+                    "prompt": completed_prompt,
+                    "idle": agent.is_some_and(|agent| agent.session.state.is_idle()),
+                }));
+            }
             app.refresh_status_line_for(agent_id);
             effects
         }

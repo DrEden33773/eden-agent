@@ -358,7 +358,7 @@ impl Session {
                     .service(
                         0,
                         c::STORE,
-                        &if draft {
+                        &(if draft {
                             c::StoreRequest::OpenDraft {
                                 path: options
                                     .history
@@ -380,7 +380,8 @@ impl Session {
                                 path: options.history.map(|p| p.to_string_lossy().into_owned()),
                                 session_id: id,
                             }
-                        },
+                        })
+                        .with_view(c::StoreView::Coding),
                     )
                     .await?;
                 session
@@ -645,7 +646,11 @@ impl Session {
                 // Persistence runs in fresh admission after the cancelled invocation
                 // has drained; partial provider output can never execute here.
                 match session
-                    .service::<_, c::StoreReply>(run_id, c::STORE, &c::StoreRequest::Read)
+                    .service::<_, c::StoreReply>(
+                        run_id,
+                        c::STORE,
+                        &c::StoreRequest::Read.with_view(c::StoreView::Coding),
+                    )
                     .await
                 {
                     Ok(history) => {
@@ -852,9 +857,13 @@ impl Session {
             changed.await;
         }
         let close = if self.0.coding && self.0.kernel.available() {
-            self.service::<_, c::StoreReply>(0, c::STORE, &c::StoreRequest::Close)
-                .await
-                .map(|_| ())
+            self.service::<_, c::StoreReply>(
+                0,
+                c::STORE,
+                &c::StoreRequest::Close.with_view(c::StoreView::Receipt),
+            )
+            .await
+            .map(|_| ())
         } else {
             Ok(())
         };
@@ -902,8 +911,33 @@ impl Session {
         input: &I,
         cancel: Cancellation,
     ) -> Result<O, Fault> {
-        let payload = serde_json::to_value(input)
+        let _timing = eden_protocol::latency::Span::new(
+            eden_protocol::latency::service_stage(role),
+            self.id(),
+            run_id,
+        );
+        let mut payload = serde_json::to_value(input)
             .map_err(|e| Fault::new("InvalidInput", "session", e.to_string()))?;
+        let role = if role == c::STORE
+            && let Some(view) = payload
+                .as_object_mut()
+                .and_then(|payload| payload.remove("_eden_history_view"))
+        {
+            if view != serde_json::json!(c::StoreView::Full)
+                && self
+                    .0
+                    .kernel
+                    .get()?
+                    .has_companion(c::STORE, c::STORE_ACCESS)
+            {
+                payload["_eden_history_view"] = view;
+                c::STORE_ACCESS
+            } else {
+                c::STORE
+            }
+        } else {
+            role
+        };
         let value = self
             .0
             .kernel
@@ -936,7 +970,8 @@ impl Session {
                     run_id,
                     kind: kind.into(),
                     payload,
-                },
+                }
+                .with_view(c::StoreView::Receipt),
             )
             .await?;
         self.0.events.push(
@@ -948,13 +983,18 @@ impl Session {
     }
     /// Read committed public history through the selected storage role.
     pub async fn history(&self) -> Result<Vec<c::Record>, Fault> {
+        self.history_with_view(c::StoreView::Full).await
+    }
+    /// Read an explicit consumer view. Complete history remains the default for
+    /// independent plugins, export, shutdown snapshots and recovery.
+    pub async fn history_with_view(&self, view: c::StoreView) -> Result<Vec<c::Record>, Fault> {
         if !self
             .0
             .kernel
             .get()
             .is_ok_and(|kernel| kernel.role_running(c::STORE))
         {
-            return match self.0.history_path.get() {
+            let records = match self.0.history_path.get() {
                 Some(path) => eden_kernel::history::read(path),
                 None => Ok(self
                     .0
@@ -962,12 +1002,18 @@ impl Session {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .clone()),
-            };
+            }?;
+            return eden_protocol::history::view_records(&records, view);
         }
-        Ok(self
-            .service::<_, c::StoreReply>(0, c::STORE, &c::StoreRequest::Read)
+        let records = self
+            .service::<_, c::StoreReply>(0, c::STORE, &c::StoreRequest::Read.with_view(view))
             .await?
-            .records)
+            .records;
+        if view == c::StoreView::Full {
+            Ok(records)
+        } else {
+            eden_protocol::history::view_records(&records, view)
+        }
     }
     /// Enqueue one input. Delivery happens at the default loop's next boundary.
     pub async fn enqueue(

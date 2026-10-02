@@ -54,7 +54,7 @@ pub(crate) async fn queue(
         },
         other => other,
     };
-    let history: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
+    let history: StoreReply = store_call(&cx, StoreRequest::Read).await?;
     let entries = pending(&history.records)?;
     match request {
         QueueRequest::Inspect => Ok(entries),
@@ -133,21 +133,20 @@ pub(crate) async fn queue(
                 }
             }
             if !selected.is_empty() {
-                let _: StoreReply = cx
-                    .call(
-                        STORE,
-                        &StoreRequest::AppendBatch {
-                            run_id: cx.run_id(),
-                            entries: selected
-                                .iter()
-                                .map(|entry| RecordDraft {
-                                    kind: "queue_delivered".into(),
-                                    payload: json!(entry),
-                                })
-                                .collect(),
-                        },
-                    )
-                    .await?;
+                let _: StoreReply = store_call(
+                    &cx,
+                    StoreRequest::AppendBatch {
+                        run_id: cx.run_id(),
+                        entries: selected
+                            .iter()
+                            .map(|entry| RecordDraft {
+                                kind: "queue_delivered".into(),
+                                payload: json!(entry),
+                            })
+                            .collect(),
+                    },
+                )
+                .await?;
                 for entry in &selected {
                     cx.emit("queue_delivered", json!(entry))?;
                 }
@@ -160,21 +159,20 @@ pub(crate) async fn queue(
                 .filter(|entry| ids.as_ref().is_none_or(|ids| ids.contains(&entry.id)))
                 .collect();
             if !selected.is_empty() {
-                let _: StoreReply = cx
-                    .call(
-                        STORE,
-                        &StoreRequest::AppendBatch {
-                            run_id: cx.run_id(),
-                            entries: selected
-                                .iter()
-                                .map(|entry| RecordDraft {
-                                    kind: "queue_withdrawn".into(),
-                                    payload: json!(entry),
-                                })
-                                .collect(),
-                        },
-                    )
-                    .await?;
+                let _: StoreReply = store_call(
+                    &cx,
+                    StoreRequest::AppendBatch {
+                        run_id: cx.run_id(),
+                        entries: selected
+                            .iter()
+                            .map(|entry| RecordDraft {
+                                kind: "queue_withdrawn".into(),
+                                payload: json!(entry),
+                            })
+                            .collect(),
+                    },
+                )
+                .await?;
                 for entry in &selected {
                     cx.emit("queue_withdrawn", json!(entry))?;
                 }
@@ -193,26 +191,25 @@ pub(crate) async fn queue(
                 .map(|(_, record)| decode(&record.payload))
                 .collect::<Result<_, _>>()?;
             if !returned.is_empty() {
-                let _: StoreReply = cx
-                    .call(
-                        STORE,
-                        &StoreRequest::AppendBatch {
-                            run_id: cx.run_id(),
-                            entries: returned
-                                .iter()
-                                .map(|entry| RecordDraft {
-                                    kind: "queue_returned".into(),
-                                    payload: json!(entry),
-                                })
-                                .collect(),
-                        },
-                    )
-                    .await?;
+                let _: StoreReply = store_call(
+                    &cx,
+                    StoreRequest::AppendBatch {
+                        run_id: cx.run_id(),
+                        entries: returned
+                            .iter()
+                            .map(|entry| RecordDraft {
+                                kind: "queue_returned".into(),
+                                payload: json!(entry),
+                            })
+                            .collect(),
+                    },
+                )
+                .await?;
                 for entry in &returned {
                     cx.emit("queue_returned", json!(entry))?;
                 }
             }
-            let history: StoreReply = cx.call(STORE, &StoreRequest::Read).await?;
+            let history: StoreReply = store_call(&cx, StoreRequest::Read).await?;
             pending(&history.records)
         }
     }

@@ -12,6 +12,8 @@ pub const PROVIDER: &str = "eden.coding-provider.v1";
 pub const TOOL: &str = "eden.coding-tool.v1";
 /// Session storage.
 pub const STORE: &str = "eden.session-store.v2";
+/// Optional consumer views owned by the very same unwrapped store provider.
+pub const STORE_ACCESS: &str = "eden.session-store-access.v1";
 /// Non-secret model limits, answered independently of the provider.
 pub const MODEL_INFO: &str = "eden.model-info.v1";
 /// Interpretation of extension state a session needs in order to continue.
@@ -345,6 +347,45 @@ pub enum StoreRequest {
     },
     Read,
     Close,
+}
+
+/// Optional reply projection. Ordinary v2 requests continue to return complete audit records.
+/// This changes only the returned data: commits, sequence checks and sync receipts are identical.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StoreView {
+    /// Complete records for independent plugins, audit, export and recovery.
+    #[default]
+    Full,
+    /// Only the committed position and branch; no records cross the native byte boundary.
+    Receipt,
+    /// Tree headers and fields used by the default coding projection, with the current
+    /// active request retained in full for context inspection and reference cache reuse.
+    Coding,
+    /// Conversation and execution presentation, without cumulative model input audit payloads.
+    Presentation,
+}
+
+/// A request for STORE_ACCESS. Callers first verify that it resolves to the same
+/// unwrapped provider as STORE; legacy and wrapped stores retain their original inputs.
+#[derive(Serialize)]
+pub struct StoreAccess<'a> {
+    /// The original operation, including all mutation inputs and compare-and-swap identities.
+    #[serde(flatten)]
+    pub request: &'a StoreRequest,
+    /// Never implies that the store may rewrite or discard the persisted records.
+    #[serde(rename = "_eden_history_view")]
+    pub view: StoreView,
+}
+
+impl StoreRequest {
+    /// Build an optional access request without changing the meaning of the operation.
+    pub fn with_view(&self, view: StoreView) -> StoreAccess<'_> {
+        StoreAccess {
+            request: self,
+            view,
+        }
+    }
 }
 /// The store's answer. Its receipt is the reply itself: a returned `sequence`
 /// states that the request is durably committed.

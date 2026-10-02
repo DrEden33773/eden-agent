@@ -1,5 +1,9 @@
 # Coding sessions
 
+The standard store keeps complete committed records for audit, export and recovery. Its optional access service returns consumer views without changing persisted bytes or commit preconditions: receipts omit records; coding preparation omits archived model inputs while preserving the last input on the selected ancestor path and all context edits; presentation omits model inputs and cache metadata. The selected context still receives every tree identity, user content, reference and tool result it needs. A custom store or context, or any wrapper around those services, retains the original full contract unless the exact unwrapped pair explicitly advertises the optional access service.
+
+Native TUI snapshots request the presentation view and an append delta. A delta continues the requested immutable ancestor head; a branch change or expired event cursor returns the complete selected path. Runtime call diagnostics stay in the raw snapshot and audit surfaces, while the presentation snapshot advances an explicit event cursor past those diagnostics. Connection failures appear in a separate frontend state notification and leave assistant messages and the prompt clock intact. Read deadlines report a read failure; uncertain mutation deadlines still require request identity reconciliation.
+
 The default installation selects separately replaceable native roles from `coding` (loop, context and queue), `coding-tools` (read/write/edit/bash), `model-access` (OpenAI Responses), and `local-history` (public JSONL). All calls use the SDK and versioned serialized role payloads from `eden_protocol::coding`. The original controlled `standard` package is a native lifecycle test fixture.
 
 ## Running a task

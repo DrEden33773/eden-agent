@@ -99,7 +99,7 @@ impl Session {
     }
     /// Resolve a selection from the active branch; the result never contains credentials.
     pub async fn model_selection(&self) -> Result<Option<m::ModelSelection>, Fault> {
-        saved_selection(&self.history_with_view(c::StoreView::Coding).await?)
+        saved_selection(&self.history_with_view(c::StoreView::Presentation).await?)
     }
     /// Resolve the same branch intent and global default used for the next model request.
     pub async fn effective_model(&self) -> Result<m::CatalogReply, Fault> {

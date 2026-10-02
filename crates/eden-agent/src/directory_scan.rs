@@ -121,34 +121,46 @@ impl<'de> Deserialize<'de> for Payload {
     }
 }
 
-#[derive(Deserialize)]
-struct SummaryRecord {
-    schema_version: u32,
-    session_id: u64,
-    sequence: u64,
-    run_id: u64,
-    #[serde(default)]
-    parent_id: Option<u64>,
-    #[serde(default = "main_branch")]
-    branch: String,
-    kind: String,
-    payload: Payload,
+// Legacy lines and transaction nodes use the same validating skip for extension
+// fields; derived unknown-field handling would accept malformed string escapes.
+fn node_value<'de, A: MapAccess<'de>>(key: &str, map: &mut A) -> Result<Option<Value>, A::Error> {
+    match key {
+        "payload" => Ok(Some(map.next_value::<Payload>()?.0)),
+        "schema_version" | "session_id" | "sequence" | "run_id" | "parent_id" | "branch"
+        | "kind" => Ok(Some(map.next_value()?)),
+        _ => {
+            map.next_value::<Discard>()?;
+            Ok(None)
+        }
+    }
 }
-fn main_branch() -> String {
-    "main".into()
+struct SummaryRecord(Record);
+impl<'de> Deserialize<'de> for SummaryRecord {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Fields;
+        impl<'de> Visitor<'de> for Fields {
+            type Value = SummaryRecord;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a public history node")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<SummaryRecord, A::Error> {
+                let mut node = Map::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if let Some(value) = node_value(&key, &mut map)? {
+                        node.insert(key, value);
+                    }
+                }
+                serde_json::from_value(Value::Object(node))
+                    .map(SummaryRecord)
+                    .map_err(serde::de::Error::custom)
+            }
+        }
+        deserializer.deserialize_map(Fields)
+    }
 }
 impl From<SummaryRecord> for Record {
     fn from(record: SummaryRecord) -> Self {
-        Self {
-            schema_version: record.schema_version,
-            session_id: record.session_id,
-            sequence: record.sequence,
-            run_id: record.run_id,
-            parent_id: record.parent_id,
-            branch: record.branch,
-            kind: record.kind,
-            payload: record.payload.0,
-        }
+        record.0
     }
 }
 
@@ -174,16 +186,12 @@ impl<'de> Deserialize<'de> for Line {
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "transaction" => line.transaction = Some(map.next_value()?),
-                        "payload" => {
-                            line.header.insert(key, map.next_value::<Payload>()?.0);
-                        }
-                        "schema_version" | "session_id" | "sequence" | "run_id" | "parent_id"
-                        | "branch" | "kind" => {
-                            line.header.insert(key, map.next_value()?);
-                        }
                         _ => {
-                            map.next_value::<Discard>()?;
-                            line.extra = true;
+                            if let Some(value) = node_value(&key, &mut map)? {
+                                line.header.insert(key, value);
+                            } else {
+                                line.extra = true;
+                            }
                         }
                     }
                 }
@@ -205,7 +213,7 @@ fn transaction(line: &[u8], prefix: &[Record]) -> Result<Vec<Record>, Fault> {
             || line.extra
             || line.header.len() != 1
             || records.is_empty()
-            || records.iter().any(|record| record.schema_version != 2)
+            || records.iter().any(|record| record.0.schema_version != 2)
         {
             return Err(invalid("invalid transaction schema or empty transaction"));
         }
@@ -365,6 +373,47 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         std::fs::remove_file(path).unwrap();
     }
+    #[test]
+    fn unknown_node_extensions_are_validated_before_the_whole_transaction_is_admitted() {
+        let prefix = eden_protocol::history::encode_transaction(&[record(
+            1,
+            "session",
+            json!({ "cwd": "/fixture" }),
+        )])
+        .unwrap();
+        let mut node = serde_json::to_value(record(2, "message", json!({}))).unwrap();
+        node["extension"] = json!({ "nested": "extension-text" });
+        let tail = json!({
+            "schema_version": 2,
+            "transaction": [node, record(3, "message", json!({}))],
+        })
+        .to_string()
+            + "\n";
+        for (replacement, valid) in [
+            ("extension-text", true),
+            (r"\uD800", false),
+            (r"\uDC00", false),
+            (r"\uD800\uD800", false),
+        ] {
+            let bytes = [
+                prefix.as_slice(),
+                tail.replace("extension-text", replacement).as_bytes(),
+            ]
+            .concat();
+            let complete = eden_protocol::history::scan_records(&bytes);
+            let (path, summary) = scanned(&bytes);
+            assert_eq!(complete.records.len(), if valid { 3 } else { 1 });
+            assert_eq!(
+                summary.records.len(),
+                complete.records.len(),
+                "{replacement}"
+            );
+            assert_eq!(summary.diagnostic.is_some(), complete.diagnostic.is_some());
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
     #[test]
     fn damaged_ignored_audit_and_tree_transactions_preserve_only_the_validated_prefix() {
         let prefix = eden_protocol::history::encode_transaction(&[record(

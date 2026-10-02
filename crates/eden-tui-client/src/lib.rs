@@ -680,6 +680,8 @@ async fn call_pinned(
             route.split('?').next(),
             Some(
                 "/request-status"
+                    | "/terminal"
+                    | "/configuration/wait"
                     | "/context/inspect"
                     | "/configuration/inspect"
                     | "/queue/inspect"
@@ -689,6 +691,20 @@ async fn call_pinned(
                     | "/manage/info"
                     | "/manage/tree"
                     | "/manage/directory"
+                    | "/manage/sessions"
+                    | "/manage/sessions/start"
+                    | "/manage/sessions/poll"
+                    | "/manage/sessions/cancel"
+                    | "/trust/inspect"
+                    | "/models/list"
+                    | "/models/current"
+                    | "/router/list"
+                    | "/auth/methods"
+                    | "/auth/status"
+                    | "/session/catalog"
+                    | "/session/branches"
+                    | "/reference/check"
+                    | "/reference/preview"
             )
         );
     tokio::time::timeout(deadlines.io, async {
@@ -1176,6 +1192,17 @@ mod transport_tests {
                 Some(json!({ "request_id": "stable" })),
             ),
             ("POST", "/context/inspect", Some(Value::Null)),
+            ("POST", "/session/catalog", Some(Value::Null)),
+            ("POST", "/session/branches", Some(Value::Null)),
+            ("POST", "/reference/check", Some(Value::Null)),
+            ("POST", "/reference/preview", Some(Value::Null)),
+            ("POST", "/models/list", Some(Value::Null)),
+            ("POST", "/models/current", Some(Value::Null)),
+            ("POST", "/router/list", Some(Value::Null)),
+            ("POST", "/auth/methods", Some(Value::Null)),
+            ("POST", "/auth/status", Some(Value::Null)),
+            ("POST", "/trust/inspect", Some(Value::Null)),
+            ("POST", "/manage/sessions/poll", Some(Value::Null)),
         ] {
             let (path, server, _ready) = silent_host().await;
             let error = call_with_deadlines(&path, method, route, body.as_ref(), short_deadlines())

@@ -689,7 +689,7 @@ async fn dispatch(
                 "effective_target": effective.target,
                 "selection_source": effective.selection_source,
                 "last_committed_target": session
-                    .history()
+                    .history_with_view(eden_protocol::coding::StoreView::Presentation)
                     .await?
                     .iter()
                     .rev()

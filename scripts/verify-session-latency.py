@@ -685,6 +685,17 @@ def main():
                 failures.append(
                     f"{row['scenario']} {row['mib']} MiB: no written display timer samples"
                 )
+            if any(
+                round_["provider_release_to_frontend_complete_seconds"] > 2
+                for round_ in row["rounds"]
+            ):
+                failures.append(
+                    f"{row['scenario']} {row['mib']} MiB: completed response did not make the frontend ready within 2s"
+                )
+            if row["cancellation"] and row["cancellation"]["cancel_to_frontend_ready_seconds"] > 2:
+                failures.append(
+                    f"{row['scenario']} {row['mib']} MiB: cancellation did not make the frontend ready within 2s"
+                )
             if row["cancellation"] and (
                 row["cancellation"]["provider_seconds"] > 5
                 or row["cancellation"]["cancel_to_terminal_seconds"] > 1

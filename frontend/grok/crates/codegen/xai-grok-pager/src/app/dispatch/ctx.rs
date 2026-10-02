@@ -1,3 +1,4 @@
+// Modified by the Eden contributors for the Eden terminal integration.
 //! Active-agent lookup and view-context helpers shared across dispatch modules.
 
 use super::dashboard_telemetry::log_dashboard_opened;

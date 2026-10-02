@@ -1,3 +1,4 @@
+// Modified by the Eden contributors for the Eden terminal integration.
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use std::path::Path;
 use agent_client_protocol as acp;

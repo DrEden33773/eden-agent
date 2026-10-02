@@ -1,3 +1,4 @@
+// Modified by the Eden contributors for the Eden terminal integration.
 //! Tests for session loading, restore, pickers, and deep search.
 use super::*;
 fn expect_agent(app: &AppView, id: AgentId) -> &AgentView {

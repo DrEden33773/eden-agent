@@ -1,3 +1,4 @@
+// Modified by the Eden contributors for the Eden terminal integration.
 use super::*;
 
 /// Result of looking up which view a notification's `session_id` targets.

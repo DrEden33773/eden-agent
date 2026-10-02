@@ -1,3 +1,4 @@
+// Modified by the Eden contributors for the Eden terminal integration.
 //! Unified log forwarding for the pager.
 //!
 //! Buffers log entries in memory and flushes them to the shell via `x.ai/log` ACP notifications.

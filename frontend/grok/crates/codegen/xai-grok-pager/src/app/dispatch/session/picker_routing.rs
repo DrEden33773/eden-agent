@@ -1,3 +1,4 @@
+// Modified by the Eden contributors for the Eden terminal integration.
 //! Host routing for session picker fetch results: resolve the host a result was issued for to its live picker storage.
 //! The target carries the freshness values (generation and per-kind seqs) the result must match to apply.
 

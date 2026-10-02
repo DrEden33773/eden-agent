@@ -94,7 +94,13 @@ async fn reader(directory: &std::path::Path, name: &str, gated: bool) -> Reader 
                             }
                             request.extend_from_slice(&chunk[..count]);
                         }
-                        let route = headers.split_whitespace().nth(1).unwrap();
+                        let route = headers
+                            .split_whitespace()
+                            .nth(1)
+                            .unwrap()
+                            .split('?')
+                            .next()
+                            .unwrap();
                         if route == "/detach" && gated {
                             detached.notify_one();
                             std::future::pending::<()>().await;

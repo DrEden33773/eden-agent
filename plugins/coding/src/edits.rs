@@ -329,7 +329,7 @@ pub(crate) async fn prepare(
     cx: &CallContext,
     settings: &Settings,
 ) -> Result<e::Prepared, Fault> {
-    let before: StoreReply = store_call(&cx, StoreRequest::Read).await?;
+    let before: StoreReply = store_call(cx, StoreRequest::Read).await?;
     if before
         .records
         .iter()
@@ -692,13 +692,13 @@ pub(crate) async fn recover_request(
     first_sequence: u64,
 ) -> Result<ModelInput, Fault> {
     let retry = if applied.is_empty() {
-        let history: StoreReply = store_call(&cx, StoreRequest::Read).await?;
+        let history: StoreReply = store_call(cx, StoreRequest::Read).await?;
         reject_late_changes(&history.records, first_sequence)?;
         let mut recovery = input.clone();
         recovery.action = "overflow".into();
         recovery.records = history.records;
         let compacted: ModelInput = cx.call(CONTEXT, &recovery).await?;
-        let after: StoreReply = store_call(&cx, StoreRequest::Read).await?;
+        let after: StoreReply = store_call(cx, StoreRequest::Read).await?;
         reject_late_changes(&after.records, first_sequence)?;
         recovery.records = after.records;
         // A context strategy returns original image blocks. Every actual attempt must still
@@ -706,7 +706,7 @@ pub(crate) async fn recover_request(
         prepare(&recovery, compacted, cx, settings).await?
     } else {
         let compacted = context::recover_edited(input, model, cx, settings).await?;
-        let history: StoreReply = store_call(&cx, StoreRequest::Read).await?;
+        let history: StoreReply = store_call(cx, StoreRequest::Read).await?;
         e::Prepared {
             input: compacted,
             revision: e::Revision {
@@ -731,7 +731,7 @@ pub(crate) async fn recover_request(
         }),
     });
     let committed: StoreReply = store_call(
-        &cx,
+        cx,
         StoreRequest::AppendChecked {
             run_id: cx.run_id(),
             session_id: retry.revision.session_id,

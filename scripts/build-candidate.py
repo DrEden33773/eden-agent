@@ -15,10 +15,22 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("destination", type=Path)
     parser.add_argument("--release", action="store_true")
+    parser.add_argument(
+        "--cargo-config",
+        action="append",
+        default=[],
+        help="Cargo profile override, recorded in the candidate receipt",
+    )
     args = parser.parse_args()
     before = source_fingerprint()
     profile = "release" if args.release else "debug"
-    command = ["cargo", "build", *(["--workspace"] if args.release else HOST_TARGETS), "--locked"]
+    command = [
+        "cargo",
+        *[argument for config in args.cargo_config for argument in ("--config", config)],
+        "build",
+        *(["--workspace"] if args.release else HOST_TARGETS),
+        "--locked",
+    ]
     if args.release:
         command.append("--release")
     subprocess.run(command, cwd=ROOT, check=True)

@@ -64,22 +64,33 @@ pub struct TrashEntry {
 fn io(error: impl std::fmt::Display) -> Fault {
     fault("HistoryMutation", error.to_string())
 }
-fn inspect_ref(path: &Path) -> Result<HistoryRef, Fault> {
+struct Inspected {
+    history: HistoryRef,
+    cwd: Option<String>,
+}
+fn inspect_history(path: &Path) -> Result<Inspected, Fault> {
     let path = std::fs::canonicalize(path).map_err(io)?;
-    let metadata = path.metadata().map_err(io)?;
-    let scan = eden_protocol::history::scan_records(&std::fs::read(&path).map_err(io)?);
-    let session_id = scan.records.first().map(|record| record.session_id);
-    Ok(HistoryRef {
-        path,
-        session_id,
-        bytes: metadata.len(),
-        modified_ns: metadata
-            .modified()
-            .map_err(io)?
-            .duration_since(UNIX_EPOCH)
-            .map_err(io)?
-            .as_nanos(),
-    })
+    let before = file_revision(&path, None)?;
+    let scan = eden_protocol::history_read::read_view(
+        File::open(&path).map_err(io)?,
+        eden_protocol::history_read::ReadView::Summary,
+        &|| false,
+    )?
+    .ok_or_else(|| io("inspection cancelled"))?;
+    let history = file_revision(&path, scan.records.first().map(|record| record.session_id))?;
+    if before.bytes != history.bytes || before.modified_ns != history.modified_ns {
+        return Err(fault("StaleSelection", "history changed during inspection"));
+    }
+    let cwd = scan
+        .records
+        .iter()
+        .find(|record| record.kind == "session")
+        .and_then(|record| record.payload["cwd"].as_str())
+        .map(str::to_owned);
+    Ok(Inspected { history, cwd })
+}
+fn inspect_ref(path: &Path) -> Result<HistoryRef, Fault> {
+    Ok(inspect_history(path)?.history)
 }
 fn file_revision(path: &Path, session_id: Option<u64>) -> Result<HistoryRef, Fault> {
     let metadata = path.metadata().map_err(io)?;
@@ -228,17 +239,26 @@ impl Lifecycle {
         plan: RemovalPlan,
         stop_owner: bool,
     ) -> Result<TrashEntry, Fault> {
-        let owner = self.owner(&plan.history.path).await?;
+        let revision = file_revision(&plan.history.path, plan.history.session_id)?;
+        let owner = self
+            .owner_checked(plan.history.path.clone(), plan.history.session_id)
+            .await?;
         if owner.as_ref().map(|o| &o.instance) != plan.owner.as_ref().map(|o| &o.instance) {
             return Err(fault(
                 "StaleSelection",
                 "session ownership changed; review the deletion again",
             ));
         }
+        // Before an explicit stop, verify the current identity too. A path/revision alone
+        // must never authorize closing a host if its file has been replaced.
+        let current = if owner.is_some() {
+            inspect_ref(&plan.history.path)?
+        } else {
+            revision
+        };
         let running = plan.active_run.is_some()
             || !plan.shell_runs.is_empty()
             || !plan.command_runs.is_empty();
-        let current = inspect_ref(&plan.history.path)?;
         if current.session_id != plan.history.session_id || (!running && current != plan.history) {
             return Err(fault(
                 "StaleSelection",
@@ -287,7 +307,7 @@ impl Lifecycle {
             .await?;
         }
         let expected = if running {
-            inspect_ref(&plan.history.path)?
+            file_revision(&plan.history.path, plan.history.session_id)?
         } else {
             plan.history
         };
@@ -393,8 +413,8 @@ pub(crate) fn read_trash(directory: &Path) -> Result<TrashEntry, Fault> {
 
 fn move_to_trash(expected: &HistoryRef, title: &str) -> Result<TrashEntry, Fault> {
     let _lock = lock_writer(&expected.path)?;
-    let current = inspect_ref(&expected.path)?;
-    if current != *expected {
+    let inspected = inspect_history(&expected.path)?;
+    if inspected.history != *expected {
         return Err(fault(
             "StaleSelection",
             "selected history changed; review the deletion again",
@@ -410,19 +430,12 @@ fn move_to_trash(expected: &HistoryRef, title: &str) -> Result<TrashEntry, Fault
     let id = format!("{}-{}", now.as_nanos(), std::process::id());
     let directory = trash.join(&id);
     std::fs::create_dir(&directory).map_err(io)?;
-    let scan = eden_protocol::history::scan_records(&std::fs::read(&expected.path).map_err(io)?);
-    let info = scan
-        .records
-        .iter()
-        .find(|r| r.kind == "session")
-        .and_then(|r| r.payload["cwd"].as_str())
-        .map(str::to_owned);
     let item = TrashEntry {
         id,
         session_id: expected.session_id,
         original: expected.path.clone(),
         title: title.into(),
-        cwd: info,
+        cwd: inspected.cwd,
         removed_at: now.as_secs(),
         directory: directory.clone(),
     };

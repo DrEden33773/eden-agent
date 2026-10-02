@@ -60,7 +60,7 @@ pub fn session_options(
     let saved_cwd = if let Some(path) = &history
         && (!create || path.try_exists()?)
     {
-        let records = eden_kernel::history::read(path)?;
+        let records = eden_kernel::history::read_preparation(path)?;
         if create && records.is_empty() {
             None
         } else {

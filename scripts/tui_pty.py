@@ -16,7 +16,9 @@ from pathlib import Path
 class Terminal:
     """Keep the slave open to verify the exact termios state after normal exit."""
 
-    def __init__(self, binary, endpoint, *, env=None, width=110, height=32, command=None):
+    def __init__(
+        self, binary, endpoint, *, env=None, width=110, height=32, command=None, inherit_env=True
+    ):
         if os.name == "nt":
             raise RuntimeError("POSIX PTY unavailable; run native terminal checks separately")
         import pty
@@ -34,7 +36,7 @@ class Terminal:
         self.closed = False
         self.resize(width, height)
         environment = {
-            **os.environ,
+            **(os.environ if inherit_env else {}),
             "TERM": "xterm-256color",
             "COLORTERM": "truecolor",
             "EDEN_TUI_STATE_DIR": self.state.name,

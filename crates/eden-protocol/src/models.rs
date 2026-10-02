@@ -4,6 +4,54 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 /// A replaceable catalog owns discovery and selection resolution.
 pub const MODEL_CATALOG: &str = "eden.model-catalog.v1";
+/// Optional presentation read, negotiated only with the same unwrapped catalog owner and scope.
+/// Full catalog and resolution requests retain their existing independent-author contract.
+pub const MODEL_CATALOG_VIEW: &str = "eden.model-catalog-view.v1";
+/// One presentation read resolves current intent and projects catalog entries at that source/scope.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct CatalogViewRequest {
+    pub selection: Option<ModelSelection>,
+}
+/// Entry targets contain presentation fields only; the effective target retains full routing metadata.
+/// Credential changes are read again for each request, rather than cached across account scopes.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct CatalogViewReply {
+    pub models: Vec<CatalogViewEntry>,
+    pub effective_target: Option<ModelTarget>,
+    pub diagnostic: Option<String>,
+}
+/// Required entry fields make malformed companion output fail before presentation consumes it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct CatalogViewEntry {
+    pub name: String,
+    pub status: String,
+    pub target: CatalogViewTarget,
+}
+/// Presentation fields retain their meaning without publishing unused routing configuration.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct CatalogViewTarget {
+    pub provider: String,
+    pub model: String,
+    pub thinking: ThinkingSelection,
+    pub limits: CatalogViewLimits,
+    pub capabilities: CatalogViewCapabilities,
+}
+/// The model picker only consumes the context window; full targets retain the complete limits.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct CatalogViewLimits {
+    pub context_window: u64,
+}
+/// Required capability data keeps an absent field distinct from a model without image support.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[allow(missing_docs)]
+pub struct CatalogViewCapabilities {
+    pub images: bool,
+}
 /// This contract carries secrets and must never be emitted or recorded.
 pub const CREDENTIAL_SOURCE: &str = "eden.credential-source.v1";
 /// Authentication interactions expose only redacted status to consumers.
@@ -299,4 +347,20 @@ pub struct ModelQuantization {
     pub name: String,
     pub bytes: Option<u64>,
     pub files: Vec<String>,
+}
+
+#[cfg(test)]
+mod catalog_view_tests {
+    use super::*;
+    #[test]
+    fn incomplete_companion_entries_are_rejected_at_the_protocol_boundary() {
+        assert!(
+            serde_json::from_value::<CatalogViewReply>(serde_json::json!({
+                "models": [{ "name": "bad", "status": "configured", "target": {} }],
+                "effective_target": null,
+                "diagnostic": null,
+            }))
+            .is_err()
+        );
+    }
 }

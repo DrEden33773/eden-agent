@@ -251,3 +251,4 @@ pub mod coding;
 
 /// Public tree validation and standalone readable history.
 pub mod history;
+pub mod history_read;

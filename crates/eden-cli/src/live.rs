@@ -681,6 +681,7 @@ async fn dispatch(
             | "/trust/inspect"
             | "/configuration/wait",
         ) => management_read(shared, route, &body).await,
+        ("POST", "/tui/models") => Ok(json!(session.model_catalog_view().await?)),
         ("POST", "/models/list") => Ok(json!(session.models().await?)),
         ("POST", "/models/current") => {
             let effective = session.effective_model().await?;
@@ -817,6 +818,7 @@ mod reading;
 use reading::read_document;
 
 struct StaticShared {
+    audit: Vec<u8>,
     cwd: String,
     instance: String,
     history_path: Option<PathBuf>,
@@ -867,6 +869,7 @@ pub async fn run_read_host(
     write_endpoint(endpoint_path, &endpoint)?;
     let (stop, mut stopped) = watch::channel(false);
     let shared = Arc::new(StaticShared {
+        audit: document.audit,
         cwd: document
             .history
             .iter()
@@ -927,17 +930,25 @@ async fn dispatch_static(shared: &StaticShared, method: &str, path: &str) -> Res
         ("POST", "/detach") => Ok(json!({ "detached": true })),
         ("GET", "/snapshot" | "/tui/snapshot") => {
             if query_parameter(path, "after").is_some() {
-                tokio::time::sleep(Duration::from_secs(4)).await;
+                let _waiting =
+                    eden_protocol::latency::Span::new("reader.wait", shared.snapshot.session_id, 0);
+                let mut stopped = shared.stop.subscribe();
+                if !*stopped.borrow_and_update() {
+                    let _ = tokio::time::timeout(Duration::from_secs(4), stopped.changed()).await;
+                }
             }
-            let history = if query_parameter(path, "history_view") == Some("presentation") {
-                eden_protocol::history::view_records(
-                    &shared.history,
-                    eden_protocol::coding::StoreView::Presentation,
-                )?
+            let history = if route == "/snapshot" {
+                None
+            } else if query_parameter(path, "history_view") == Some("presentation")
+                || shared.audit.is_empty()
+            {
+                Some(shared.history.clone())
             } else {
-                shared.history.clone()
+                // The reader's captured bytes remain immutable even if the source is later appended.
+                let scan = eden_protocol::history::scan_records(&shared.audit);
+                Some(eden_protocol::history::active_path(&scan.records)?)
             };
-            Ok(json!({
+            let mut reply = json!({
                 "presentation": shared.snapshot,
                 "state": {
                     "session_id": shared.snapshot.session_id,
@@ -946,13 +957,16 @@ async fn dispatch_static(shared: &StaticShared, method: &str, path: &str) -> Res
                     "read_only": true,
                     "cwd": shared.cwd,
                 },
-                "history": history,
                 "host_instance": shared.instance,
                 "history_path": shared.history_path,
                 "reading": shared.reading,
                 "diagnostic": shared.diagnostic,
                 "events": [],
-            }))
+            });
+            if let Some(history) = history {
+                reply["history"] = json!(history);
+            }
+            Ok(reply)
         }
         ("POST", "/shutdown") => {
             shared.stop.send_replace(true);

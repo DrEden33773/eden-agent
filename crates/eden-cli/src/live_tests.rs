@@ -227,6 +227,7 @@ async fn typed_transport_preserves_receipts_detach_and_real_events() {
 async fn static_snapshot_keeps_committed_records_and_is_read_only() {
     let (stop, _) = watch::channel(false);
     let shared = StaticShared {
+        audit: vec![],
         cwd: "/fixture".into(),
         instance: "test-instance".into(),
         history_path: None,
@@ -896,4 +897,161 @@ async fn private_key_admission_waits_for_background_context_inspection() {
     drop(inspection);
     let _ = input.await;
     session.shutdown().await.unwrap();
+}
+
+fn immutable_reader() -> StaticShared {
+    StaticShared {
+        audit: vec![],
+        cwd: "/fixture".into(),
+        instance: "reader".into(),
+        history_path: None,
+        reading: None,
+        diagnostic: None,
+        history: vec![eden_protocol::coding::Record {
+            schema_version: 2,
+            session_id: 7,
+            sequence: 1,
+            parent_id: None,
+            branch: "main".into(),
+            run_id: 0,
+            kind: "session".into(),
+            payload: json!({ "cwd": "/fixture" }),
+        }],
+        snapshot: eden_protocol::presentation::Snapshot {
+            version: eden_protocol::presentation::VERSION,
+            session_id: 7,
+            sequence: 0,
+            views: vec![],
+            activity: vec![],
+            pending_interactions: vec![],
+        },
+        token: "fixture".into(),
+        web_root: None,
+        stop: watch::channel(false).0,
+    }
+}
+
+#[tokio::test]
+async fn static_identity_check_does_not_transfer_history() {
+    let shared = immutable_reader();
+    let reply = dispatch_static(&shared, "GET", "/snapshot").await.unwrap();
+    assert!(reply.get("history").is_none());
+    assert_eq!(reply["state"]["session_id"], 7);
+    assert_eq!(reply["host_instance"], "reader");
+}
+
+#[tokio::test]
+async fn stopping_wakes_an_already_waiting_reader() {
+    use std::{future::Future, task::Poll};
+    let shared = immutable_reader();
+    let waiting = dispatch_static(
+        &shared,
+        "GET",
+        "/tui/snapshot?after=0&history_view=presentation",
+    );
+    tokio::pin!(waiting);
+    std::future::poll_fn(|cx| {
+        assert!(waiting.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    shared.stop.send_replace(true);
+    let reply = tokio::time::timeout(Duration::from_secs(1), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply["state"]["session_id"], 7);
+}
+
+#[tokio::test]
+async fn stopping_preserves_an_already_started_large_response() {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    let mut shared = immutable_reader();
+    shared.history[0].payload["large_response"] = json!("x".repeat(8 * 1024 * 1024));
+    let shared = Arc::new(shared);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut client = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (server, _) = listener.accept().await.unwrap();
+    let host = shared.clone();
+    let serving = tokio::spawn(async move { serve(server, Host::Static(host)).await });
+    client.write_all(b"GET /tui/snapshot?history_view=presentation HTTP/1.1\r\nHost: localhost\r\nX-Eden-Token: fixture\r\n\r\n").await.unwrap();
+    let mut client = BufReader::new(client);
+    let mut length = 0;
+    loop {
+        let mut header = String::new();
+        assert!(client.read_line(&mut header).await.unwrap() > 0);
+        if let Some(value) = header.strip_prefix("Content-Length: ") {
+            length = value.trim().parse::<usize>().unwrap();
+        }
+        if header == "\r\n" {
+            break;
+        }
+    }
+    // Receiving the headers proves dispatch/encoding finished and response writing started.
+    shared.stop.send_replace(true);
+    let mut bytes = Vec::new();
+    client.read_to_end(&mut bytes).await.unwrap();
+    assert_eq!(bytes.len(), length);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap()["result"]["history"][0]["payload"]
+            ["large_response"]
+            .as_str()
+            .unwrap()
+            .len(),
+        8 * 1024 * 1024
+    );
+    serving.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn reader_keeps_captured_full_audit_after_the_source_changes() {
+    let mut shared = immutable_reader();
+    let mut records = shared.history.clone();
+    records.push(eden_protocol::coding::Record {
+        schema_version: 2,
+        session_id: 7,
+        sequence: 2,
+        parent_id: Some(1),
+        branch: "main".into(),
+        run_id: 1,
+        kind: "model_request".into(),
+        payload: json!({
+            "input": {
+                "messages": [{
+                    "role": "user",
+                    "content": [{ "type": "text", "text": "captured audit" }],
+                }],
+            },
+            "attempt_id": "fixture",
+        }),
+    });
+    let path = std::env::temp_dir().join(format!(
+        "eden-captured-reader-{}-{}.jsonl",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::write(
+        &path,
+        eden_protocol::history::encode_transaction(&records).unwrap(),
+    )
+    .unwrap();
+    let document = read_document(&path).unwrap();
+    shared.audit = document.audit;
+    shared.history = document.history;
+    shared.history_path = Some(path.clone());
+    std::fs::write(&path, b"changed source after reader opened").unwrap();
+    let projected = dispatch_static(&shared, "GET", "/tui/snapshot?history_view=presentation")
+        .await
+        .unwrap();
+    assert!(projected["history"][1]["payload"].get("input").is_none());
+    let full = dispatch_static(&shared, "GET", "/tui/snapshot")
+        .await
+        .unwrap();
+    assert_eq!(full["history"][1]["payload"], records[1].payload);
+    std::fs::remove_file(path).unwrap();
 }

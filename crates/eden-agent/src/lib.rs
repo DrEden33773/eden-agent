@@ -196,7 +196,7 @@ impl Session {
         }
         let cwd = cwd.to_string_lossy().into_owned();
         let previous = match &options.history {
-            Some(path) if path.exists() => eden_kernel::history::read(path)?,
+            Some(path) if path.exists() => eden_kernel::history::read_preparation(path)?,
             _ => vec![],
         };
         // A composition switch changes packages, not the immutable session cwd.

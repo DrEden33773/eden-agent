@@ -106,7 +106,7 @@ async fn reader(directory: &std::path::Path, name: &str, gated: bool) -> Reader 
                             std::future::pending::<()>().await;
                         }
                         let shutting_down = route == "/shutdown";
-                        let result = if route == "/tui/snapshot" {
+                        let result = if matches!(route, "/snapshot" | "/tui/snapshot") {
                             json!({
                                 "presentation": {
                                     "version": 1,

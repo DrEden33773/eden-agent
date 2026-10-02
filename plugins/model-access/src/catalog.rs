@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::{
     collections::BTreeMap,
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Mutex;
@@ -15,10 +15,13 @@ const BUNDLED: &str = include_str!("../data/pi-models.json");
 const BUNDLED_SOURCE: &str = include_str!("../data/pi-models-source.json");
 const REFRESH_CONCURRENCY: usize = 8;
 fn bundled_generated_at() -> u64 {
-    serde_json::from_str::<Value>(BUNDLED_SOURCE)
-        .ok()
-        .and_then(|value| value["generated_at"].as_u64())
-        .unwrap_or(u64::MAX)
+    static GENERATED: OnceLock<u64> = OnceLock::new();
+    *GENERATED.get_or_init(|| {
+        serde_json::from_str::<Value>(BUNDLED_SOURCE)
+            .ok()
+            .and_then(|value| value["generated_at"].as_u64())
+            .unwrap_or(u64::MAX)
+    })
 }
 fn pi_source(source: &str) -> bool {
     reqwest::Url::parse(source).is_ok_and(|url| {
@@ -194,12 +197,19 @@ pub(crate) fn register(package: Package, value: &Value) -> Result<Package, Fault
             disk,
         }),
     });
-    Ok(
-        package.service(MODEL_CATALOG, move |request: CatalogRequest, cx| {
-            let state = state.clone();
+    let catalog = state.clone();
+    Ok(package
+        .service(MODEL_CATALOG, move |request: CatalogRequest, cx| {
+            let state = catalog.clone();
             async move { state.handle(request, cx).await }
-        }),
-    )
+        })
+        .service(
+            MODEL_CATALOG_VIEW,
+            move |request: CatalogViewRequest, cx| {
+                let state = state.clone();
+                async move { state.view(request, cx).await }
+            },
+        ))
 }
 fn flatten(value: &Value) -> Vec<Value> {
     if value.get("id").and_then(Value::as_str).is_some() {
@@ -321,7 +331,84 @@ enum Persist {
     Default,
     Cache(String),
 }
+type BundledModels = BTreeMap<(String, String), (ModelTarget, String)>;
+fn bundled_models() -> Result<&'static BundledModels, Fault> {
+    static MODELS: OnceLock<Result<BundledModels, Fault>> = OnceLock::new();
+    MODELS
+        .get_or_init(|| {
+            let bundled: BTreeMap<String, Value> =
+                serde_json::from_str(BUNDLED).map_err(|_| fault("invalid bundled catalog"))?;
+            let mut models = BTreeMap::new();
+            for (provider, values) in bundled {
+                // Radius routes must come from the selected gateway and credential account.
+                if provider == "radius" {
+                    continue;
+                }
+                for v in flatten(&values) {
+                    let t = target(
+                        &provider,
+                        &v,
+                        CatalogSource {
+                            kind: "bundled".into(),
+                            location: "pi-ai@0.87.1".into(),
+                            updated_at: None,
+                        },
+                    )?;
+                    models.insert(
+                        (provider.clone(), t.model.clone()),
+                        (t, v["name"].as_str().unwrap_or("").to_owned()),
+                    );
+                }
+            }
+            Ok(models)
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+fn presentation_entries(entries: &[CatalogEntry]) -> Vec<CatalogViewEntry> {
+    entries
+        .iter()
+        .map(|entry| CatalogViewEntry {
+            name: entry.name.clone(),
+            status: entry.status.clone(),
+            target: CatalogViewTarget {
+                provider: entry.target.provider.clone(),
+                model: entry.target.model.clone(),
+                thinking: entry.target.thinking.clone(),
+                limits: CatalogViewLimits {
+                    context_window: entry.target.limits.context_window,
+                },
+                capabilities: CatalogViewCapabilities {
+                    images: entry.target.capabilities.images,
+                },
+            },
+        })
+        .collect()
+}
+
 impl Catalog {
+    async fn view(
+        &self,
+        request: CatalogViewRequest,
+        cx: CallContext,
+    ) -> Result<CatalogViewReply, Fault> {
+        let (reply, diagnostic) = self
+            .handle_read(
+                CatalogRequest::Resolve {
+                    selection: request.selection,
+                },
+                cx,
+                true,
+            )
+            .await?;
+        Ok(CatalogViewReply {
+            models: presentation_entries(&reply.models),
+            effective_target: reply.target,
+            diagnostic,
+        })
+    }
+
     fn apply_provider_override(
         &self,
         target: &mut ModelTarget,
@@ -440,30 +527,7 @@ impl Catalog {
         inner: &Inner,
         scopes: &BTreeMap<String, String>,
     ) -> Result<Vec<CatalogEntry>, Fault> {
-        let bundled: BTreeMap<String, Value> =
-            serde_json::from_str(BUNDLED).map_err(|_| fault("invalid bundled catalog"))?;
-        let mut models = BTreeMap::new();
-        for (provider, values) in bundled {
-            // Radius routes must come from the selected gateway and credential account.
-            if provider == "radius" {
-                continue;
-            }
-            for v in flatten(&values) {
-                let t = target(
-                    &provider,
-                    &v,
-                    CatalogSource {
-                        kind: "bundled".into(),
-                        location: "pi-ai@0.87.1".into(),
-                        updated_at: None,
-                    },
-                )?;
-                models.insert(
-                    (provider.clone(), t.model.clone()),
-                    (t, v["name"].as_str().unwrap_or("").to_owned()),
-                );
-            }
-        }
+        let mut models = bundled_models()?.clone();
         if let Some(cached) = inner.disk.sources.get(&inner.source) {
             for (provider, cache) in cached {
                 if provider == "radius" || !usable_cache(&inner.source, cache) {
@@ -738,10 +802,12 @@ impl Catalog {
                     .unwrap_or_default(),
             )
         };
-        let providers: BTreeMap<String, Value> =
-            serde_json::from_str(BUNDLED).map_err(|_| fault("invalid bundled catalog"))?;
+        let providers: std::collections::BTreeSet<_> = bundled_models()?
+            .keys()
+            .map(|(provider, _)| provider.clone())
+            .collect();
         let providers: Vec<_> = providers
-            .into_keys()
+            .into_iter()
             .filter(|provider| {
                 provider != "radius"
                     && (force
@@ -894,6 +960,18 @@ impl Catalog {
         request: CatalogRequest,
         cx: CallContext,
     ) -> Result<CatalogReply, Fault> {
+        self.handle_read(request, cx, false)
+            .await
+            .map(|(reply, _)| reply)
+    }
+    // A presentation consumer needs the catalog even when resolution is unavailable.
+    // Build it once at one source/account observation; full callers retain their original faults.
+    async fn handle_read(
+        &self,
+        request: CatalogRequest,
+        cx: CallContext,
+        retain_unavailable: bool,
+    ) -> Result<(CatalogReply, Option<String>), Fault> {
         if matches!(
             request,
             CatalogRequest::RefreshInBackground | CatalogRequest::RefreshIfStale
@@ -906,7 +984,7 @@ impl Catalog {
                 let mut active = self.background_job.lock().await;
                 if let Some(id) = *active {
                     if cx.inspect_job(id).await?.terminal.is_none() {
-                        return Ok(self.refresh_reply("running").await);
+                        return Ok((self.refresh_reply("running").await, None));
                     }
                     cx.forget_job(id).await?;
                     *active = None;
@@ -929,7 +1007,7 @@ impl Catalog {
                 )?;
                 status
             };
-            return Ok(self.refresh_reply(&status).await);
+            return Ok((self.refresh_reply(&status).await, None));
         }
         let status = if matches!(request, CatalogRequest::Refresh) {
             let status = self.refresh(Some(&cx)).await?;
@@ -1137,101 +1215,114 @@ impl Catalog {
             CatalogRequest::SetDefault { selection } => Some(selection.clone()),
             _ => None,
         };
-        if selection.is_none()
-            && matches!(request, CatalogRequest::Resolve { .. })
-            && !self.config.legacy
-        {
-            return Err(Fault::new(
-                "ModelUnavailable",
-                "model-access",
-                "no configured model is available; configure an API key and select a model",
-            ));
-        }
-        let target = if let Some(selection) = selection {
-            if selection.thinking.as_deref().is_some_and(|t| {
-                !matches!(
-                    t,
-                    "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
-                )
-            }) {
-                return Err(fault("unsupported thinking level"));
-            }
-            let entry = models.iter().find(|e| {
-                e.target.provider == selection.provider && e.target.model == selection.model
-            });
-            if entry.is_some_and(|e| e.status == "configuration_required") {
-                return Err(fault(
-                    "selected model requires cloud endpoint, project, location or region \
-                     configuration",
-                ));
-            }
-            if entry.is_some_and(|e| e.status == "unavailable_for_account") {
+        let resolved = (|| -> Result<Option<ModelTarget>, Fault> {
+            if selection.is_none()
+                && matches!(request, CatalogRequest::Resolve { .. })
+                && !self.config.legacy
+            {
                 return Err(Fault::new(
                     "ModelUnavailable",
                     "model-access",
-                    "selected model is unavailable for the authenticated account",
+                    "no configured model is available; configure an API key and select a model",
                 ));
             }
-            if entry.is_some_and(|e| e.status == "excluded") {
-                return Err(Fault::new(
-                    "ModelUnavailable",
-                    "model-access",
-                    "selected model is outside the configured model set",
-                ));
-            }
-            let mut target = models
-                .iter()
-                .find(|e| {
+            let target = if let Some(selection) = selection.as_ref() {
+                if selection.thinking.as_deref().is_some_and(|t| {
+                    !matches!(
+                        t,
+                        "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+                    )
+                }) {
+                    return Err(fault("unsupported thinking level"));
+                }
+                let entry = models.iter().find(|e| {
                     e.target.provider == selection.provider && e.target.model == selection.model
-                })
-                .ok_or_else(|| {
-                    Fault::new(
+                });
+                if entry.is_some_and(|e| e.status == "configuration_required") {
+                    return Err(fault(
+                        "selected model requires cloud endpoint, project, location or region \
+                         configuration",
+                    ));
+                }
+                if entry.is_some_and(|e| e.status == "unavailable_for_account") {
+                    return Err(Fault::new(
                         "ModelUnavailable",
                         "model-access",
-                        "selected model is absent from catalog",
-                    )
-                })?
-                .target
-                .clone();
-            if !auth.get(&target.provider).copied().unwrap_or(false) && supported(&target.api) {
-                return Err(Fault::new(
-                    "ModelUnavailable",
-                    "model-access",
-                    "selected model requires authentication",
-                ));
-            }
-            if !supported(&target.api) {
-                return Err(fault("selected model protocol is not implemented"));
-            }
-            validate_source(&target.base_url)?;
-            target.thinking = ThinkingSelection {
-                requested: selection.thinking.clone(),
-                effective: effective_thinking(&target, selection.thinking.as_deref()),
+                        "selected model is unavailable for the authenticated account",
+                    ));
+                }
+                if entry.is_some_and(|e| e.status == "excluded") {
+                    return Err(Fault::new(
+                        "ModelUnavailable",
+                        "model-access",
+                        "selected model is outside the configured model set",
+                    ));
+                }
+                let mut target = models
+                    .iter()
+                    .find(|e| {
+                        e.target.provider == selection.provider && e.target.model == selection.model
+                    })
+                    .ok_or_else(|| {
+                        Fault::new(
+                            "ModelUnavailable",
+                            "model-access",
+                            "selected model is absent from catalog",
+                        )
+                    })?
+                    .target
+                    .clone();
+                if !auth.get(&target.provider).copied().unwrap_or(false) && supported(&target.api) {
+                    return Err(Fault::new(
+                        "ModelUnavailable",
+                        "model-access",
+                        "selected model requires authentication",
+                    ));
+                }
+                if !supported(&target.api) {
+                    return Err(fault("selected model protocol is not implemented"));
+                }
+                validate_source(&target.base_url)?;
+                target.thinking = ThinkingSelection {
+                    requested: selection.thinking.clone(),
+                    effective: effective_thinking(&target, selection.thinking.as_deref()),
+                };
+                Some(target)
+            } else {
+                None
             };
-            if matches!(request, CatalogRequest::SetDefault { .. }) {
-                inner.disk.default = Some(selection);
-                self.persist(&mut inner, Persist::Default).await?;
+            Ok(target)
+        })();
+        let (target, diagnostic) = match resolved {
+            Ok(target) => (target, None),
+            Err(error) if retain_unavailable && error.code == "ModelUnavailable" => {
+                (None, Some(error.to_string()))
             }
-            Some(target)
-        } else {
-            None
+            Err(error) => return Err(error),
         };
+        if matches!(request, CatalogRequest::SetDefault { .. }) {
+            inner.disk.default = selection;
+            self.persist(&mut inner, Persist::Default).await?;
+        }
         let mut providers: Vec<String> = models.iter().map(|e| e.target.provider.clone()).collect();
         providers.push("radius".into());
         providers.sort();
         providers.dedup();
-        Ok(CatalogReply {
-            selection_source,
-            providers,
-            models,
-            target,
-            source: CatalogSource {
-                kind: "catalog".into(),
-                location: inner.source.clone(),
-                updated_at: None,
+        Ok((
+            CatalogReply {
+                selection_source,
+                providers,
+                models,
+                target,
+                source: CatalogSource {
+                    kind: "catalog".into(),
+                    location: inner.source.clone(),
+                    updated_at: None,
+                },
+                status,
             },
-            status,
-        })
+            diagnostic,
+        ))
     }
 }
 #[cfg(test)]
@@ -1433,6 +1524,44 @@ mod tests {
             .unwrap();
         assert_eq!(a.disk.default.as_ref().unwrap().provider, "deepseek");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn bundled_cache_does_not_share_mutable_configuration_or_source_overlays() {
+        let mut first = fixture("http://first".into(), None);
+        first.config.providers.insert(
+            "deepseek".into(),
+            ProviderOverride {
+                base_url: Some("http://first-route".into()),
+                ..Default::default()
+            },
+        );
+        let second = fixture("http://second".into(), None);
+        let inner = Inner {
+            source: "http://first".into(),
+            generation: 0,
+            disk: Disk::default(),
+        };
+        let changed = first.entries(&inner).unwrap();
+        let unchanged = second.entries(&inner).unwrap();
+        assert!(
+            changed
+                .iter()
+                .filter(|entry| entry.target.provider == "deepseek")
+                .all(|entry| entry.target.base_url == "http://first-route")
+        );
+        assert!(
+            unchanged
+                .iter()
+                .filter(|entry| entry.target.provider == "deepseek")
+                .all(|entry| entry.target.base_url != "http://first-route")
+        );
+        assert!(
+            bundled_models()
+                .unwrap()
+                .values()
+                .filter(|(target, _)| target.provider == "deepseek")
+                .all(|(target, _)| target.base_url != "http://first-route")
+        );
     }
     #[test]
     fn allowed_model_set_marks_other_models_excluded() {

@@ -65,3 +65,7 @@ Version `eden-native-0.10.0` adds the selected compaction policy, conditional ch
 ## Management presentation pairing
 
 Version `eden-native-0.13.0` adds shared context edits, atomic rebuild branches, model input versions and frozen session-reference payloads. See [shared context](context-editing.md) for the new services and storage field. Rebuild the host, native authors and manifests together; the C ABI table remains version 1. Old binaries are rejected before initialization by the existing pairing check. Legacy configuration merge patches and saved chat presentation remain readable. The independent host runtime is a Rust crate, not a replaceable native plugin.
+
+## Model presentation reads
+
+`eden.model-catalog.v1` continues to return complete catalog/resolution replies for SDK and replacement authors. A provider may also offer `eden.model-catalog-view.v1` using `CatalogViewRequest`/`CatalogViewReply` for a terminal consumer: entry targets carry provider/model, thinking, context window and image capability; the effective target carries complete routing metadata. The host negotiates it only with the same live instance and scope, without wrappers, and pins that generation for the request. An absent or independently bound companion uses the original catalog path. The default implementation rereads source, configuration/account overlays and credentials for each view; only immutable bundled base targets are shared.

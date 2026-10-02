@@ -133,6 +133,7 @@ def install(
                 "model-access",
                 [
                     "eden.model-catalog.v1",
+                    "eden.model-catalog-view.v1",
                     "eden.model-manager.v1",
                     "eden.credential-source.v1",
                     "eden.auth.v1",

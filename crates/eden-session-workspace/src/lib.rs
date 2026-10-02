@@ -106,7 +106,7 @@ impl Adapter {
             "session": identity,
         }));
         let snapshot = HostClient::for_session(&endpoint, expected)
-            .snapshot()
+            .metadata_snapshot()
             .await?;
         trace(json!({
             "direction": "phase",
@@ -184,7 +184,7 @@ impl Adapter {
     async fn complete(&self, run: u64) -> Result<Value, Fault> {
         self.client.wait(run).await?.into_result()
     }
-    async fn project(&self, snapshot: Snapshot, replay: bool) {
+    async fn project(&self, snapshot: Snapshot, replay: bool) -> Option<Value> {
         let _timing = eden_protocol::latency::Span::new(
             "snapshot.consume",
             self.session,
@@ -213,7 +213,7 @@ impl Adapter {
         if replay {
             view.projection = Projection::default();
         } else if self.load_pending.load(Ordering::Acquire) {
-            return;
+            return None;
         }
         let mut model_changed = false;
         for mut update in view.projection.apply(&snapshot, replay) {
@@ -259,7 +259,7 @@ impl Adapter {
                 None
             };
             if self.view.lock().await.context_revision != Some(context_revision) {
-                return;
+                return None;
             }
             self.emit(
                 crate::ViewEventKind::Context,
@@ -274,10 +274,15 @@ impl Adapter {
                 }),
             );
         }
-        if let Some(resources) = resources {
+        if !replay && let Some(resources) = resources {
             self.publish_resources(&resources.snapshot, false);
         }
-        if model_changed && let Ok(models) = self.model_state().await {
+        let models = if model_changed {
+            self.model_state().await.ok()
+        } else {
+            None
+        };
+        if let Some(models) = &models {
             self.emit(
                 crate::ViewEventKind::Models,
                 json!({ "sessionId": self.identity, "models": models }),
@@ -291,6 +296,7 @@ impl Adapter {
                 "session": self.identity,
             }));
         }
+        models
     }
     async fn follow(self: Arc<Self>) {
         let mut disconnected = false;
@@ -446,8 +452,9 @@ impl Adapter {
                     "session": self.identity,
                 }));
                 let running = self.adopt_run(&snapshot).await;
-                self.project(snapshot, true).await;
-                self.publish_resources(&self.resource_inventory().await?, true);
+                let resources = self.resource_inventory().await?;
+                let projected_models = self.project(snapshot, true).await;
+                self.publish_resources(&resources, true);
                 let empty = !self
                     .view
                     .lock()
@@ -484,7 +491,10 @@ impl Adapter {
                         true,
                     );
                 }
-                let models = self.model_state().await?;
+                let models = match projected_models {
+                    Some(models) => models,
+                    None => self.model_state().await?,
+                };
                 if let Some(error) = models["_meta"]["edenDiagnostic"].as_str() {
                     self.update(
                         json!({

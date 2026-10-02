@@ -839,7 +839,7 @@ impl Kernel {
         self.router.graph.binding("", contract).is_ok()
     }
     /// Preserve legacy role selection and wrappers when an optional consumer view
-    /// is absent, replaced, or bound to a different store instance.
+    /// is absent, replaced, wrapped, or bound to a different provider instance.
     pub fn has_companion(&self, contract: &str, companion: &str) -> bool {
         self.router.has_companion("", contract, companion)
     }

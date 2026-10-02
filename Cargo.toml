@@ -56,3 +56,28 @@ debug = 1
 
 [profile.test]
 debug = 1
+
+# Shared JSON scanning and immutable catalog preparation dominate small-session startup.
+# Keep the rest of the dependency graph at the ordinary development settings.
+[profile.dev.package.serde_json]
+opt-level = 3
+
+[profile.dev.package.eden-protocol]
+opt-level = 3
+
+[profile.dev.package.eden-model-access]
+opt-level = 2
+
+# Prepare bindings and host replies efficiently without optimizing the imported frontend graph.
+[profile.dev.package.eden-agent]
+opt-level = 1
+
+[profile.dev.package.eden-cli]
+opt-level = 1
+
+# Catalog replies cross the native boundary before bootstrap can consume their metadata.
+[profile.dev.package.eden-plugin-sdk]
+opt-level = 1
+
+[profile.dev.package.eden-kernel]
+opt-level = 1

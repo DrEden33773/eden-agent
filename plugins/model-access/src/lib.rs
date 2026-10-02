@@ -185,6 +185,7 @@ fn descriptor() -> Descriptor {
         version: "0.1.0".into(),
         provides: vec![
             eden_protocol::models::MODEL_CATALOG.into(),
+            eden_protocol::models::MODEL_CATALOG_VIEW.into(),
             eden_protocol::models::MODEL_MANAGER.into(),
             eden_protocol::models::CREDENTIAL_SOURCE.into(),
             eden_protocol::models::AUTH.into(),

@@ -70,10 +70,19 @@ impl Adapter {
                     },
             }));
         }
-        let catalog = self.post("/models/list", json!({})).await?;
-        let current = self.current_model_state().await?;
-        let target = &current["effective_target"];
-        let models: Vec<_> = catalog["models"]
+        let metadata = match self.post("/tui/models", json!({})).await {
+            Ok(view) => view,
+            Err(error) if error.code == "Unsupported" => {
+                let mut catalog = self.post("/models/list", json!({})).await?;
+                let current = self.current_model_state().await?;
+                catalog["effective_target"] = current["effective_target"].clone();
+                catalog["diagnostic"] = current["diagnostic"].clone();
+                catalog
+            }
+            Err(error) => return Err(error),
+        };
+        let target = &metadata["effective_target"];
+        let models: Vec<_> = metadata["models"]
             .as_array()
             .into_iter()
             .flatten()
@@ -86,7 +95,7 @@ impl Adapter {
                     format!("{}/{}", text(&target["provider"]), text(&target["model"]))
                 },
             "availableModels": models,
-            "_meta": { "edenDiagnostic": current["diagnostic"] },
+            "_meta": { "edenDiagnostic": metadata["diagnostic"] },
         }))
     }
 
@@ -139,5 +148,44 @@ mod tests {
         assert_eq!(model["_meta"]["reasoningEfforts"][0]["value"], "none");
         assert_eq!(model["_meta"]["reasoningEffort"], "minimal");
         assert_eq!(model["_meta"]["edenThinking"]["effective"], "high");
+    }
+}
+
+#[cfg(test)]
+mod presentation_tests {
+    use super::*;
+    #[test]
+    fn catalog_view_preserves_every_field_consumed_by_model_info() {
+        let current = json!({
+            "provider": "fixture",
+            "model": "current",
+            "thinking": { "requested": "high", "effective": "medium" },
+        });
+        let entry = json!({
+            "name": "Fixture",
+            "status": "configured",
+            "target": {
+                "provider": "fixture",
+                "model": "current",
+                "thinking": { "requested": "off", "effective": "off" },
+                "limits": { "context_window": 64000, "max_output_tokens": 4000 },
+                "capabilities": { "images": true, "reasoning": true },
+                "base_url": "http://fixture",
+                "api": "fixture",
+                "pricing": { "input": 1.0 },
+            },
+        });
+        let compact = json!({
+            "name": entry["name"],
+            "status": entry["status"],
+            "target": {
+                "provider": entry["target"]["provider"],
+                "model": entry["target"]["model"],
+                "thinking": entry["target"]["thinking"],
+                "limits": { "context_window": entry["target"]["limits"]["context_window"] },
+                "capabilities": { "images": entry["target"]["capabilities"]["images"] },
+            },
+        });
+        assert_eq!(model_info(&entry, &current), model_info(&compact, &current));
     }
 }

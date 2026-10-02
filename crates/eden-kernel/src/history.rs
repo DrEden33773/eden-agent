@@ -12,6 +12,27 @@ pub fn read(path: &Path) -> Result<Vec<Record>, Fault> {
     decode_records(&bytes)
 }
 
+/// Validate binding/configuration preflight without materializing model audit input.
+/// Execution and independent storage authors still receive their complete open/read contract.
+pub fn read_preparation(path: &Path) -> Result<Vec<Record>, Fault> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| Fault::new("PersistenceFailure", "public-history", e.to_string()))?;
+    let scan = eden_protocol::history_read::read_view(
+        file,
+        eden_protocol::history_read::ReadView::Preparation,
+        &|| false,
+    )?
+    .ok_or_else(|| Fault::new("Cancelled", "public-history", "inspection cancelled"))?;
+    if let Some(diagnostic) = scan.diagnostic {
+        return Err(Fault::new(
+            "PersistenceFailure",
+            "public-history",
+            diagnostic,
+        ));
+    }
+    Ok(scan.records)
+}
+
 /// Inspect the readable committed prefix; damage is reported without modifying it.
 pub fn inspect(path: &Path) -> Result<eden_protocol::history::HistoryScan, Fault> {
     let bytes = std::fs::read(path)

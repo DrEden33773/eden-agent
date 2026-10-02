@@ -48,6 +48,37 @@ fn saved_selection(records: &[c::Record]) -> Result<Option<m::ModelSelection>, F
         .transpose()
 }
 impl Session {
+    /// A UI read uses the selected catalog's companion; wrappers and replacements retain full calls.
+    pub async fn model_catalog_view(&self) -> Result<m::CatalogViewReply, Fault> {
+        let request = m::CatalogViewRequest {
+            selection: self.model_selection().await?,
+        };
+        // Pin the generation for both negotiation and invocation; a concurrent replacement
+        // must not route this request to a companion of an older or different catalog.
+        let kernel = self.0.kernel.get()?;
+        if !kernel.has_companion(m::MODEL_CATALOG, m::MODEL_CATALOG_VIEW) {
+            return Err(Fault::new(
+                "Unsupported",
+                "model-view",
+                "selected catalog has no scoped presentation view",
+            ));
+        }
+        let value = kernel
+            .invoke(
+                Request {
+                    execution: None,
+                    session_id: self.id(),
+                    run_id: 0,
+                    contract: m::MODEL_CATALOG_VIEW.into(),
+                    payload: json!(request),
+                },
+                Cancellation::default(),
+            )
+            .await
+            .into_result()?;
+        serde_json::from_value(value)
+            .map_err(|error| Fault::new("InvalidReply", "model-view", error.to_string()))
+    }
     /// Query the selected manager without changing session selection or replaying mutations.
     pub async fn managed_models(&self) -> Result<m::ManagerReply, Fault> {
         self.service(0, m::MODEL_MANAGER, &m::ManagerRequest::List)
@@ -553,5 +584,135 @@ mod tests {
             ),
         ];
         assert_eq!(saved_selection(&records).unwrap().unwrap().provider, "a");
+    }
+    #[tokio::test]
+    async fn model_view_does_not_bypass_replacements_or_wrappers() {
+        use crate::embedded::Embedded;
+        use eden_plugin_sdk::Package;
+        for (wrapped, foreign) in [(false, false), (true, false), (false, true)] {
+            let root = std::env::temp_dir().join(format!(
+                "eden-model-view-{}-{wrapped}-{foreign}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            let package = |name| {
+                Package::new(name)
+                    .service(m::MODEL_CATALOG, |_: m::CatalogRequest, _| async {
+                        Ok(m::CatalogReply {
+                            models: vec![m::CatalogEntry {
+                                target: m::ModelTarget {
+                                    base_url: "http://complete-route".into(),
+                                    ..Default::default()
+                                },
+                                name: "fixture".into(),
+                                status: "configured".into(),
+                            }],
+                            selection_source: None,
+                            providers: vec![],
+                            target: None,
+                            source: Default::default(),
+                            status: "fixture".into(),
+                        })
+                    })
+                    .service(m::MODEL_CATALOG_VIEW, |_: m::CatalogViewRequest, _| async {
+                        Ok(m::CatalogViewReply {
+                            diagnostic: Some("negotiated".into()),
+                            ..Default::default()
+                        })
+                    })
+            };
+            let wrapper = Package::new("wrapper").service(
+                m::MODEL_CATALOG,
+                |request: m::CatalogRequest, cx| async move {
+                    cx.delegate::<_, m::CatalogReply>(&request).await
+                },
+            );
+            let base = Package::new("base")
+                .service(
+                    eden_protocol::AGENT_LOOP,
+                    |input: eden_protocol::RunInput, _| async move { Ok(input.prompt) },
+                )
+                .service(eden_protocol::CONTEXT, |input: Value, _| async move {
+                    Ok(input)
+                })
+                .service(eden_protocol::PROVIDER, |input: Value, _| async move {
+                    Ok(input)
+                })
+                .service(
+                    eden_protocol::TOOL,
+                    |input: Value, _| async move { Ok(input) },
+                );
+            let composition = serde_json::from_value(json!({
+                "packages": [],
+                "roles": {},
+                "runtime": {
+                    "scopes": {
+                        "": {
+                            "bindings": {
+                                (m::MODEL_CATALOG): {
+                                    "tail": "catalog",
+                                    "wrappers": if wrapped {
+                                            vec!["wrapper"]
+                                        } else {
+                                            vec![]
+                                        },
+                                },
+                                (m::MODEL_CATALOG_VIEW): {
+                                    "tail": if foreign {
+                                            "other"
+                                        } else {
+                                            "catalog"
+                                        },
+                                },
+                            },
+                        },
+                    },
+                },
+            }))
+            .unwrap();
+            let session = Embedded::new(composition, root.clone())
+                .package(base, "base-v1")
+                .unwrap()
+                .package(package("catalog"), "catalog-v1")
+                .unwrap()
+                .package(package("other"), "other-v1")
+                .unwrap()
+                .package(wrapper, "wrapper-v1")
+                .unwrap()
+                .open(
+                    SessionOptions {
+                        cwd: root.clone(),
+                        history: None,
+                    },
+                    WorkspaceOptions {
+                        global_dir: root.join("global"),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            if !wrapped && !foreign {
+                assert_eq!(
+                    session
+                        .model_catalog_view()
+                        .await
+                        .unwrap()
+                        .diagnostic
+                        .as_deref(),
+                    Some("negotiated")
+                );
+            } else {
+                assert_eq!(
+                    session.model_catalog_view().await.unwrap_err().code,
+                    "Unsupported"
+                );
+            }
+            assert_eq!(
+                session.models().await.unwrap().models[0].target.base_url,
+                "http://complete-route"
+            );
+            session.shutdown().await.unwrap();
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 }

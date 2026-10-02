@@ -236,6 +236,10 @@ impl HostClient {
             .await?;
         Ok(())
     }
+    /// Verify attachment identity and state before replay, without transferring committed audit history.
+    pub async fn metadata_snapshot(&self) -> Result<Snapshot, Fault> {
+        self.read_snapshot("/snapshot").await
+    }
     /// Initial authoritative read, also suitable for reconnecting after an expired event cursor.
     pub async fn snapshot(&self) -> Result<Snapshot, Fault> {
         self.read_snapshot("/tui/snapshot?history_view=presentation")
@@ -283,6 +287,10 @@ impl HostClient {
         previous: Option<Snapshot>,
     ) -> Result<Snapshot, Fault> {
         let mut raw = self.request("GET", route, None).await?;
+        if route == "/snapshot" {
+            raw["history"] = serde_json::json!([]);
+            raw["events"] = serde_json::json!([]);
+        }
         let mut timing = eden_protocol::latency::Span::new(
             "snapshot.decode",
             self.session_id.unwrap_or_default(),

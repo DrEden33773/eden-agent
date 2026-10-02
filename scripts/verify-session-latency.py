@@ -387,6 +387,9 @@ def frontend(installation, output, mib, active_exit, shape, round_count):
                 terminal,
                 seconds=180,
             )
+            assert completion["error"] is None, completion
+            assert len(fixture.provider.requests) == request_count + 1
+            ready = frontend_ready(trace, terminal, offset, completion)
             frames = prompt_frames(trace, offset)
             state = next((row for row in frames if row.get("prompt")), None)
             assert state is not None, "Missing written prompt identity"
@@ -414,10 +417,11 @@ def frontend(installation, output, mib, active_exit, shape, round_count):
                 and row.get("method") == "session/update"
                 and row.get("update") == "agent_message_chunk"
                 and row.get("replay") is False
+                and row.get("session") == requests[0]["session"]
+                and row.get("run") == completion["run"]
             ]
-            assert completion["error"] is None, completion
-            assert len(fixture.provider.requests) == request_count + 1
-            ready = frontend_ready(trace, terminal, offset, completion)
+            assert visible, "No written response for the completed session/run"
+            assert "STREAM_FINISHED" in terminal.display, terminal.display
             rounds.append(
                 {
                     "prompt": state["prompt"],
